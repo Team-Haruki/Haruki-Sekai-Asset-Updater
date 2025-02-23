@@ -85,6 +85,7 @@ class SekaiAssetUpdater:
 
     async def _load_downloaded_assets(self) -> Optional[Dict]:
         if not self.downloaded_assets_file.exists():
+            self.downloaded_assets_file.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(self.downloaded_assets_file, "w") as f:
                 await f.write('{}')
             return {}
@@ -98,7 +99,6 @@ class SekaiAssetUpdater:
     @retry(stop=stop_after_attempt(4), wait=wait_fixed(1))
     async def _request(self, url: str, headers: Dict, params: Optional[Dict] = None) -> Optional[bytes]:
         """Updater general request function"""
-        print(url)
         for proxy in self.proxies:
             try:
                 async with self.session.get(url=url, headers=headers, params=params, proxy=proxy) as response:
@@ -106,7 +106,7 @@ class SekaiAssetUpdater:
                         return await response.read()
                     else:
                         logger.warning(
-                            f"{self.server.value.upper()} server updater request failed with status  {response.status}")
+                            f"{self.server.value.upper()} server updater request failed with status {response.status}")
                         return None
             except ClientProxyConnectionError:
                 logger.warning(f"Failed to connect proxy {proxy}, switching proxy and retrying...")
@@ -142,6 +142,7 @@ class SekaiAssetUpdater:
                                                              asset_version=self.asset_version)
             self.asset_url = self.asset_url.format(env=profile, hash=get_environment(profile),
                                                    asset_version=self.asset_version, asset_hash=self.asset_hash)
+
         elif self.server == SekaiServerRegion.EN:
             self.asset_info_url = self.asset_info_url.format(asset_version=self.asset_version)
             self.asset_url = self.asset_url.format(asset_version=self.asset_version, asset_hash=self.asset_hash)
@@ -155,7 +156,6 @@ class SekaiAssetUpdater:
         Tuple[str, str]]:
         async with semaphore:
             url = self.asset_url + asset_path + await self.get_time_arg()
-            print(url)
             headers = await self._get_headers(headers=self.headers, url=url)
             logger.info(f'{self.server.value.upper()} server updater downloading asset {asset_path}...')
             data = await self._request(url=url, headers=headers)

@@ -2,6 +2,7 @@ import os
 import acb
 import ffmpeg
 import traceback
+import subprocess
 from io import BytesIO
 from pathlib import Path
 from PyCriCodecs import HCA
@@ -35,7 +36,8 @@ def extract_acb(file_path: Union[Path, str], binary_data: Optional[bytes] = None
                     wav_file.write(wav_data)
 
                 # Convert to MP3 using ffmpeg
-                ffmpeg.input(wav_temp_path).output(save_file_path, codec='libmp3lame').run()
+                ffmpeg.input(wav_temp_path).output(save_file_path, codec='libmp3lame').run(stdout=subprocess.PIPE,
+                                                                                           stderr=subprocess.PIPE)
 
                 # Remove temporary WAV and HCA files
                 os.remove(wav_temp_path)
