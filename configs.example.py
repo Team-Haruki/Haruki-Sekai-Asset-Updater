@@ -3,7 +3,8 @@ from pathlib import Path
 from Modules.SekaiAssetUpdater.model import SekaiServerRegion, SekaiServerInfo
 
 HOST = '0.0.0.0'
-PORT = 22344
+PORT = 12345
+AUTHORIZATION = None # Fill this if you need
 WORK_DIR = Path(__file__).parent # Configure it if you need
 PROXIES = ['http://127.0.0.1:7890']  # Configure proxies here
 

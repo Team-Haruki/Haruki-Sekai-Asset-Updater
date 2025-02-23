@@ -4,7 +4,7 @@ from quart import Quart, jsonify, request, Response
 
 from Modules.SekaiAssetUpdater.model import SekaiServerRegion
 from Modules.SekaiAssetUpdater.updater import SekaiAssetUpdater
-from configs import PROXIES, ASSET_SAVE_DIRS, SEKAI_SERVERS, STARTAPP_PREFIXES, ONDEMAND_PREFIXES
+from configs import PROXIES, ASSET_SAVE_DIRS, SEKAI_SERVERS, STARTAPP_PREFIXES, ONDEMAND_PREFIXES, AUTHORIZATION
 
 app = Quart(__name__)
 lock = asyncio.Lock()
@@ -28,12 +28,15 @@ async def run_updater(server: SekaiServerRegion, data: Dict) -> None:
 
 @app.route('/update_asset', methods=['POST'])
 async def update_asset() -> Tuple[Response, int]:
-    data = await request.get_json()
-    server = SekaiServerRegion(data['server'])
-    data['server'] = server
+    if request.headers.get('Authorization') == f'Bearer {AUTHORIZATION}':
+        data = await request.get_json()
+        server = SekaiServerRegion(data['server'])
+        data['server'] = server
 
-    if not lock.locked():
-        asyncio.create_task(run_updater(server, data))
-        return jsonify({"message": "Asset updater start running"}), 200
+        if not lock.locked():
+            asyncio.create_task(run_updater(server, data))
+            return jsonify({"message": "Asset updater start running"}), 200
+        else:
+            return jsonify({"message": "Asset updater is running"}), 409
     else:
-        return jsonify({"message": "Asset updater is running"}), 409
+        return jsonify({"message": "Invalid authorization header"}), 401
