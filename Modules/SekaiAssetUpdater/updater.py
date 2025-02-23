@@ -46,6 +46,7 @@ class SekaiAssetUpdater:
         # Cryptor configuration
         self.cryptor = SekaiCryptor(server_info.aes_key, server_info.aes_iv)
         # Others configuration
+        self.unity_version = server_info.unity_version
         self.save_dir = Path(save_dir)
         self.downloaded_assets_file = self.save_dir / 'downloaded_assets.json'
         self.proxies = proxies if proxies is not None else ['']
@@ -162,9 +163,9 @@ class SekaiAssetUpdater:
             if data:
                 logger.info(f'{self.server.value.upper()} server updater downloaded asset {asset_path} successfully.')
                 data = await deobfuscate(data)
+                len(data)
                 await asyncio.to_thread(unpack_asset, asset_path=asset_path, save_dir=self.save_dir, binary_data=data,
-                                        fallback_unity_version='2022.3.21f1' if self.server == SekaiServerRegion.JP
-                                        else '2020.3.32f1')
+                                        fallback_unity_version=self.unity_version)
             else:
                 logger.info(f'{self.server.value.upper()} server updater failed to download asset {asset_path}.')
                 return None
@@ -204,7 +205,7 @@ class SekaiAssetUpdater:
                     if self.server in [SekaiServerRegion.JP, SekaiServerRegion.EN]:
                         _to_download_list[_bundle] = _bundle_info.get('hash')
                     else:
-                        key = f'{_bundle_info.get('downloadPath')}/{_bundle}'
+                        key = f'{_bundle_info.get("downloadPath")}/{_bundle}'
                         _to_download_list[key] = _bundle_info.get('hash')
                         _to_download_bundle_mapping[key] = _bundle
 

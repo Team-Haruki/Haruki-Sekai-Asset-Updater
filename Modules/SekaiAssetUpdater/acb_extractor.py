@@ -1,12 +1,11 @@
 import os
 import acb
-import ffmpeg
 import traceback
-import subprocess
 from io import BytesIO
 from pathlib import Path
 from PyCriCodecs import HCA
 from typing import Union, Optional
+from pydub import AudioSegment
 
 
 def extract_acb(file_path: Union[Path, str], binary_data: Optional[bytes] = None) -> bool:
@@ -30,14 +29,14 @@ def extract_acb(file_path: Union[Path, str], binary_data: Optional[bytes] = None
                 hca_decoder = HCA(os.path.join(_save_dir, hca_file), key=88888888)
                 wav_data = hca_decoder.decode()
 
-                # Convert WAV (from decoded HCA) to MP3 using ffmpeg
+                # Convert WAV (from decoded HCA) to temporary file using BytesIO
                 wav_temp_path = os.path.join(_save_dir, os.path.splitext(hca_file)[0] + '.wav')
                 with open(wav_temp_path, 'wb') as wav_file:
                     wav_file.write(wav_data)
 
-                # Convert to MP3 using ffmpeg
-                ffmpeg.input(wav_temp_path).output(save_file_path, codec='libmp3lame').run(stdout=subprocess.PIPE,
-                                                                                           stderr=subprocess.PIPE)
+                # Convert WAV to MP3 using pydub
+                audio = AudioSegment.from_wav(wav_temp_path)
+                audio.export(save_file_path, format="mp3")  # Export as MP3
 
                 # Remove temporary WAV and HCA files
                 os.remove(wav_temp_path)

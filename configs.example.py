@@ -25,7 +25,8 @@ SEKAI_SERVERS = {
         require_cookies=True,
         headers={},
         aes_key=b'',
-        aes_iv=b''
+        aes_iv=b'',
+        unity_version='2022.3.21f1'
     ),
     SekaiServerRegion.EN: SekaiServerInfo(
         server=SekaiServerRegion.EN.value,
@@ -33,7 +34,8 @@ SEKAI_SERVERS = {
         asset_url='',
         headers={},
         aes_key=b'',
-        aes_iv=b''
+        aes_iv=b'',
+        unity_version='2022.3.52f1'
     ),
     SekaiServerRegion.TW: SekaiServerInfo(
         server=SekaiServerRegion.TW.value,
