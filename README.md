@@ -9,13 +9,14 @@ A game asset extractor with HTTP API for Project Sekai
 + Run it with command  
 `python main.py `
 + For test, you can use the following example and try to start running updater:  
-`POST http://127.0.0.1:12345/update_asset  
-json example:  
+```
+POST http://127.0.0.1:12345/update_asset  
 {  
     "server": "jp",  
     "assetVersion": "5.1.0.60",  
     "assetHash": "74e0f354-81b4-32aa-1d45-a7cec042ea43"  
-}`
+}
+```
 
 ## License
 
