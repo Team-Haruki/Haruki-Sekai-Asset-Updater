@@ -66,7 +66,21 @@ SEKAI_SERVERS = {
         aes_iv=b''
     )
 }
-
+STARTAPP_PREFIXES = {
+    SekaiServerRegion.JP: (
+    'bonds_honor', 'honor', 'thumbnail', 'character', 'music', 'rank_live', 'stamp', 'home/banner'),
+    SekaiServerRegion.TW: ('bonds_honor', 'honor', 'rank_live'),
+    SekaiServerRegion.KR: ('bonds_honor', 'honor', 'rank_live'),
+    SekaiServerRegion.EN: ('bonds_honor', 'honor', 'rank_live'),
+    SekaiServerRegion.CN: ('bonds_honor', 'honor', 'rank_live'),
+}
+ONDEMAND_PREFIXES = {
+    SekaiServerRegion.JP: ('event', 'gacha', 'music', 'mysekai'),
+    SekaiServerRegion.TW: (),
+    SekaiServerRegion.KR: (),
+    SekaiServerRegion.EN: (),
+    SekaiServerRegion.CN: (),
+}
 # Logger configuration
 LOG_FORMAT = '[%(asctime)s][%(levelname)s][%(name)s] %(message)s'
 FIELD_STYLE = {
