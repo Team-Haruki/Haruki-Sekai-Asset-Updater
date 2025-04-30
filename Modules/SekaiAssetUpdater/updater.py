@@ -140,7 +140,8 @@ class SekaiAssetUpdater:
         if self.server == SekaiServerRegion.JP:
             profile = 'production'
             self.asset_info_url = self.asset_info_url.format(env=profile, hash=get_environment(profile),
-                                                             asset_version=self.asset_version)
+                                                             asset_version=self.asset_version,
+                                                             asset_hash=self.asset_hash)
             self.asset_url = self.asset_url.format(env=profile, hash=get_environment(profile),
                                                    asset_version=self.asset_version, asset_hash=self.asset_hash)
 

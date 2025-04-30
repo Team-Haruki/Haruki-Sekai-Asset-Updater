@@ -4,8 +4,8 @@ from Modules.SekaiAssetUpdater.model import SekaiServerRegion, SekaiServerInfo
 
 HOST = '0.0.0.0'
 PORT = 12345
-AUTHORIZATION = None # Fill this if you need
-WORK_DIR = Path(__file__).parent # Configure it if you need
+AUTHORIZATION = None  # Fill this if you need
+WORK_DIR = Path(__file__).parent  # Configure it if you need
 PROXIES = ['http://127.0.0.1:7890']  # Configure proxies here
 
 ASSET_SAVE_DIRS = {
@@ -25,8 +25,7 @@ SEKAI_SERVERS = {
         require_cookies=True,
         headers={},
         aes_key=b'',
-        aes_iv=b'',
-        unity_version='2022.3.21f1'
+        aes_iv=b''
     ),
     SekaiServerRegion.EN: SekaiServerInfo(
         server=SekaiServerRegion.EN.value,
@@ -63,12 +62,13 @@ SEKAI_SERVERS = {
         asset_url='',
         headers={},
         aes_key=b'',
-        aes_iv=b''
+        aes_iv=b'',
+        unity_version='2020.3.32f1'
     )
 }
 STARTAPP_PREFIXES = {
     SekaiServerRegion.JP: (
-    'bonds_honor', 'honor', 'thumbnail', 'character', 'music', 'rank_live', 'stamp', 'home/banner'),
+        'bonds_honor', 'honor', 'thumbnail', 'character', 'music', 'rank_live', 'stamp', 'home/banner'),
     SekaiServerRegion.TW: ('bonds_honor', 'honor', 'rank_live'),
     SekaiServerRegion.KR: ('bonds_honor', 'honor', 'rank_live'),
     SekaiServerRegion.EN: ('bonds_honor', 'honor', 'rank_live'),

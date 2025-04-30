@@ -14,7 +14,7 @@ class SekaiServerInfo(BaseModel):
     enabled: Optional[bool] = True
     aes_key: Optional[bytes] = None
     aes_iv: Optional[bytes] = None
-    unity_version: Optional[str] = '2020.3.32f1'
+    unity_version: Optional[str] = '2022.3.21f1'
 
 
 class SekaiServerRegion(Enum):
