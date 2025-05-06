@@ -3,11 +3,13 @@
 A game asset extractor with HTTP API for Project Sekai
 
 ## How to use
+
++ Install [uv](https://github.com/astral-sh/uv) at first
 + Install dependencies by following command:  
-`pip install -r requirements.txt`
+`uv sync`
 + Copy configs.example.py as a new file configs.py, then configure it.  
 + Run it with command  
-`python main.py `
+`uv run python main.py`
 + For test, you can use the following example and try to start running updater:  
 ```
 POST http://127.0.0.1:12345/update_asset  
