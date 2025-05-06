@@ -3,6 +3,12 @@ revision = 2
 requires-python = ">=3.11"
 
 [[package]]
+name = "acb-py"
+version = "1.2.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/14/8925efbec812dbcd288729ce8f900e8d8422bc45682991f2d126b20362e5/acb-py-1.2.4.tar.gz", hash = "sha256:9e942c1bdd762cfe43b34317ce6523a0237c12d9f954b66486c72a0fcbe384b9", size = 15041, upload-time = "2022-11-19T05:34:36.974Z" }
+
+[[package]]
 name = "aiofiles"
 version = "24.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -461,12 +467,14 @@ name = "haruki-sekai-asset-updater"
 version = "2.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "acb-py" },
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "coloredlogs" },
     { name = "cryptography" },
     { name = "hypercorn" },
     { name = "msgpack" },
+    { name = "pycricodecs" },
     { name = "pydantic" },
     { name = "pydub" },
     { name = "quart" },
@@ -478,12 +486,14 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "acb-py", specifier = ">=1.2.4" },
     { name = "aiofiles", specifier = "~=24.1.0" },
     { name = "aiohttp", specifier = "~=3.11.12" },
     { name = "coloredlogs", specifier = "~=15.0.1" },
     { name = "cryptography", specifier = "~=44.0.1" },
     { name = "hypercorn", specifier = "~=0.17.3" },
     { name = "msgpack", specifier = "~=1.1.0" },
+    { name = "pycricodecs", git = "https://github.com/Youjose/PyCriCodecs" },
     { name = "pydantic", specifier = "~=2.10.6" },
     { name = "pydub", specifier = ">=0.25.1" },
     { name = "quart", specifier = "~=0.20.0" },
@@ -936,6 +946,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/1d/b2/31537cf4b1ca98883
 wheels = [
     { url = "https://files.pythonhosted.org/packages/13/a3/a812df4e2dd5696d1f351d58b8fe16a405b234ad2886a0dab9183fb78109/pycparser-2.22-py3-none-any.whl", hash = "sha256:c3702b6d3dd8c7abc1afa565d7e63d53a1d0bd86cdc24edd75470f4de499cfcc", size = 117552, upload-time = "2024-03-30T13:22:20.476Z" },
 ]
+
+[[package]]
+name = "pycricodecs"
+version = "0.4.11"
+source = { git = "https://github.com/Youjose/PyCriCodecs#0bd67a6375d607e482706e8b190e9dda85021169" }
 
 [[package]]
 name = "pydantic"
