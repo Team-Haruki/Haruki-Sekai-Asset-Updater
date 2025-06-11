@@ -9,7 +9,7 @@ A game asset extractor with HTTP API for Project Sekai
 `uv sync`
 + Copy configs.example.py as a new file configs.py, then configure it.  
 + Run it with command  
-`uv run python main.py`
+`uv run main.py`
 + For test, you can use the following example and try to start running updater:  
 ```
 POST http://127.0.0.1:12345/update_asset  
