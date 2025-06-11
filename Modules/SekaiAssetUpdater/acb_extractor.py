@@ -23,15 +23,15 @@ def extract_acb(file_path: Union[Path, str], binary_data: Optional[bytes] = None
         for hca_file in os.listdir(_save_dir):
             if hca_file.endswith(".hca"):
                 # Prepare save path for MP3 file
-                save_file_path = os.path.join(_save_dir, os.path.splitext(hca_file)[0] + '.mp3')
+                save_file_path = os.path.join(_save_dir, os.path.splitext(hca_file)[0] + ".mp3")
 
                 # Decode HCA to WAV format (using HCA codec)
                 hca_decoder = HCA(os.path.join(_save_dir, hca_file), key=88888888)
                 wav_data = hca_decoder.decode()
 
                 # Convert WAV (from decoded HCA) to temporary file using BytesIO
-                wav_temp_path = os.path.join(_save_dir, os.path.splitext(hca_file)[0] + '.wav')
-                with open(wav_temp_path, 'wb') as wav_file:
+                wav_temp_path = os.path.join(_save_dir, os.path.splitext(hca_file)[0] + ".wav")
+                with open(wav_temp_path, "wb") as wav_file:
                     wav_file.write(wav_data)
 
                 # Convert WAV to MP3 using pydub

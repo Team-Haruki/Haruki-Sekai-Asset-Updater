@@ -8,9 +8,9 @@ from configs import HOST, PORT
 
 async def run() -> None:
     config = Config()
-    config.bind = [f'{HOST}:{PORT}']
+    config.bind = [f"{HOST}:{PORT}"]
     await serve(app, config)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(run())

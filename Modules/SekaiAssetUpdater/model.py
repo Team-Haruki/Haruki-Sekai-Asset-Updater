@@ -14,15 +14,15 @@ class SekaiServerInfo(BaseModel):
     enabled: Optional[bool] = True
     aes_key: Optional[bytes] = None
     aes_iv: Optional[bytes] = None
-    unity_version: Optional[str] = '2022.3.21f1'
+    unity_version: Optional[str] = "2022.3.21f1"
 
 
 class SekaiServerRegion(Enum):
-    JP = 'jp'
-    EN = 'en'
-    TW = 'tw'
-    KR = 'kr'
-    CN = 'cn'
+    JP = "jp"
+    EN = "en"
+    TW = "tw"
+    KR = "kr"
+    CN = "cn"
 
 
 class SekaiApiHttpStatus(IntEnum):
