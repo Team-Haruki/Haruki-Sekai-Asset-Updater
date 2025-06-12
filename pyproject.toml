@@ -1,6 +1,6 @@
 [project]
 name = "Haruki-Sekai-Asset-Updater"
-version = "3.0.0"
+version = "3.0.1"
 description = "A game asset extractor with HTTP API for Project Sekai"
 readme = "README.md"
 requires-python = ">=3.11"

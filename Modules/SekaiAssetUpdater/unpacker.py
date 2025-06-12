@@ -35,7 +35,11 @@ def unpack_asset(
         raise
 
     for unityfs_path, unityfs_obj in _unity_file.container.items():
-        _relpath = Path(unityfs_path).relative_to("assets/sekai/assetbundle/resources")
+        try:
+            _relpath = Path(unityfs_path).relative_to("assets/sekai/assetbundle/resources")
+        except ValueError:
+            logger.warning(f"Non-relative path detected: {unityfs_path}")
+            _relpath = Path(unityfs_path)
         _save_path = save_dir / _relpath
         _save_dir = _save_path.parent
         _save_dir.mkdir(parents=True, exist_ok=True)
