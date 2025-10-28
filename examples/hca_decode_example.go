@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
 	"os"
 
@@ -10,7 +9,7 @@ import (
 
 func main() {
 	// Example 1: Decode HCA file to WAV
-	if err := decodeHCAToWAV("test/0001_01.hca", "output.wav", 0, 0); err != nil {
+	if err := decodeHCAToWAV("test/BGM_TUTORIAL.hca", "output.wav", 0, 0); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
@@ -43,47 +42,17 @@ func decodeHCAToWAV(inputPath, outputPath string, keycode, subkey uint64) error 
 		decoder.SetEncryptionKey(keycode, subkey)
 	}
 
-	// Decode to PCM16
-	samples, err := decoder.DecodeToPCM16()
-	if err != nil {
-		return fmt.Errorf("failed to decode: %w", err)
-	}
-
-	// Write WAV file
-	return writeWAV(outputPath, samples, int(info.ChannelCount), int(info.SamplingRate))
-}
-
-// writeWAV writes PCM samples to a WAV file
-func writeWAV(filename string, samples []int16, channels, sampleRate int) error {
-	file, err := os.Create(filename)
+	file, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	dataSize := len(samples) * 2 // 16-bit samples
-	fileSize := 36 + dataSize
-
-	// Write WAV header
-	// RIFF chunk
-	file.WriteString("RIFF")
-	binary.Write(file, binary.LittleEndian, uint32(fileSize))
-	file.WriteString("WAVE")
-
-	// fmt chunk
-	file.WriteString("fmt ")
-	binary.Write(file, binary.LittleEndian, uint32(16))                    // chunk size
-	binary.Write(file, binary.LittleEndian, uint16(1))                     // PCM format
-	binary.Write(file, binary.LittleEndian, uint16(channels))              // channels
-	binary.Write(file, binary.LittleEndian, uint32(sampleRate))            // sample rate
-	binary.Write(file, binary.LittleEndian, uint32(sampleRate*channels*2)) // byte rate
-	binary.Write(file, binary.LittleEndian, uint16(channels*2))            // block align
-	binary.Write(file, binary.LittleEndian, uint16(16))                    // bits per sample
-
-	// data chunk
-	file.WriteString("data")
-	binary.Write(file, binary.LittleEndian, uint32(dataSize))
-	binary.Write(file, binary.LittleEndian, samples)
+	// Decode to WAV
+	err = decoder.DecodeToWav(file)
+	if err != nil {
+		return fmt.Errorf("failed to decode: %w", err)
+	}
 
 	return nil
 }

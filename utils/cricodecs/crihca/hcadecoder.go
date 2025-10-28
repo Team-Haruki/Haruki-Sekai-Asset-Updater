@@ -1,6 +1,7 @@
 package crihca
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -316,12 +317,29 @@ func (d *HCADecoder) testHCAScore(kt *KeyTest) int {
 	return totalScore
 }
 
-// DecodeToPCM16 decodes the entire file to 16-bit PCM samples
-func (d *HCADecoder) DecodeToPCM16() ([]int16, error) {
+// DecodeToWav decodes the entire file to 16-bit WAV stream
+func (d *HCADecoder) DecodeToWav(w io.Writer) error {
 	d.Reset()
-
 	totalSamples := int(d.info.BlockCount * d.info.SamplesPerBlock)
-	allSamples := make([]int16, 0, totalSamples*int(d.info.ChannelCount))
+	totalPCMBytes := totalSamples * int(d.info.ChannelCount) * 2 // 16-bit = 2 bytes per sample
+	header := make([]byte, 44)
+	copy(header[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(header[4:8], uint32(36+totalPCMBytes)) // File size - 8
+	copy(header[8:12], "WAVE")
+	copy(header[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(header[16:20], 16) // fmt chunk size
+	binary.LittleEndian.PutUint16(header[20:22], 1)  // PCM format
+	binary.LittleEndian.PutUint16(header[22:24], uint16(d.info.ChannelCount))
+	binary.LittleEndian.PutUint32(header[24:28], uint32(d.info.SamplingRate))
+	binary.LittleEndian.PutUint32(header[28:32], uint32(d.info.SamplingRate)*uint32(d.info.ChannelCount)*2) // Byte rate
+	binary.LittleEndian.PutUint16(header[32:34], uint16(d.info.ChannelCount*2))                             // Block align
+	binary.LittleEndian.PutUint16(header[34:36], 16)                                                        // Bits per sample
+	copy(header[36:40], "data")
+	binary.LittleEndian.PutUint32(header[40:44], uint32(totalPCMBytes))
+
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
 
 	pcmBuf := make([]int16, d.info.SamplesPerBlock*d.info.ChannelCount)
 
@@ -329,11 +347,11 @@ func (d *HCADecoder) DecodeToPCM16() ([]int16, error) {
 		if err := d.readPacket(); err == io.EOF {
 			break
 		} else if err != nil {
-			return nil, err
+			return err
 		}
 
 		if err := d.handle.DecodeBlock(d.buf); err != nil {
-			return nil, err
+			return err
 		}
 
 		d.handle.ReadSamples16(pcmBuf)
@@ -346,9 +364,17 @@ func (d *HCADecoder) DecodeToPCM16() ([]int16, error) {
 			d.currentDelay = 0
 		}
 
-		samplesToAdd := (samples - discard) * int(d.info.ChannelCount)
-		allSamples = append(allSamples, pcmBuf[discard*int(d.info.ChannelCount):discard*int(d.info.ChannelCount)+samplesToAdd]...)
+		start := discard * int(d.info.ChannelCount)
+		end := samples * int(d.info.ChannelCount)
+		data := make([]byte, (end-start)*2)
+		for i, sample := range pcmBuf[start:end] {
+			binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
+		}
+
+		if _, err := w.Write(data); err != nil {
+			return err
+		}
 	}
 
-	return allSamples, nil
+	return nil
 }
