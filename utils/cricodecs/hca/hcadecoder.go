@@ -1,4 +1,4 @@
-package crihca
+package hca
 
 import (
 	"encoding/binary"
@@ -8,11 +8,11 @@ import (
 	"os"
 )
 
-// HCADecoder wraps the low-level HCA decoder with streaming capabilities
-type HCADecoder struct {
+// CriWareHCADecoder wraps the low-level HCA decoder with streaming capabilities
+type CriWareHCADecoder struct {
 	file         *os.File      // 如果从文件创建，保存文件句柄以便Close
 	reader       io.ReadSeeker // 实际用于读取的reader
-	info         *HCAInfo
+	info         *CriWareHCAInfo
 	handle       *ClHCA
 	buf          []byte
 	fbuf         []float32
@@ -40,7 +40,7 @@ const (
 )
 
 // NewHCADecoder creates a new HCA decoder from a file
-func NewHCADecoder(filename string) (*HCADecoder, error) {
+func NewHCADecoder(filename string) (*CriWareHCADecoder, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func NewHCADecoder(filename string) (*HCADecoder, error) {
 
 	decoder, err := NewHCADecoderFromReader(file)
 	if err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, err
 	}
 
@@ -57,7 +57,7 @@ func NewHCADecoder(filename string) (*HCADecoder, error) {
 }
 
 // NewHCADecoderFromReader creates a new HCA decoder from an io.ReadSeeker
-func NewHCADecoderFromReader(reader io.ReadSeeker) (*HCADecoder, error) {
+func NewHCADecoderFromReader(reader io.ReadSeeker) (*CriWareHCADecoder, error) {
 	// Test header
 	headerBuf := make([]byte, 0x08)
 	if _, err := reader.Read(headerBuf); err != nil {
@@ -79,7 +79,7 @@ func NewHCADecoderFromReader(reader io.ReadSeeker) (*HCADecoder, error) {
 	}
 
 	// Initialize decoder
-	decoder := &HCADecoder{
+	decoder := &CriWareHCADecoder{
 		reader: reader, // 保存reader引用
 	}
 	decoder.handle = NewClHCA()
@@ -107,14 +107,14 @@ func NewHCADecoderFromReader(reader io.ReadSeeker) (*HCADecoder, error) {
 }
 
 // Reset resets the decoder to the beginning
-func (d *HCADecoder) Reset() {
+func (d *CriWareHCADecoder) Reset() {
 	d.handle.DecodeReset()
 	d.currentBlock = 0
 	d.currentDelay = int(d.info.EncoderDelay)
 }
 
 // Close closes the decoder and associated file
-func (d *HCADecoder) Close() error {
+func (d *CriWareHCADecoder) Close() error {
 	if d.file != nil {
 		return d.file.Close()
 	}
@@ -122,12 +122,12 @@ func (d *HCADecoder) Close() error {
 }
 
 // Info returns the HCA file information
-func (d *HCADecoder) Info() *HCAInfo {
+func (d *CriWareHCADecoder) Info() *CriWareHCAInfo {
 	return d.info
 }
 
 // SetEncryptionKey sets the decryption key
-func (d *HCADecoder) SetEncryptionKey(keycode, subkey uint64) {
+func (d *CriWareHCADecoder) SetEncryptionKey(keycode, subkey uint64) {
 	if subkey != 0 {
 		keycode = keycode * ((subkey << 16) | (uint64(^uint16(subkey)) + 2))
 	}
@@ -135,7 +135,7 @@ func (d *HCADecoder) SetEncryptionKey(keycode, subkey uint64) {
 }
 
 // readPacket reads a single HCA frame/block
-func (d *HCADecoder) readPacket() error {
+func (d *CriWareHCADecoder) readPacket() error {
 	if d.currentBlock >= d.info.BlockCount {
 		return io.EOF
 	}
@@ -159,7 +159,7 @@ func (d *HCADecoder) readPacket() error {
 
 // DecodeFrame decodes a single frame and returns the samples
 // Returns (samples, numSamples, error)
-func (d *HCADecoder) DecodeFrame() ([]float32, int, error) {
+func (d *CriWareHCADecoder) DecodeFrame() ([]float32, int, error) {
 	// Read packet
 	if err := d.readPacket(); err != nil {
 		return nil, 0, err
@@ -186,7 +186,7 @@ func (d *HCADecoder) DecodeFrame() ([]float32, int, error) {
 }
 
 // DecodeAll decodes the entire HCA file and returns all samples
-func (d *HCADecoder) DecodeAll() ([]float32, error) {
+func (d *CriWareHCADecoder) DecodeAll() ([]float32, error) {
 	d.Reset()
 
 	totalSamples := int(d.info.BlockCount * d.info.SamplesPerBlock)
@@ -210,7 +210,7 @@ func (d *HCADecoder) DecodeAll() ([]float32, error) {
 }
 
 // Seek seeks to a specific sample position
-func (d *HCADecoder) Seek(sampleNum int) {
+func (d *CriWareHCADecoder) Seek(sampleNum int) {
 	// Handle loop values if not set
 	if d.info.LoopStartBlock == 0 && d.info.LoopStartDelay == 0 {
 		targetSample := uint(sampleNum) + d.info.EncoderDelay
@@ -224,7 +224,7 @@ func (d *HCADecoder) Seek(sampleNum int) {
 }
 
 // TestKey tests if a key correctly decrypts the HCA file
-func (d *HCADecoder) TestKey(kt *KeyTest) {
+func (d *CriWareHCADecoder) TestKey(kt *KeyTest) {
 	score := d.testHCAScore(kt)
 
 	// Wrong key
@@ -241,7 +241,7 @@ func (d *HCADecoder) TestKey(kt *KeyTest) {
 
 // testHCAScore tests a number of frames to see if key decrypts correctly
 // Returns: <0: error/wrong, 0: unknown/silent, >0: good (closer to 1 is better)
-func (d *HCADecoder) testHCAScore(kt *KeyTest) int {
+func (d *CriWareHCADecoder) testHCAScore(kt *KeyTest) int {
 	testFrames := 0
 	currentFrame := uint(0)
 	blankFrames := 0
@@ -318,7 +318,7 @@ func (d *HCADecoder) testHCAScore(kt *KeyTest) int {
 }
 
 // DecodeToWav decodes the entire file to 16-bit WAV stream
-func (d *HCADecoder) DecodeToWav(w io.Writer) error {
+func (d *CriWareHCADecoder) DecodeToWav(w io.Writer) error {
 	d.Reset()
 	totalSamples := int(d.info.BlockCount * d.info.SamplesPerBlock)
 	totalPCMBytes := totalSamples * int(d.info.ChannelCount) * 2 // 16-bit = 2 bytes per sample

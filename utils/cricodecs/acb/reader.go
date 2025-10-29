@@ -1,4 +1,4 @@
-package criacb
+package acb
 
 import (
 	"encoding/binary"
@@ -87,9 +87,11 @@ func (r *Reader) ReadBytes(n int) ([]byte, error) {
 
 func (r *Reader) ReadBytesAt(n int, offset int64) ([]byte, error) {
 	pos, _ := r.r.Seek(0, io.SeekCurrent)
-	defer r.r.Seek(pos, io.SeekStart)
+	defer func(r io.ReadSeeker, offset int64, whence int) {
+		_, _ = r.Seek(offset, whence)
+	}(r.r, pos, io.SeekStart)
 
-	r.r.Seek(offset, io.SeekStart)
+	_, _ = r.r.Seek(offset, io.SeekStart)
 	return r.ReadBytes(n)
 }
 
@@ -114,8 +116,10 @@ func (r *Reader) ReadString0() (string, error) {
 
 func (r *Reader) ReadString0At(offset int64) (string, error) {
 	pos, _ := r.r.Seek(0, io.SeekCurrent)
-	defer r.r.Seek(pos, io.SeekStart)
+	defer func(r io.ReadSeeker, offset int64, whence int) {
+		_, _ = r.Seek(offset, whence)
+	}(r.r, pos, io.SeekStart)
 
-	r.r.Seek(offset, io.SeekStart)
+	_, _ = r.r.Seek(offset, io.SeekStart)
 	return r.ReadString0()
 }

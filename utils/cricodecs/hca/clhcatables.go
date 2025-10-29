@@ -1,4 +1,4 @@
-package crihca
+package hca
 
 import "math"
 

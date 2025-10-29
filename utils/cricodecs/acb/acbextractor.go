@@ -1,4 +1,4 @@
-package criacb
+package acb
 
 import (
 	"bytes"
@@ -41,7 +41,7 @@ func ExtractACB(acbFile io.ReadSeeker, targetDir, acbFilePath string) ([]string,
 					awbFile, err := os.Open(awbPath)
 					if err == nil {
 						awbData, _ := io.ReadAll(awbFile)
-						awbFile.Close()
+						_ = awbFile.Close()
 
 						if awb, err := NewAFSArchive(bytes.NewReader(awbData)); err == nil {
 							externalAwbs = append(externalAwbs, awb)
@@ -54,7 +54,7 @@ func ExtractACB(acbFile io.ReadSeeker, targetDir, acbFilePath string) ([]string,
 
 	// Extract tracks
 	var outputs []string
-	os.MkdirAll(targetDir, 0755)
+	_ = os.MkdirAll(targetDir, 0755)
 
 	for _, track := range trackList.Tracks {
 		ext := waveTypeExtensions[track.EncType]
@@ -96,6 +96,8 @@ func ExtractACBFromFile(acbPath, targetDir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		_ = file.Close()
+	}(file)
 	return ExtractACB(file, targetDir, acbPath)
 }

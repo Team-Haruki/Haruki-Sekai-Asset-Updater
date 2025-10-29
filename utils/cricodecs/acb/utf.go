@@ -1,4 +1,4 @@
-package criacb
+package acb
 
 import (
 	"encoding/binary"
@@ -98,7 +98,7 @@ func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
 	}
 
 	// Read rows
-	buf.Seek(int64(header.RowOffset+8), io.SeekStart)
+	_, _ = buf.Seek(int64(header.RowOffset+8), io.SeekStart)
 	if err := table.readRows(buf); err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
 }
 
 func (t *UTFTable) readSchema(buf *Reader) error {
-	buf.Seek(0x20, io.SeekStart)
+	_, _ = buf.Seek(0x20, io.SeekStart)
 
 	var dynamicKeys []string
 	constants := make(map[string]interface{})
@@ -217,7 +217,7 @@ func (t *UTFTable) readRows(buf *Reader) error {
 
 	var fields []fieldInfo
 
-	buf.Seek(0x20, io.SeekStart)
+	_, _ = buf.Seek(0x20, io.SeekStart)
 	for i := 0; i < int(t.Header.NumberOfFields); i++ {
 		fieldType, _ := buf.ReadUint8()
 		nameOffset, _ := buf.ReadUint32()
@@ -256,7 +256,7 @@ func (t *UTFTable) readRows(buf *Reader) error {
 
 		// Seek to row data
 		rowStart := int64(uint32(t.Header.RowOffset) + 8 + uint32(rowIdx)*uint32(t.Header.RowSize))
-		buf.Seek(rowStart, io.SeekStart)
+		_, _ = buf.Seek(rowStart, io.SeekStart)
 
 		// Read dynamic fields in order
 		for _, field := range fields {
@@ -286,7 +286,7 @@ func (t *UTFTable) readRows(buf *Reader) error {
 
 func (t *UTFTable) getTypeForKey(key string) uint8 {
 	// Reparse schema to find type for key
-	t.reader.Seek(0x20, io.SeekStart)
+	_, _ = t.reader.Seek(0x20, io.SeekStart)
 
 	for i := 0; i < int(t.Header.NumberOfFields); i++ {
 		fieldType, _ := t.reader.ReadUint8()
@@ -312,19 +312,19 @@ func (t *UTFTable) getTypeForKey(key string) uint8 {
 func (t *UTFTable) skipColumnData(buf *Reader, typeKey uint8) {
 	switch typeKey {
 	case columnTypeData:
-		buf.ReadUint32()
-		buf.ReadUint32()
+		_, _ = buf.ReadUint32()
+		_, _ = buf.ReadUint32()
 	case columnTypeString:
-		buf.ReadUint32()
+		_, _ = buf.ReadUint32()
 	case columnTypeFloat:
-		buf.ReadFloat32()
+		_, _ = buf.ReadFloat32()
 	case columnType8Byte:
-		buf.ReadUint64()
+		_, _ = buf.ReadUint64()
 	case columnType4Byte2, columnType4Byte:
-		buf.ReadUint32()
+		_, _ = buf.ReadUint32()
 	case columnType2Byte2, columnType2Byte:
-		buf.ReadUint16()
+		_, _ = buf.ReadUint16()
 	case columnType1Byte2, columnType1Byte:
-		buf.ReadUint8()
+		_, _ = buf.ReadUint8()
 	}
 }

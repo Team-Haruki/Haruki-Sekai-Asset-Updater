@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"haruki-sekai-asset/utils/cricodecs/crihca"
+	"haruki-sekai-asset/utils/cricodecs/hca"
 )
 
 func main() {
@@ -19,7 +19,7 @@ func main() {
 // decodeHCAToWAV decodes an HCA file to WAV format
 func decodeHCAToWAV(inputPath, outputPath string, keycode, subkey uint64) error {
 	// Create decoder
-	decoder, err := crihca.NewHCADecoder(inputPath)
+	decoder, err := hca.NewHCADecoder(inputPath)
 	if err != nil {
 		return fmt.Errorf("failed to create decoder: %w", err)
 	}
@@ -59,7 +59,7 @@ func decodeHCAToWAV(inputPath, outputPath string, keycode, subkey uint64) error 
 
 // Example 2: Test decryption keys
 func testHCAKeys(inputPath string, keys []uint64, subkey uint64) (uint64, error) {
-	decoder, err := crihca.NewHCADecoder(inputPath)
+	decoder, err := hca.NewHCADecoder(inputPath)
 	if err != nil {
 		return 0, err
 	}
@@ -69,7 +69,7 @@ func testHCAKeys(inputPath string, keys []uint64, subkey uint64) (uint64, error)
 	bestScore := -1
 
 	for _, key := range keys {
-		kt := &crihca.KeyTest{
+		kt := &hca.KeyTest{
 			Key:       key,
 			Subkey:    subkey,
 			BestScore: -1,
@@ -93,7 +93,7 @@ func testHCAKeys(inputPath string, keys []uint64, subkey uint64) (uint64, error)
 
 // Example 3: Decode frame by frame
 func decodeFrameByFrame(inputPath string, keycode, subkey uint64) error {
-	decoder, err := crihca.NewHCADecoder(inputPath)
+	decoder, err := hca.NewHCADecoder(inputPath)
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func decodeFrameByFrame(inputPath string, keycode, subkey uint64) error {
 
 // Example 4: Get file info without decoding
 func getHCAInfo(inputPath string) error {
-	decoder, err := crihca.NewHCADecoder(inputPath)
+	decoder, err := hca.NewHCADecoder(inputPath)
 	if err != nil {
 		return err
 	}

@@ -1,4 +1,4 @@
-package criacb
+package acb
 
 // Column storage and type constants
 const (

@@ -1,4 +1,4 @@
-package crihca
+package hca
 
 import "errors"
 
@@ -478,7 +478,7 @@ func (hca *ClHCA) decodeBlockUnpack(data []byte) int {
 			return hcaErrorUnpack
 		}
 
-		unpackIntensity(&hca.channel[ch], br, hca.hfrGroupCount, hca.version)
+		_ = unpackIntensity(&hca.channel[ch], br, hca.hfrGroupCount, hca.version)
 
 		calculateResolution(&hca.channel[ch], packedNoiseLevel, &hca.athCurve,
 			hca.minResolution, hca.maxResolution)

@@ -1,4 +1,4 @@
-package criusm
+package usm
 
 import (
 	"bytes"

@@ -1,4 +1,4 @@
-package criacb
+package acb
 
 import (
 	"errors"
@@ -46,7 +46,7 @@ func NewAFSArchive(r io.ReadSeeker) (*AFSArchive, error) {
 	}
 
 	// Read file entries
-	buf.Seek(0x10, io.SeekStart)
+	_, _ = buf.Seek(0x10, io.SeekStart)
 
 	// Read cue IDs
 	cueIDs := make([]int, fileCount)

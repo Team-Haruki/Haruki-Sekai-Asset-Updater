@@ -1,4 +1,4 @@
-package crihca
+package hca
 
 import (
 	"errors"
@@ -120,8 +120,8 @@ type ClHCA struct {
 	channel       [hcaMaxChannels]stChannel
 }
 
-// HCAInfo for external use
-type HCAInfo struct {
+// CriWareHCAInfo for external use
+type CriWareHCAInfo struct {
 	Version           uint
 	HeaderSize        uint
 	SamplingRate      uint
@@ -470,7 +470,7 @@ func (hca *ClHCA) Clear() {
 func (hca *ClHCA) SetKey(keycode uint64) {
 	hca.keycode = keycode
 	if hca.isValid {
-		cipherInit(&hca.cipherTable, int(hca.ciphType), hca.keycode)
+		_ = cipherInit(&hca.cipherTable, int(hca.ciphType), hca.keycode)
 	}
 }
 
@@ -496,12 +496,12 @@ func IsOurFile(data []byte) int {
 }
 
 // GetInfo returns decoder information
-func (hca *ClHCA) GetInfo() (*HCAInfo, error) {
+func (hca *ClHCA) GetInfo() (*CriWareHCAInfo, error) {
 	if !hca.isValid {
 		return nil, errors.New("decoder not initialized")
 	}
 
-	info := &HCAInfo{
+	info := &CriWareHCAInfo{
 		Version:           hca.version,
 		HeaderSize:        hca.headerSize,
 		SamplingRate:      hca.sampleRate,
