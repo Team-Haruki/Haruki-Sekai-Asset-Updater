@@ -55,17 +55,19 @@ func ParseSekaiApiHttpStatus(code int) (SekaiApiHttpStatus, error) {
 }
 
 type HarukiSekaiAssetUpdaterConfig struct {
-	Enabled                   bool                    `yaml:"enabled"`
-	Server                    HarukiSekaiServerRegion `yaml:"server"`
-	AssetInfoURLTemplate      string                  `yaml:"asset_info_url_template"`
-	CPAssetProfile            string                  `yaml:"cp_asset_profile,omitempty"`
-	NuverseAssetVersionURL    string                  `yaml:"nuverse_asset_version_url,omitempty"`
-	NuverseOverrideAppVersion string                  `yaml:"nuverse_override_app_version,omitempty"`
-	AssetURLTemplate          string                  `yaml:"asset_url_template"`
-	RequiredCookies           bool                    `yaml:"required_cookies,omitempty"`
-	AESKeyHex                 string                  `yaml:"aes_key_hex,omitempty"`
-	AESIVHex                  string                  `yaml:"aes_iv_hex,omitempty"`
-	UnityVersion              string                  `yaml:"unity_version,omitempty"`
+	Enabled                   bool   `yaml:"enabled"`
+	ExportByCategory          bool   `yaml:"export_by_category,omitempty"`
+	AssetInfoURLTemplate      string `yaml:"asset_info_url_template"`
+	CPAssetProfile            string `yaml:"cp_asset_profile,omitempty"`
+	NuverseAssetVersionURL    string `yaml:"nuverse_asset_version_url,omitempty"`
+	NuverseOverrideAppVersion string `yaml:"nuverse_override_app_version,omitempty"`
+	AssetURLTemplate          string `yaml:"asset_url_template"`
+	RequiredCookies           bool   `yaml:"required_cookies,omitempty"`
+	AESKeyHex                 string `yaml:"aes_key_hex,omitempty"`
+	AESIVHex                  string `yaml:"aes_iv_hex,omitempty"`
+	UnityVersion              string `yaml:"unity_version,omitempty"`
+	AssetSaveDir              string `yaml:"asset_save_dir,omitempty"`
+	DownloadedAssetRecordFile string `yaml:"downloaded_asset_record_file,omitempty"`
 }
 
 type HarukiSekaiAssetCategory string
