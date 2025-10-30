@@ -262,8 +262,8 @@ func (u *HarukiSekaiAssetUpdater) Run() {
 		return
 	}
 	u.logger.Infof("found %d new assets to download", len(toDownloadList))
-	downloadResults := u.downloadAssetsConcurrently(toDownloadList)
-	u.updateDownloadedAssetsRecord(downloadedAssets, downloadResults)
+	successResults, _ := u.downloadAssetsConcurrently(toDownloadList)
+	u.updateDownloadedAssetsRecord(downloadedAssets, successResults)
 }
 
 func (u *HarukiSekaiAssetUpdater) buildDownloadList(
@@ -391,12 +391,9 @@ func (u *HarukiSekaiAssetUpdater) getDownloadPriority(bundleName string) int {
 	return 9999999
 }
 
-func (u *HarukiSekaiAssetUpdater) downloadAssetsConcurrently(toDownloadList map[string]downloadTask) []downloadResult {
-	results := make([]downloadResult, 0, len(toDownloadList))
+func (u *HarukiSekaiAssetUpdater) downloadAssetsConcurrently(toDownloadList map[string]downloadTask) ([]downloadResult, []downloadResult) {
 	resultsChan := make(chan downloadResult, len(toDownloadList))
-
 	sortedTasks := u.sortDownloadsByPriority(toDownloadList)
-
 	taskCount := 0
 	for _, item := range sortedTasks {
 		taskCount++
@@ -407,46 +404,47 @@ func (u *HarukiSekaiAssetUpdater) downloadAssetsConcurrently(toDownloadList map[
 			if err == nil && bundlePath != nil && bundleHash != nil {
 				result.bundlePath = *bundlePath
 				result.bundleHash = *bundleHash
+			} else {
+				result.bundlePath = t.bundlePath
+				result.bundleHash = t.bundleHash
 			}
 
 			resultsChan <- result
 		}(item.downloadPath, item.task)
 	}
 
-	successCount := 0
-	failCount := 0
+	successResults := make([]downloadResult, 0)
+	failedResults := make([]downloadResult, 0)
+
 	for i := 0; i < taskCount; i++ {
 		result := <-resultsChan
-		results = append(results, result)
 
 		if result.err != nil {
-			failCount++
-			u.logger.Errorf("failed to download asset: %v", result.err)
+			failedResults = append(failedResults, result)
+			u.logger.Errorf("failed to download asset %s: %v", result.bundlePath, result.err)
 		} else {
-			successCount++
+			successResults = append(successResults, result)
 			u.logger.Infof("successfully downloaded: %s", result.bundlePath)
 		}
 	}
 
 	close(resultsChan)
-	u.logger.Infof("download completed: %d succeeded, %d failed", successCount, failCount)
+	u.logger.Infof("download completed: %d succeeded, %d failed", len(successResults), len(failedResults))
 
-	return results
+	return successResults, failedResults
 }
 
 func (u *HarukiSekaiAssetUpdater) updateDownloadedAssetsRecord(
 	downloadedAssets map[string]string,
-	downloadResults []downloadResult,
+	successResults []downloadResult,
 ) {
-	for _, result := range downloadResults {
-		if result.err == nil && result.bundlePath != "" {
-			downloadedAssets[result.bundlePath] = result.bundleHash
-		}
+	for _, result := range successResults {
+		downloadedAssets[result.bundlePath] = result.bundleHash
 	}
 	if err := u.saveDownloadedAssets(downloadedAssets); err != nil {
 		u.logger.Errorf("failed to save downloaded assets record: %v", err)
 	} else {
-		u.logger.Infof("downloaded assets record updated successfully")
+		u.logger.Infof("downloaded assets record updated successfully (%d assets)", len(successResults))
 	}
 }
 
