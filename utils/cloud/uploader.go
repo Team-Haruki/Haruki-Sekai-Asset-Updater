@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"haruki-sekai-asset/config"
 	harukiLogger "haruki-sekai-asset/utils/logger"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ func UploadToStorage(
 	remoteBase string,
 	uploadProgram string,
 	uploadArgs []string,
+	removeLocalAfterUpload bool,
 ) error {
 
 	errChan := make(chan error, len(exportedList))
@@ -53,8 +55,15 @@ func UploadToStorage(
 				filePath, remotePath, uploadProgram, strings.Join(args, " "), err)
 			return
 		}
-
 		logger.Infof("Successfully uploaded %s to %s", filePath, remotePath)
+		if removeLocalAfterUpload {
+			if err := os.Remove(filePath); err != nil {
+				logger.Warnf("Failed to delete local file %s after upload: %v", filePath, err)
+				errChan <- fmt.Errorf("uploaded but failed to delete local file %s: %w", filePath, err)
+			} else {
+				logger.Debugf("Deleted local file %s after successful upload", filePath)
+			}
+		}
 	}
 	for _, filePath := range exportedList {
 		wg.Add(1)
@@ -75,6 +84,7 @@ func UploadToStorage(
 func UploadToAllStorages(
 	exportedList []string,
 	extractedSavePath string,
+	removeLocal bool,
 ) error {
 	if len(config.Cfg.RemoteStorages) == 0 {
 		logger.Infof("No remote storages configured, skipping upload")
@@ -89,6 +99,7 @@ func UploadToAllStorages(
 			storage.Base,
 			storage.Program,
 			storage.Args,
+			removeLocal,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upload to storage %s: %w", storage.Base, err)

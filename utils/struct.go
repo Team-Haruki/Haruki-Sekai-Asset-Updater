@@ -33,6 +33,7 @@ type HarukiSekaiAssetUpdaterConfig struct {
 	ConvertWavToFLAC          bool      `yaml:"convert_wav_to_flac,omitempty"`
 	RemoveWav                 bool      `yaml:"remove_wav,omitempty"`
 	UploadToCloud             bool      `yaml:"upload_to_cloud,omitempty"`
+	RemoveLocalAfterUpload    bool      `yaml:"remove_local_after_upload,omitempty"`
 }
 
 type HarukiSekaiServerRegion string
