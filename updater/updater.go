@@ -3,8 +3,14 @@ package updater
 import (
 	"context"
 	"errors"
+	"fmt"
+	"haruki-sekai-asset/config"
+	"haruki-sekai-asset/utils"
+	harukiLogger "haruki-sekai-asset/utils/logger"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -12,28 +18,26 @@ import (
 )
 
 type HarukiSekaiAssetUpdater struct {
-	ctx                  context.Context
-	server               HarukiSekaiServerRegion
-	serverConfig         HarukiSekaiAssetUpdaterConfig
-	assetSaveDir         string
-	startAppPrefixes     []string
-	ondemandPrefixes     []string
-	downloadPriorityList *[]string
-	assetVersion         *string
-	assetHash            *string
-	proxy                *string
-	sem                  int
-	client               *resty.Client
+	ctx             context.Context
+	server          utils.HarukiSekaiServerRegion
+	serverConfig    utils.HarukiSekaiAssetUpdaterConfig
+	cpAssetProfiles *map[string]string
+	assetSaveDir    string
+	assetVersion    *string
+	assetHash       *string
+	proxy           *string
+	sem             chan struct{}
+	cryptor         SekaiCryptor
+	client          *resty.Client
+	logger          *harukiLogger.Logger
 }
 
 func NewHarukiSekaiAssetUpdater(
 	ctx context.Context,
-	server HarukiSekaiServerRegion,
-	serverConfig HarukiSekaiAssetUpdaterConfig,
+	server utils.HarukiSekaiServerRegion,
+	serverConfig utils.HarukiSekaiAssetUpdaterConfig,
+	cpAssetProfiles *map[string]string,
 	assetSaveDir string,
-	startAppPrefixes []string,
-	ondemandPrefixes []string,
-	downloadPriorityList *[]string,
 	assetVersion *string,
 	assetHash *string,
 	proxy *string,
@@ -57,24 +61,29 @@ func NewHarukiSekaiAssetUpdater(
 	if proxy != nil && *proxy != "" {
 		client.SetProxy(*proxy)
 	}
+	cryptor, err := NewSekaiCryptorFromHex(serverConfig.AESKeyHex, serverConfig.AESIVHex)
+	if err != nil {
+		return nil
+	}
+	semChan := make(chan struct{}, sem)
 	return &HarukiSekaiAssetUpdater{
-		ctx:                  ctx,
-		server:               server,
-		serverConfig:         serverConfig,
-		assetSaveDir:         assetSaveDir,
-		startAppPrefixes:     startAppPrefixes,
-		ondemandPrefixes:     ondemandPrefixes,
-		downloadPriorityList: downloadPriorityList,
-		assetVersion:         assetVersion,
-		assetHash:            assetHash,
-		proxy:                proxy,
-		sem:                  sem,
-		client:               client,
+		ctx:             ctx,
+		server:          server,
+		serverConfig:    serverConfig,
+		cpAssetProfiles: cpAssetProfiles,
+		assetSaveDir:    assetSaveDir,
+		assetVersion:    assetVersion,
+		assetHash:       assetHash,
+		proxy:           proxy,
+		sem:             semChan,
+		client:          client,
+		cryptor:         *cryptor,
+		logger:          harukiLogger.NewLogger(fmt.Sprintf("HarukiSekaiAssetUpdater%s", string(server)), "INFO", nil),
 	}
 }
 
 func (u *HarukiSekaiAssetUpdater) parseCookies() error {
-	if u.server == HarukiSekaiServerRegionJP {
+	if u.server == utils.HarukiSekaiServerRegionJP {
 		var lastErr error
 		for attempt := 0; attempt < 4; attempt++ {
 			resp, err := u.client.R().
@@ -150,16 +159,295 @@ func (u *HarukiSekaiAssetUpdater) request(url string) (*resty.Response, error) {
 	return nil, errors.New("request failed after retries")
 }
 
-func (u *HarukiSekaiAssetUpdater) getAssetBundleInfo() *HarukiSekaiAssetBundleInfo {
-	return nil
+func (u *HarukiSekaiAssetUpdater) getAssetBundleInfo(assetVersion *string, assetHash *string) *HarukiSekaiAssetBundleInfo {
+	var assetURL *string
+	if u.server == utils.HarukiSekaiServerRegionJP || u.server == utils.HarukiSekaiServerRegionEN {
+		profileMap := *u.cpAssetProfiles
+		url := strings.ReplaceAll(u.serverConfig.AssetInfoURLTemplate, "{env}", u.serverConfig.CPAssetProfile)
+		url = strings.ReplaceAll(url, "{hash}", profileMap[u.serverConfig.CPAssetProfile])
+		url = strings.ReplaceAll(url, "{asset_version}", *assetVersion)
+		url = strings.ReplaceAll(url, "{asset_hash}", *assetHash)
+		assetURL = &url
+	} else {
+		var nuverseAssetVersion *string
+		assetVersionURL := u.serverConfig.NuverseAssetVersionURL
+		resp, err := u.request(assetVersionURL)
+		if err != nil {
+			return nil
+		}
+		if resp.StatusCode() == 200 {
+			respVersion := resp.String()
+			nuverseAssetVersion = &respVersion
+		} else if resp.StatusCode() >= 500 {
+			return nil
+		}
+		if nuverseAssetVersion == nil {
+			return nil
+		} else {
+			url := strings.ReplaceAll(u.serverConfig.AssetInfoURLTemplate, "{app_version}", u.serverConfig.NuverseOverrideAppVersion)
+			url = strings.ReplaceAll(url, "{asset_version}", *nuverseAssetVersion)
+			assetURL = &url
+		}
+	}
+	if assetURL == nil {
+		return nil
+	}
+	resp, err := u.request(*assetURL + utils.GetTimeArg())
+	if err != nil {
+		return nil
+	} else if resp.StatusCode() == 200 {
+		var assetBundleInfo HarukiSekaiAssetBundleInfo
+		if err := u.cryptor.UnpackInto(resp.Body(), &assetBundleInfo); err != nil {
+			return nil
+		}
+		return &assetBundleInfo
+	} else {
+		return nil
+	}
 }
 
-func (u *HarukiSekaiAssetUpdater) downloadAndExportAsset() (*string, *string, error) {
-	return nil, nil, nil
+func (u *HarukiSekaiAssetUpdater) downloadAndExportAsset(bundlePath string, bundleHash string, category HarukiSekaiAssetCategory) (*string, *string, error) {
+	u.sem <- struct{}{}
+	defer func() { <-u.sem }()
+
+	assetURL := strings.ReplaceAll(u.serverConfig.AssetURLTemplate, "{bundle_path}", bundlePath)
+	assetURL = assetURL + utils.GetTimeArg()
+	resp, err := u.request(assetURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode() == 200 {
+		body := Deobfuscate(resp.Body())
+		tempFilePath := os.TempDir() + "/" + string(u.server) + "/" + bundlePath
+		tempDir := os.TempDir() + "/" + string(u.server)
+		if err := os.MkdirAll(tempDir, 0o755); err != nil {
+			return nil, nil, err
+		}
+		if err := os.WriteFile(tempFilePath, body, 0o644); err != nil {
+			return nil, nil, err
+		}
+		defer func() {
+			if err := os.Remove(tempFilePath); err != nil {
+			}
+		}()
+		if err = ExtractUnityAssetBundle(config.Cfg.Tools.AssetStudioCLIPath, tempFilePath, bundlePath, u.assetSaveDir,
+			category, u.serverConfig, config.Cfg.Tools.FFMPEGPath, config.Cfg.Tools.CwebpPath); err != nil {
+			return nil, nil, err
+		}
+		return &bundlePath, &bundleHash, nil
+	}
+	return nil, nil, errors.New("failed to download asset bundle")
 }
 
 func (u *HarukiSekaiAssetUpdater) Run() {
-	// Implementation of the update process goes here
+	downloadedAssets, err := u.loadDownloadedAssets()
+	if err != nil {
+		u.logger.Errorf("failed to load cached assets: %v", err)
+		return
+	}
+	if u.serverConfig.RequiredCookies {
+		if err := u.parseCookies(); err != nil {
+			u.logger.Errorf("failed to parse cookies: %v", err)
+			return
+		}
+	}
+	assetBundleInfo := u.getAssetBundleInfo(u.assetVersion, u.assetHash)
+	if assetBundleInfo == nil {
+		u.logger.Errorf("failed to get asset bundle info")
+		return
+	}
+	toDownloadList := u.buildDownloadList(assetBundleInfo, downloadedAssets)
+	if len(toDownloadList) == 0 {
+		u.logger.Infof("no new assets to download")
+		return
+	}
+	u.logger.Infof("found %d new assets to download", len(toDownloadList))
+	downloadResults := u.downloadAssetsConcurrently(toDownloadList)
+	u.updateDownloadedAssetsRecord(downloadedAssets, downloadResults)
+}
+
+func (u *HarukiSekaiAssetUpdater) buildDownloadList(
+	assetBundleInfo *HarukiSekaiAssetBundleInfo,
+	downloadedAssets map[string]string,
+) map[string]downloadTask {
+	toDownloadList := make(map[string]downloadTask)
+
+	for bundleName, bundleInfo := range assetBundleInfo.Bundles {
+		if u.shouldSkipBundle(bundleName) {
+			continue
+		}
+		if !u.shouldDownloadBundle(bundleName, bundleInfo.Category) {
+			continue
+		}
+		if existingHash, exists := downloadedAssets[bundleName]; exists && existingHash == bundleInfo.Hash {
+			continue
+		}
+		downloadPath := u.getDownloadPath(bundleName, bundleInfo)
+		toDownloadList[downloadPath] = downloadTask{
+			bundlePath: bundleName,
+			bundleHash: bundleInfo.Hash,
+			category:   bundleInfo.Category,
+		}
+	}
+
+	return toDownloadList
+}
+
+func (u *HarukiSekaiAssetUpdater) shouldSkipBundle(bundleName string) bool {
+	if len(u.serverConfig.SkipPrefixes) == 0 {
+		return false
+	}
+
+	for _, pattern := range u.serverConfig.SkipPrefixes {
+		matched, err := regexp.MatchString(pattern, bundleName)
+		if err != nil {
+			u.logger.Warnf("invalid skip prefix pattern '%s': %v", pattern, err)
+			continue
+		}
+		if matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (u *HarukiSekaiAssetUpdater) shouldDownloadBundle(bundleName string, category HarukiSekaiAssetCategory) bool {
+	switch category {
+	case HarukiSekaiAssetCategoryStartApp:
+		if len(u.serverConfig.StartAppPrefixes) == 0 {
+			return true
+		}
+		for _, prefix := range u.serverConfig.StartAppPrefixes {
+			if strings.HasPrefix(bundleName, prefix) {
+				return true
+			}
+		}
+		return false
+	case HarukiSekaiAssetCategoryOnDemand:
+		if len(u.serverConfig.OndemandPrefixes) == 0 {
+			return true
+		}
+		for _, prefix := range u.serverConfig.OndemandPrefixes {
+			if strings.HasPrefix(bundleName, prefix) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func (u *HarukiSekaiAssetUpdater) getDownloadPath(bundleName string, bundleInfo HarukiSekaiAssetBundleDetail) string {
+	if u.server == utils.HarukiSekaiServerRegionJP || u.server == utils.HarukiSekaiServerRegionEN {
+		return bundleName
+	}
+	if bundleInfo.DownloadPath != nil {
+		return fmt.Sprintf("%s/%s", *bundleInfo.DownloadPath, bundleName)
+	}
+	return bundleName
+}
+
+func (u *HarukiSekaiAssetUpdater) sortDownloadsByPriority(toDownloadList map[string]downloadTask) []prioritizedDownloadTask {
+	sortedTasks := make([]prioritizedDownloadTask, 0, len(toDownloadList))
+
+	for downloadPath, task := range toDownloadList {
+		priority := u.getDownloadPriority(task.bundlePath)
+		sortedTasks = append(sortedTasks, prioritizedDownloadTask{
+			downloadPath: downloadPath,
+			task:         task,
+			priority:     priority,
+		})
+	}
+
+	for i := 0; i < len(sortedTasks); i++ {
+		for j := i + 1; j < len(sortedTasks); j++ {
+			if sortedTasks[j].priority < sortedTasks[i].priority {
+				sortedTasks[i], sortedTasks[j] = sortedTasks[j], sortedTasks[i]
+			}
+		}
+	}
+
+	return sortedTasks
+}
+
+func (u *HarukiSekaiAssetUpdater) getDownloadPriority(bundleName string) int {
+	if u.serverConfig.DownloadPriorityList == nil || len(*u.serverConfig.DownloadPriorityList) == 0 {
+		return 9999999
+	}
+
+	for idx, pattern := range *u.serverConfig.DownloadPriorityList {
+		matched, err := regexp.MatchString(pattern, bundleName)
+		if err != nil {
+			u.logger.Warnf("invalid priority pattern '%s': %v", pattern, err)
+			continue
+		}
+		if matched {
+			return idx
+		}
+	}
+
+	return 9999999
+}
+
+func (u *HarukiSekaiAssetUpdater) downloadAssetsConcurrently(toDownloadList map[string]downloadTask) []downloadResult {
+	results := make([]downloadResult, 0, len(toDownloadList))
+	resultsChan := make(chan downloadResult, len(toDownloadList))
+
+	sortedTasks := u.sortDownloadsByPriority(toDownloadList)
+
+	taskCount := 0
+	for _, item := range sortedTasks {
+		taskCount++
+		go func(dPath string, t downloadTask) {
+			bundlePath, bundleHash, err := u.downloadAndExportAsset(dPath, t.bundleHash, t.category)
+
+			result := downloadResult{err: err}
+			if err == nil && bundlePath != nil && bundleHash != nil {
+				result.bundlePath = *bundlePath
+				result.bundleHash = *bundleHash
+			}
+
+			resultsChan <- result
+		}(item.downloadPath, item.task)
+	}
+
+	successCount := 0
+	failCount := 0
+	for i := 0; i < taskCount; i++ {
+		result := <-resultsChan
+		results = append(results, result)
+
+		if result.err != nil {
+			failCount++
+			u.logger.Errorf("failed to download asset: %v", result.err)
+		} else {
+			successCount++
+			u.logger.Infof("successfully downloaded: %s", result.bundlePath)
+		}
+	}
+
+	close(resultsChan)
+	u.logger.Infof("download completed: %d succeeded, %d failed", successCount, failCount)
+
+	return results
+}
+
+func (u *HarukiSekaiAssetUpdater) updateDownloadedAssetsRecord(
+	downloadedAssets map[string]string,
+	downloadResults []downloadResult,
+) {
+	for _, result := range downloadResults {
+		if result.err == nil && result.bundlePath != "" {
+			downloadedAssets[result.bundlePath] = result.bundleHash
+		}
+	}
+	if err := u.saveDownloadedAssets(downloadedAssets); err != nil {
+		u.logger.Errorf("failed to save downloaded assets record: %v", err)
+	} else {
+		u.logger.Infof("downloaded assets record updated successfully")
+	}
 }
 
 func (u *HarukiSekaiAssetUpdater) Close() {

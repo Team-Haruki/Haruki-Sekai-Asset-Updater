@@ -9,6 +9,7 @@ require (
 	github.com/vgorin/cryptogo v0.0.0-20180620052908-eca286428d40
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/text v0.30.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

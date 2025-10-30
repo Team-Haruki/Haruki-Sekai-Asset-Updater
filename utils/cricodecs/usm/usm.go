@@ -121,7 +121,7 @@ func getUTFTable(usmFile *utils.BinaryStream) (UTFTable, error) {
 		}
 	}
 
-	utfTable.BaseStream.Seek(int64(rowOffset)-24, io.SeekStart)
+	_, _ = utfTable.BaseStream.Seek(int64(rowOffset)-24, io.SeekStart)
 
 	rows := make(UTFTable, 0, numberOfRows)
 	for n := 0; n < int(numberOfRows); n++ {
@@ -252,7 +252,7 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 	}
 
 	blockSize, _ := usmFile.ReadUInt32()
-	usmFile.BaseStream.Seek(0x20, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(0x20, io.SeekStart)
 	entryTable, err := getUTFTable(usmFile)
 	if err != nil {
 		return nil, err
@@ -271,28 +271,28 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 
 	offset := int64(8 + blockSize)
 
-	usmFile.BaseStream.Seek(offset, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
 	sig, _ = usmFile.ReadStringLength(4)
 	if string(sig) != "@SFV" {
 		return nil, fmt.Errorf("expected @SFV signature")
 	}
 
 	blockSize, _ = usmFile.ReadUInt32()
-	usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 	_, _ = getUTFTable(usmFile)
 	offset += int64(8 + blockSize)
 
-	usmFile.BaseStream.Seek(offset, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
 	nextSig, _ := usmFile.ReadStringLength(4)
 	hasAudio := false
 
 	if string(nextSig) == "@SFA" {
 		blockSize, _ = usmFile.ReadUInt32()
-		usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
+		_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 		_, _ = getUTFTable(usmFile)
 		offset += int64(8 + blockSize)
 		hasAudio = true
-		usmFile.BaseStream.Seek(offset, io.SeekStart)
+		_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
 		nextSig, _ = usmFile.ReadStringLength(4)
 	}
 
@@ -301,7 +301,7 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 	}
 
 	blockSize, _ = usmFile.ReadUInt32()
-	usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 	headerEnd, _ := usmFile.ReadStringLength(11)
 	if string(headerEnd) != "#HEADER END" {
 		return nil, fmt.Errorf("expected #HEADER END")
@@ -309,13 +309,13 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 	offset += int64(8 + blockSize)
 
 	if hasAudio {
-		usmFile.BaseStream.Seek(offset, io.SeekStart)
+		_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
 		sig, _ = usmFile.ReadStringLength(4)
 		if string(sig) != "@SFA" {
 			return nil, fmt.Errorf("expected @SFA signature")
 		}
 		blockSize, _ = usmFile.ReadUInt32()
-		usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
+		_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 		headerEnd, _ = usmFile.ReadStringLength(11)
 		if string(headerEnd) != "#HEADER END" {
 			return nil, fmt.Errorf("expected #HEADER END")
@@ -323,28 +323,28 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 		offset += int64(8 + blockSize)
 	}
 
-	usmFile.BaseStream.Seek(offset, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
 	sig, _ = usmFile.ReadStringLength(4)
 	if string(sig) != "@SFV" {
 		return nil, fmt.Errorf("expected @SFV signature")
 	}
 	blockSize, _ = usmFile.ReadUInt32()
-	usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 	_, _ = getUTFTable(usmFile)
 	offset += int64(8 + blockSize)
 
-	usmFile.BaseStream.Seek(offset, io.SeekStart)
+	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
 	sig, _ = usmFile.ReadStringLength(4)
 	if string(sig) != "@SFV" {
 		return nil, fmt.Errorf("expected @SFV signature")
 	}
-	usmFile.BaseStream.Seek(28, io.SeekCurrent)
+	_, _ = usmFile.BaseStream.Seek(28, io.SeekCurrent)
 	metadataEnd, _ := usmFile.ReadStringLength(13)
 	if string(metadataEnd) != "#METADATA END" {
 		return nil, fmt.Errorf("expected #METADATA END")
 	}
-	usmFile.AlignStream(4)
-	usmFile.BaseStream.Seek(16, io.SeekCurrent)
+	_ = usmFile.AlignStream(4)
+	_, _ = usmFile.BaseStream.Seek(16, io.SeekCurrent)
 
 	decodedFilename, err := decodeShiftJIS(filename)
 	if err != nil {
@@ -357,7 +357,9 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 	if err != nil {
 		return nil, err
 	}
-	defer videoFile.Close()
+	defer func(videoFile *os.File) {
+		_ = videoFile.Close()
+	}(videoFile)
 
 	outputFiles := []string{videoPath}
 	var audioFile *os.File
@@ -368,7 +370,9 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 		if err != nil {
 			return nil, err
 		}
-		defer audioFile.Close()
+		defer func(audioFile *os.File) {
+			_ = audioFile.Close()
+		}(audioFile)
 		outputFiles = append(outputFiles, audioPath)
 	}
 
@@ -384,17 +388,17 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 
 		chunkHeaderSize, _ := usmFile.ReadUInt16()
 		chunkFooterSize, _ := usmFile.ReadUInt16()
-		usmFile.ReadBytes(3)
+		_, _ = usmFile.ReadBytes(3)
 		dataTypeByte, _ := usmFile.ReadChar()
 		dataType := dataTypeByte & 0b11
-		usmFile.BaseStream.Seek(16, io.SeekCurrent)
+		_, _ = usmFile.BaseStream.Seek(16, io.SeekCurrent)
 
 		contentsEnd, _ := usmFile.ReadStringLength(13)
 		if string(contentsEnd) == "#CONTENTS END" {
 			break
 		}
 
-		usmFile.BaseStream.Seek(-13, io.SeekCurrent)
+		_, _ = usmFile.BaseStream.Seek(-13, io.SeekCurrent)
 		readDataLen := int(blockSize) - int(chunkHeaderSize) - int(chunkFooterSize)
 
 		if string(nextSig) == "@SFV" {
@@ -402,16 +406,16 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 			if dataType == 0 && vmask != nil {
 				content = maskVideo(content, vmask)
 			}
-			videoFile.Write(content)
-		} else if string(nextSig) == "@SFA" {
+			_, _ = videoFile.Write(content)
+		} else if string(nextSig) == "@SFA" && audioFile != nil {
 			content, _ := usmFile.ReadBytes(readDataLen)
 			if dataType == 0 && amask != nil {
 				content = maskAudio(content, amask)
 			}
-			audioFile.Write(content)
+			_, _ = audioFile.Write(content)
 		}
 
-		usmFile.BaseStream.Seek(nextOffset, io.SeekStart)
+		_, _ = usmFile.BaseStream.Seek(nextOffset, io.SeekStart)
 	}
 
 	return outputFiles, nil
@@ -432,7 +436,9 @@ func ExtractUSMFile(usmPath, targetDir string, key *uint64) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		_ = file.Close()
+	}(file)
 
 	fallbackName := []byte(filepath.Base(usmPath))
 	return ExtractUSM(file, targetDir, fallbackName, key)

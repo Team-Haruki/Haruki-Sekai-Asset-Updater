@@ -133,11 +133,3 @@ func (c *SekaiCryptor) UnpackOrdered(content []byte) (*orderedmap.OrderedMap, er
 	}
 	return result, nil
 }
-
-func UnpackInto[T any](c *SekaiCryptor, content []byte) (*T, error) {
-	var v T
-	if err := c.UnpackInto(content, &v); err != nil {
-		return nil, err
-	}
-	return &v, nil
-}

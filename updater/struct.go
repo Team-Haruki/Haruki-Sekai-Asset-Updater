@@ -1,29 +1,9 @@
 package updater
 
-import "fmt"
-
-type HarukiSekaiServerRegion string
-
-const (
-	HarukiSekaiServerRegionJP HarukiSekaiServerRegion = "jp"
-	HarukiSekaiServerRegionEN HarukiSekaiServerRegion = "en"
-	HarukiSekaiServerRegionTW HarukiSekaiServerRegion = "tw"
-	HarukiSekaiServerRegionKR HarukiSekaiServerRegion = "kr"
-	HarukiSekaiServerRegionCN HarukiSekaiServerRegion = "cn"
+import (
+	"fmt"
+	"haruki-sekai-asset/utils"
 )
-
-func ParseSekaiServerRegion(s string) (HarukiSekaiServerRegion, error) {
-	switch HarukiSekaiServerRegion(s) {
-	case HarukiSekaiServerRegionJP,
-		HarukiSekaiServerRegionEN,
-		HarukiSekaiServerRegionTW,
-		HarukiSekaiServerRegionKR,
-		HarukiSekaiServerRegionCN:
-		return HarukiSekaiServerRegion(s), nil
-	default:
-		return "", fmt.Errorf("invalid server region: %s", s)
-	}
-}
 
 type SekaiApiHttpStatus int
 
@@ -54,22 +34,6 @@ func ParseSekaiApiHttpStatus(code int) (SekaiApiHttpStatus, error) {
 	}
 }
 
-type HarukiSekaiAssetUpdaterConfig struct {
-	Enabled                   bool   `yaml:"enabled"`
-	ExportByCategory          bool   `yaml:"export_by_category,omitempty"`
-	AssetInfoURLTemplate      string `yaml:"asset_info_url_template"`
-	CPAssetProfile            string `yaml:"cp_asset_profile,omitempty"`
-	NuverseAssetVersionURL    string `yaml:"nuverse_asset_version_url,omitempty"`
-	NuverseOverrideAppVersion string `yaml:"nuverse_override_app_version,omitempty"`
-	AssetURLTemplate          string `yaml:"asset_url_template"`
-	RequiredCookies           bool   `yaml:"required_cookies,omitempty"`
-	AESKeyHex                 string `yaml:"aes_key_hex,omitempty"`
-	AESIVHex                  string `yaml:"aes_iv_hex,omitempty"`
-	UnityVersion              string `yaml:"unity_version,omitempty"`
-	AssetSaveDir              string `yaml:"asset_save_dir,omitempty"`
-	DownloadedAssetRecordFile string `yaml:"downloaded_asset_record_file,omitempty"`
-}
-
 type HarukiSekaiAssetCategory string
 
 const (
@@ -85,29 +49,47 @@ const (
 )
 
 type HarukiSekaiAssetUpdaterPayload struct {
-	Server       HarukiSekaiServerRegion `json:"server"`
-	AssetVersion string                  `json:"assetVersion,omitempty"`
-	AssetHash    string                  `json:"assetHash,omitempty"`
+	Server       utils.HarukiSekaiServerRegion `json:"server"`
+	AssetVersion string                        `json:"assetVersion,omitempty"`
+	AssetHash    string                        `json:"assetHash,omitempty"`
 }
 
 type HarukiSekaiAssetBundleDetail struct {
-	BundleName         string   `msgpack:"bundleName"`
-	CacheFileName      string   `msgpack:"cacheFileName"`
-	CacheDirectoryName string   `msgpack:"cacheDirectoryName"`
-	Hash               string   `msgpack:"hash"`
-	Category           string   `msgpack:"category"`
-	Crc                int64    `msgpack:"crc"`
-	FileSize           int64    `msgpack:"fileSize"`
-	Dependencies       []string `msgpack:"dependencies"`
-	Paths              []string `msgpack:"paths,omitempty"`
-	IsBuiltin          bool     `msgpack:"isBuiltin"`
-	IsRelocate         *bool    `msgpack:"isRelocate,omitempty"`
-	Md5Hash            *string  `msgpack:"md5Hash,omitempty"`
-	DownloadPath       *string  `msgpack:"downloadPath,omitempty"`
+	BundleName         string                   `msgpack:"bundleName"`
+	CacheFileName      string                   `msgpack:"cacheFileName"`
+	CacheDirectoryName string                   `msgpack:"cacheDirectoryName"`
+	Hash               string                   `msgpack:"hash"`
+	Category           HarukiSekaiAssetCategory `msgpack:"category"`
+	Crc                int64                    `msgpack:"crc"`
+	FileSize           int64                    `msgpack:"fileSize"`
+	Dependencies       []string                 `msgpack:"dependencies"`
+	Paths              []string                 `msgpack:"paths,omitempty"`
+	IsBuiltin          bool                     `msgpack:"isBuiltin"`
+	IsRelocate         *bool                    `msgpack:"isRelocate,omitempty"`
+	Md5Hash            *string                  `msgpack:"md5Hash,omitempty"`
+	DownloadPath       *string                  `msgpack:"downloadPath,omitempty"`
 }
 
 type HarukiSekaiAssetBundleInfo struct {
 	Version *string                                 `msgpack:"version,omitempty"`
 	OS      *HarukiSekaiAssetTargetOS               `msgpack:"os,omitempty"`
 	Bundles map[string]HarukiSekaiAssetBundleDetail `msgpack:"bundles"`
+}
+
+type downloadTask struct {
+	bundlePath string
+	bundleHash string
+	category   HarukiSekaiAssetCategory
+}
+
+type downloadResult struct {
+	bundlePath string
+	bundleHash string
+	err        error
+}
+
+type prioritizedDownloadTask struct {
+	downloadPath string
+	task         downloadTask
+	priority     int
 }
