@@ -21,7 +21,7 @@ func runUpdater(server utils.HarukiSekaiServerRegion, payload updater.HarukiSeka
 			proxy = &config.Cfg.Proxy
 		}
 
-		sem := config.Cfg.ConcurrentDownloads
+		sem := config.Cfg.Concurrents.ConcurrentDownload
 		if sem <= 0 {
 			sem = 4
 		}

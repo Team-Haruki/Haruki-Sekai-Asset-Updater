@@ -36,6 +36,13 @@ type HarukiSekaiAssetUpdaterConfig struct {
 	RemoveLocalAfterUpload    bool      `yaml:"remove_local_after_upload,omitempty"`
 }
 
+type ConcurrentConfig struct {
+	ConcurrentDownload int `yaml:"concurrent_download"`
+	ConcurrentUpload   int `yaml:"concurrent_upload"`
+	ConcurrentACB      int `yaml:"concurrent_acb"`
+	ConcurrentUSM      int `yaml:"concurrent_usm"`
+}
+
 type HarukiSekaiServerRegion string
 
 const (

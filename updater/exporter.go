@@ -2,6 +2,7 @@ package updater
 
 import (
 	"fmt"
+	"haruki-sekai-asset/config"
 	"haruki-sekai-asset/utils"
 	cloud "haruki-sekai-asset/utils/cloud"
 	"haruki-sekai-asset/utils/exporter"
@@ -13,6 +14,8 @@ import (
 )
 
 var logger = harukiLogger.NewLogger("HarukiAssetExporter", "INFO", nil)
+var usmSemaphore = make(chan struct{}, config.Cfg.Concurrents.ConcurrentUSM)
+var acbSemaphore = make(chan struct{}, config.Cfg.Concurrents.ConcurrentACB)
 
 func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportPath string, outputDir string, category HarukiSekaiAssetCategory, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
 	if assetStudioCLIPath == "" {
@@ -122,6 +125,8 @@ func handleUSMFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 		if len(usmFiles) == 0 {
 			return nil
 		}
+		usmSemaphore <- struct{}{}
+		defer func() { <-usmSemaphore }()
 		if len(usmFiles) == 1 {
 			logger.Infof("Exporting single USM file: %s", usmFiles[0])
 			return exporter.ExportUSM(usmFiles[0], exportPath, serverConfig.ConvertM2VToMP4, serverConfig.RemoveM2V, ffmpegPath)
@@ -159,11 +164,12 @@ func handleACBFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 		}
 		return nil
 	}
-
 	if serverConfig.ExportACBFiles && serverConfig.DecodeACBFiles {
 		if len(acbFiles) == 0 {
 			return nil
 		}
+		acbSemaphore <- struct{}{}
+		defer func() { <-acbSemaphore }()
 		logger.Infof("Exporting ACB file: %s", acbFiles[0])
 		return exporter.ExportACB(acbFiles[0], exportPath, serverConfig.DecodeHCAFiles, serverConfig.RemoveWav, serverConfig.ConvertWavToMP3, serverConfig.ConvertWavToFLAC, ffmpegPath)
 	}
@@ -251,10 +257,10 @@ func mergeUSMFiles(dir string, usmFiles []string) (string, error) {
 		}
 
 		if _, err := mergedFile.ReadFrom(src); err != nil {
-			src.Close()
+			_ = src.Close()
 			return "", fmt.Errorf("failed to copy %s: %w", usmFile, err)
 		}
-		src.Close()
+		_ = src.Close()
 
 		logger.Debugf("Merged %s into %s", filepath.Base(usmFile), filepath.Base(mergedFilePath))
 

@@ -11,7 +11,7 @@ import (
 	"sync"
 )
 
-var semaphore = make(chan struct{}, config.Cfg.ConcurrentUploads)
+var semaphore = make(chan struct{}, config.Cfg.Concurrents.ConcurrentUpload)
 var logger = harukiLogger.NewLogger("HarukiCloudStorageUploader", "INFO", nil)
 
 func UploadToStorage(

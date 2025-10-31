@@ -37,14 +37,13 @@ type RemoteStorageConfig struct {
 }
 
 type Config struct {
-	Proxy               string                                                                `yaml:"proxy,omitempty"`
-	ConcurrentDownloads int                                                                   `yaml:"concurrent_downloads,omitempty"`
-	ConcurrentUploads   int                                                                   `yaml:"concurrent_uploads,omitempty"`
-	Backend             BackendConfig                                                         `yaml:"backend,omitempty"`
-	Tools               ToolConfig                                                            `yaml:"tool,omitempty"`
-	Profiles            map[utils.HarukiSekaiServerRegion]map[string]string                   `yaml:"profiles,omitempty"`
-	Servers             map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiAssetUpdaterConfig `yaml:"servers"`
-	RemoteStorages      []RemoteStorageConfig                                                 `yaml:"remote_storages,omitempty"`
+	Proxy          string                                                                `yaml:"proxy,omitempty"`
+	Concurrents    utils.ConcurrentConfig                                                `yaml:"concurrents,omitempty"`
+	Backend        BackendConfig                                                         `yaml:"backend,omitempty"`
+	Tools          ToolConfig                                                            `yaml:"tool,omitempty"`
+	Profiles       map[utils.HarukiSekaiServerRegion]map[string]string                   `yaml:"profiles,omitempty"`
+	Servers        map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiAssetUpdaterConfig `yaml:"servers"`
+	RemoteStorages []RemoteStorageConfig                                                 `yaml:"remote_storages,omitempty"`
 }
 
 var Version = "v4.0.1-dev"
