@@ -10,7 +10,7 @@ import (
 )
 
 func ExportUSM(usmFile string, outputDir string, convertToMP4 bool, deleteOriginalM2V bool, ffmpegPath string) error {
-	extractedFiles, err := usm.ExtractUSMFile(usmFile, outputDir, nil)
+	extractedFiles, err := usm.ExtractUSMFile(usmFile, outputDir, nil, false)
 	if err != nil {
 		return fmt.Errorf("failed to extract USM file: %w", err)
 	}

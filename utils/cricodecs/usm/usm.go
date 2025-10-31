@@ -237,7 +237,7 @@ func maskAudio(content []byte, amask []byte) []byte {
 }
 
 // ExtractUSM extracts video and audio from a USM file
-func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *uint64) ([]string, error) {
+func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *uint64, exportAudio bool) ([]string, error) {
 	usmFile := utils.NewBinaryStream(usm, "big")
 
 	var vmask [][]byte
@@ -364,7 +364,7 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 	outputFiles := []string{videoPath}
 	var audioFile *os.File
 
-	if hasAudio {
+	if hasAudio && exportAudio {
 		audioPath := filepath.Join(targetDir, baseName+".adx")
 		audioFile, err = os.Create(audioPath)
 		if err != nil {
@@ -431,7 +431,7 @@ func decodeShiftJIS(data []byte) (string, error) {
 }
 
 // ExtractUSMFile is a convenience function that opens a file and extracts it
-func ExtractUSMFile(usmPath, targetDir string, key *uint64) ([]string, error) {
+func ExtractUSMFile(usmPath, targetDir string, key *uint64, exportAudio bool) ([]string, error) {
 	file, err := os.Open(usmPath)
 	if err != nil {
 		return nil, err
@@ -441,5 +441,5 @@ func ExtractUSMFile(usmPath, targetDir string, key *uint64) ([]string, error) {
 	}(file)
 
 	fallbackName := []byte(filepath.Base(usmPath))
-	return ExtractUSM(file, targetDir, fallbackName, key)
+	return ExtractUSM(file, targetDir, fallbackName, key, exportAudio)
 }

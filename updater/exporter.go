@@ -25,12 +25,23 @@ func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportP
 	} else {
 		finalOutputPath = filepath.Join(outputDir, exportPath)
 	}
+
+	var assetTypes string
+	if strings.Contains(exportPath, "character/member_cutout") {
+		assetTypes = "monoBehaviour,textAsset,tex2d,tex2dArray,audio"
+		logger.Debugf("Using asset types without sprite for character/member_cutout: %s", exportPath)
+	} else {
+		assetTypes = "monoBehaviour,textAsset,tex2d,sprite,tex2dArray,audio"
+	}
+
 	args := []string{
 		filePath,
 		"-m", "export",
+		"-t", assetTypes,
 		"-g", "none",
 		"-f", "assetName",
 		"-o", finalOutputPath,
+		"-r",
 	}
 	if serverConfig.UnityVersion != "" {
 		args = append(args, "--unity-version", serverConfig.UnityVersion)
@@ -46,7 +57,7 @@ func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportP
 	logger.Infof("Successfully exported asset bundle: %s", filePath)
 
 	if err := postProcessExportedFiles(finalOutputPath, serverConfig, ffmpegPath, cwebpPath); err != nil {
-		logger.Warnf("Post-processing failed for %s: %v", finalOutputPath, err)
+		return fmt.Errorf("post-processing failed for %s: %w", finalOutputPath, err)
 	}
 
 	return nil
@@ -57,26 +68,24 @@ func postProcessExportedFiles(exportPath string, serverConfig utils.HarukiSekaiA
 		return nil
 	}
 	if err := handleUSMFiles(exportPath, serverConfig, ffmpegPath); err != nil {
-		logger.Warnf("Failed to handle USM files in %s: %v", exportPath, err)
+		return fmt.Errorf("failed to handle USM files in %s: %w", exportPath, err)
 	}
 	if err := handleACBFiles(exportPath, serverConfig, ffmpegPath); err != nil {
-		logger.Warnf("Failed to handle ACB files in %s: %v", exportPath, err)
+		return fmt.Errorf("failed to handle ACB files in %s: %w", exportPath, err)
 	}
 	if err := handlePNGConversion(exportPath, serverConfig, cwebpPath); err != nil {
-		logger.Warnf("Failed to handle PNG conversion in %s: %v", exportPath, err)
+		return fmt.Errorf("failed to handle PNG conversion in %s: %w", exportPath, err)
 	}
 	if serverConfig.UploadToCloud {
 		exportedFiles, err := scanAllFiles(exportPath)
 		if err != nil {
-			logger.Warnf("Failed to scan files in %s for upload: %v", exportPath, err)
-			return err
+			return fmt.Errorf("failed to scan files in %s for upload: %w", exportPath, err)
 		}
 
 		if len(exportedFiles) > 0 {
 			logger.Infof("Found %d files to upload from %s", len(exportedFiles), exportPath)
-			if err := cloud.UploadToAllStorages(exportedFiles, exportPath); err != nil {
-				logger.Warnf("Failed to upload files from %s: %v", exportPath, err)
-				return err
+			if err := cloud.UploadToAllStorages(exportedFiles, exportPath, serverConfig.RemoveLocalAfterUpload); err != nil {
+				return fmt.Errorf("failed to upload files from %s: %w", exportPath, err)
 			}
 		} else {
 			logger.Infof("No files found to upload in %s", exportPath)
@@ -103,7 +112,7 @@ func handleUSMFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 		for _, usmFile := range usmFiles {
 			logger.Infof("Deleting USM file: %s", usmFile)
 			if err := os.Remove(usmFile); err != nil {
-				logger.Warnf("Failed to delete %s: %v", usmFile, err)
+				return fmt.Errorf("failed to delete USM file %s: %w", usmFile, err)
 			}
 		}
 		return nil
@@ -145,7 +154,7 @@ func handleACBFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 		for _, acbFile := range acbFiles {
 			logger.Infof("Deleting ACB file: %s", acbFile)
 			if err := os.Remove(acbFile); err != nil {
-				logger.Warnf("Failed to delete %s: %v", acbFile, err)
+				return fmt.Errorf("failed to delete ACB file %s: %w", acbFile, err)
 			}
 		}
 		return nil
@@ -176,7 +185,13 @@ func handlePNGConversion(exportPath string, serverConfig utils.HarukiSekaiAssetU
 		webpFile := strings.TrimSuffix(pngFile, ".png") + ".webp"
 		logger.Infof("Converting PNG to WebP: %s -> %s", pngFile, webpFile)
 		if err := exporter.ConvertPNGToWebP(pngFile, webpFile, cwebpPath); err != nil {
-			logger.Warnf("Failed to convert %s to WebP: %v", pngFile, err)
+			return fmt.Errorf("failed to convert %s to WebP: %w", pngFile, err)
+		}
+
+		if serverConfig.RemovePNG {
+			if err := os.Remove(pngFile); err != nil {
+				return fmt.Errorf("failed to remove original PNG %s: %w", pngFile, err)
+			}
 		}
 	}
 
@@ -224,18 +239,30 @@ func mergeUSMFiles(dir string, usmFiles []string) (string, error) {
 	defer func(mergedFile *os.File) {
 		_ = mergedFile.Close()
 	}(mergedFile)
+
 	for _, usmFile := range usmFiles {
 		if usmFile == mergedFilePath {
 			continue
 		}
-		data, err := os.ReadFile(usmFile)
+
+		src, err := os.Open(usmFile)
 		if err != nil {
-			return "", fmt.Errorf("failed to read %s: %w", usmFile, err)
+			return "", fmt.Errorf("failed to open %s: %w", usmFile, err)
 		}
-		if _, err := mergedFile.Write(data); err != nil {
-			return "", fmt.Errorf("failed to write to merged file: %w", err)
+
+		if _, err := mergedFile.ReadFrom(src); err != nil {
+			src.Close()
+			return "", fmt.Errorf("failed to copy %s: %w", usmFile, err)
 		}
-		logger.Infof("Merged %s into %s", filepath.Base(usmFile), filepath.Base(mergedFilePath))
+		src.Close()
+
+		logger.Debugf("Merged %s into %s", filepath.Base(usmFile), filepath.Base(mergedFilePath))
+
+		if err := os.Remove(usmFile); err != nil {
+			logger.Warnf("Failed to delete merged USM file %s: %v", usmFile, err)
+		} else {
+			logger.Debugf("Deleted merged source file: %s", filepath.Base(usmFile))
+		}
 	}
 
 	return mergedFilePath, nil

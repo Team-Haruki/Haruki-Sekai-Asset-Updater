@@ -18,13 +18,13 @@ type BackendConfig struct {
 	MainLogFile              string `yaml:"main_log_file"`
 	AccessLog                string `yaml:"access_log"`
 	AccessLogPath            string `yaml:"access_log_path"`
-	AcceptUserAgentPrefix    string `yaml:"accept_user_agent_prefix"`
-	AcceptAuthorizationToken string `yaml:"accept_authorization_token"`
+	EnableAuthorization      bool   `yaml:"enable_authorization,omitempty"`
+	AcceptUserAgentPrefix    string `yaml:"accept_user_agent_prefix,omitempty"`
+	AcceptAuthorizationToken string `yaml:"accept_authorization_token,omitempty"`
 }
 
 type ToolConfig struct {
 	FFMPEGPath         string `yaml:"ffmpeg_path,omitempty"`
-	S3ToolPath         string `yaml:"s3_tool_path,omitempty"`
 	AssetStudioCLIPath string `yaml:"asset_studio_cli_path,omitempty"`
 	CwebpPath          string `yaml:"cwebp_path,omitempty"`
 }
@@ -47,6 +47,7 @@ type Config struct {
 	RemoteStorages      []RemoteStorageConfig                                                 `yaml:"remote_storages,omitempty"`
 }
 
+var Version = "v4.0.1-dev"
 var Cfg Config
 
 func init() {

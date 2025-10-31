@@ -28,6 +28,11 @@ func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalW
 			wg.Add(1)
 			go func(hcaPath string) {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						errChan <- fmt.Errorf("panic in HCA export %s: %v", hcaPath, r)
+					}
+				}()
 				semaphore <- struct{}{}
 				defer func() { <-semaphore }()
 				err := ExportHCA(hcaPath, outputDir, convertToMP3, convertToFLAC, deleteOriginalWav, ffmpegPath)
@@ -38,8 +43,20 @@ func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalW
 		}
 		wg.Wait()
 		close(errChan)
-		if len(errChan) > 0 {
-			return <-errChan
+
+		var firstError error
+		errorCount := 0
+		for err := range errChan {
+			errorCount++
+			if firstError == nil {
+				firstError = err
+			}
+			fmt.Fprintf(os.Stderr, "HCA export error: %v\n", err)
+		}
+
+		if errorCount > 0 {
+			fmt.Fprintf(os.Stderr, "Error: %d HCA files failed to export\n", errorCount)
+			return fmt.Errorf("failed to export %d HCA files: %w", errorCount, firstError)
 		}
 	}
 	if err := os.Remove(acbFile); err != nil {

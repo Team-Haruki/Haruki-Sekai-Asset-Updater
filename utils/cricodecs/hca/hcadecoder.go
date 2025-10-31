@@ -178,11 +178,18 @@ func (d *CriWareHCADecoder) DecodeFrame() ([]float32, int, error) {
 
 	// Handle encoder delay
 	if d.currentDelay > 0 {
+		// If delay exceeds this block, skip entire block
+		if d.currentDelay >= samples {
+			d.currentDelay -= samples
+			// Return empty samples for this block
+			return d.fbuf[0:0], 0, nil
+		}
 		discard = d.currentDelay
 		d.currentDelay = 0
 	}
 
-	return d.fbuf[discard*int(d.info.ChannelCount):], samples - discard, nil
+	startIdx := discard * int(d.info.ChannelCount)
+	return d.fbuf[startIdx:], samples - discard, nil
 }
 
 // DecodeAll decodes the entire HCA file and returns all samples
@@ -349,23 +356,29 @@ func (d *CriWareHCADecoder) DecodeToWav(w io.Writer) error {
 		} else if err != nil {
 			return err
 		}
-
 		if err := d.handle.DecodeBlock(d.buf); err != nil {
 			return err
 		}
-
 		d.handle.ReadSamples16(pcmBuf)
-
 		samples := int(d.info.SamplesPerBlock)
 		discard := 0
-
 		if d.currentDelay > 0 {
+			if d.currentDelay >= samples {
+				d.currentDelay -= samples
+				continue
+			}
 			discard = d.currentDelay
 			d.currentDelay = 0
 		}
-
 		start := discard * int(d.info.ChannelCount)
 		end := samples * int(d.info.ChannelCount)
+		if start < 0 || end < 0 || start >= end {
+			return fmt.Errorf("invalid sample range: start=%d, end=%d, discard=%d, samples=%d", start, end, discard, samples)
+		}
+		if end > len(pcmBuf) {
+			return fmt.Errorf("sample range out of bounds: end=%d, buffer_len=%d", end, len(pcmBuf))
+		}
+
 		data := make([]byte, (end-start)*2)
 		for i, sample := range pcmBuf[start:end] {
 			binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
