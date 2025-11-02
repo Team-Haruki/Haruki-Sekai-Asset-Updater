@@ -363,18 +363,7 @@ func (hca *ClHCA) DecodeBlock(data []byte) error {
 
 // TestBlock tests if a block decodes correctly (for key testing)
 func (hca *ClHCA) TestBlock(data []byte) int {
-	const framesamples = hcaSubframes * hcaSamplesPerSubframe
-	const scale = 32768.0
-
-	// Check if block is empty
-	isEmpty := true
-	for i := 0x02; i < len(data)-0x02; i++ {
-		if data[i] != 0 {
-			isEmpty = false
-			break
-		}
-	}
-	if isEmpty {
+	if isEmptyBlock(data) {
 		return 0
 	}
 
@@ -383,8 +372,26 @@ func (hca *ClHCA) TestBlock(data []byte) int {
 		return -1
 	}
 
-	// Detect data errors
-	bitsMax := int(hca.frameSize) * 8
+	if errCode := validateBitreader(data, status, int(hca.frameSize)); errCode != 0 {
+		return errCode
+	}
+
+	hca.decodeBlockTransform()
+
+	return evaluateDecodeQuality(hca)
+}
+
+func isEmptyBlock(data []byte) bool {
+	for i := 0x02; i < len(data)-0x02; i++ {
+		if data[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func validateBitreader(data []byte, status, frameSize int) int {
+	bitsMax := frameSize * 8
 	if status+14 > bitsMax {
 		return hcaErrorBitreader
 	}
@@ -393,14 +400,19 @@ func (hca *ClHCA) TestBlock(data []byte) int {
 	if status%8 != 0 {
 		byteStart++
 	}
-	for i := byteStart; i < int(hca.frameSize)-0x02; i++ {
+	for i := byteStart; i < frameSize-0x02; i++ {
 		if data[i] != 0 {
 			return -1
 		}
 	}
 
-	// Check decode results
-	hca.decodeBlockTransform()
+	return 0
+}
+
+func evaluateDecodeQuality(hca *ClHCA) int {
+	const framesamples = hcaSubframes * hcaSamplesPerSubframe
+	const scale = 32768.0
+
 	clips := 0
 	blanks := 0
 	channelBlanks := make([]int, hcaMaxChannels)
@@ -423,6 +435,10 @@ func (hca *ClHCA) TestBlock(data []byte) int {
 		}
 	}
 
+	return calculateScore(clips, blanks, channelBlanks, framesamples, hca.channels)
+}
+
+func calculateScore(clips, blanks int, channelBlanks []int, framesamples int, channels uint) int {
 	if clips == 1 {
 		clips++
 	}
@@ -430,11 +446,11 @@ func (hca *ClHCA) TestBlock(data []byte) int {
 		return clips
 	}
 
-	if blanks == int(hca.channels)*framesamples {
+	if blanks == int(channels)*framesamples {
 		return 0
 	}
 
-	if hca.channels >= 2 {
+	if channels >= 2 {
 		if channelBlanks[0] == framesamples && channelBlanks[1] != framesamples {
 			return 3
 		}

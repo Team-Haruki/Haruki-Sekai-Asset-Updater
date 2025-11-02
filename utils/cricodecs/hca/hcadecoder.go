@@ -262,65 +262,83 @@ func (d *CriWareHCADecoder) testHCAScore(kt *KeyTest) int {
 	d.SetEncryptionKey(kt.Key, kt.Subkey)
 
 	for testFrames < hcaKeyMaxTestFrames && currentFrame < d.info.BlockCount {
-		// Read frame
-		if _, err := d.reader.Seek(int64(offset), io.SeekStart); err != nil {
-			break
-		}
+		score, shouldBreak, newOffset := d.testSingleFrame(kt, offset, &blankFrames)
+		offset = newOffset
 
-		bytes, err := io.ReadFull(d.reader, d.buf)
-		if err != nil || bytes != int(d.info.BlockSize) {
-			break
-		}
-
-		// Test frame
-		score := d.handle.TestBlock(d.buf)
-
-		// Get first non-blank frame
-		if kt.StartOffset == 0 && score != 0 {
-			kt.StartOffset = offset
-		}
-
-		offset += uint(bytes)
-
-		if score < 0 || score > hcaKeyMaxFrameScore {
+		if shouldBreak {
 			totalScore = -1
+			break
+		}
+
+		if score < 0 {
 			break
 		}
 
 		currentFrame++
 
-		// Ignore silent frames at the beginning
-		if score == 0 && blankFrames < hcaKeyMaxSkipBlanks {
+		if shouldSkipBlankFrame(score, blankFrames) {
 			blankFrames++
 			continue
 		}
 
 		testFrames++
+		totalScore += scaleFrameScore(score)
 
-		// Scale values
-		switch score {
-		case 1:
-			score = 1
-		case 0:
-			score = 3 * hcaKeyScoreScale
-		default:
-			score = score * hcaKeyScoreScale
-		}
-
-		totalScore += score
-
-		// Don't bother checking more frames
 		if totalScore > hcaKeyMaxTotalScore {
 			break
 		}
 	}
 
-	// Signal best possible score
-	if testFrames > hcaKeyMinTestFrames && totalScore > 0 && totalScore <= testFrames {
-		totalScore = 1
+	d.handle.DecodeReset()
+	return finalizeScore(totalScore, testFrames)
+}
+
+func (d *CriWareHCADecoder) testSingleFrame(kt *KeyTest, offset uint, blankFrames *int) (int, bool, uint) {
+	if _, err := d.reader.Seek(int64(offset), io.SeekStart); err != nil {
+		return -1, false, offset
 	}
 
-	d.handle.DecodeReset()
+	bytes, err := io.ReadFull(d.reader, d.buf)
+	if err != nil || bytes != int(d.info.BlockSize) {
+		return -1, false, offset
+	}
+
+	score := d.handle.TestBlock(d.buf)
+
+	// Get first non-blank frame
+	if kt.StartOffset == 0 && score != 0 {
+		kt.StartOffset = offset
+	}
+
+	newOffset := offset + uint(bytes)
+
+	if score < 0 || score > hcaKeyMaxFrameScore {
+		return 0, true, newOffset
+	}
+
+	return score, false, newOffset
+}
+
+func shouldSkipBlankFrame(score, blankFrames int) bool {
+	return score == 0 && blankFrames < hcaKeyMaxSkipBlanks
+}
+
+func scaleFrameScore(score int) int {
+	switch score {
+	case 1:
+		return 1
+	case 0:
+		return 3 * hcaKeyScoreScale
+	default:
+		return score * hcaKeyScoreScale
+	}
+}
+
+func finalizeScore(totalScore, testFrames int) int {
+	// Signal best possible score
+	if testFrames > hcaKeyMinTestFrames && totalScore > 0 && totalScore <= testFrames {
+		return 1
+	}
 	return totalScore
 }
 

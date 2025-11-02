@@ -537,7 +537,23 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 	br := &clData{}
 	bitreaderInit(br, data, len(data))
 
-	// Read HCA base header
+	if err := hca.decodeBaseHeader(br, data); err != nil {
+		return err
+	}
+
+	if err := hca.decodeChunks(br); err != nil {
+		return err
+	}
+
+	if err := hca.validateAndInitialize(); err != nil {
+		return err
+	}
+
+	hca.isValid = true
+	return nil
+}
+
+func (hca *ClHCA) decodeBaseHeader(br *clData, data []byte) error {
 	if (bitreaderPeek(br, 32) & hcaMask) != 0x48434100 {
 		return errors.New("invalid HCA signature")
 	}
@@ -560,88 +576,125 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 		return errors.New("header checksum failed")
 	}
 
-	size := uint(len(data)) - 0x08
+	return nil
+}
 
-	// Format chunk
-	if size >= 0x10 && (bitreaderPeek(br, 32)&hcaMask) == 0x666D7400 { // "fmt\0"
-		bitreaderSkip(br, 32)
-		hca.channels = bitreaderRead(br, 8)
-		hca.sampleRate = bitreaderRead(br, 24)
-		hca.frameCount = bitreaderRead(br, 32)
-		hca.encoderDelay = bitreaderRead(br, 16)
-		hca.encoderPadding = bitreaderRead(br, 16)
+func (hca *ClHCA) decodeChunks(br *clData) error {
+	if err := hca.decodeFmtChunk(br); err != nil {
+		return err
+	}
 
-		if hca.channels < hcaMinChannels || hca.channels > hcaMaxChannels {
-			return errors.New("invalid channel count")
-		}
-		if hca.frameCount == 0 {
-			return errors.New("invalid frame count")
-		}
-		if hca.sampleRate < hcaMinSampleRate || hca.sampleRate > hcaMaxSampleRate {
-			return errors.New("invalid sample rate")
-		}
+	if err := hca.decodeCompDecChunk(br); err != nil {
+		return err
+	}
 
-		size -= 0x10
-	} else {
+	hca.decodeVbrChunk(br)
+	hca.decodeAthChunk(br)
+
+	if err := hca.decodeLoopChunk(br); err != nil {
+		return err
+	}
+
+	if err := hca.decodeCipherChunk(br); err != nil {
+		return err
+	}
+
+	hca.decodeRvaChunk(br)
+
+	if err := hca.decodeCommentChunk(br); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (hca *ClHCA) decodeFmtChunk(br *clData) error {
+	if (bitreaderPeek(br, 32) & hcaMask) != 0x666D7400 {
 		return errors.New("missing fmt chunk")
 	}
 
-	// Comp/dec chunk
-	if size >= 0x10 && (bitreaderPeek(br, 32)&hcaMask) == 0x636F6D70 { // "comp"
-		bitreaderSkip(br, 32)
-		hca.frameSize = bitreaderRead(br, 16)
-		hca.minResolution = bitreaderRead(br, 8)
-		hca.maxResolution = bitreaderRead(br, 8)
-		hca.trackCount = bitreaderRead(br, 8)
-		hca.channelConfig = bitreaderRead(br, 8)
-		hca.totalBandCount = bitreaderRead(br, 8)
-		hca.baseBandCount = bitreaderRead(br, 8)
-		hca.stereoBandCount = bitreaderRead(br, 8)
-		hca.bandsPerHfrGroup = bitreaderRead(br, 8)
-		hca.msStereo = bitreaderRead(br, 8)
-		hca.reserved = bitreaderRead(br, 8)
+	bitreaderSkip(br, 32)
+	hca.channels = bitreaderRead(br, 8)
+	hca.sampleRate = bitreaderRead(br, 24)
+	hca.frameCount = bitreaderRead(br, 32)
+	hca.encoderDelay = bitreaderRead(br, 16)
+	hca.encoderPadding = bitreaderRead(br, 16)
 
-		size -= 0x10
-	} else if size >= 0x0c && (bitreaderPeek(br, 32)&hcaMask) == 0x64656300 { // "dec\0"
-		bitreaderSkip(br, 32)
-		hca.frameSize = bitreaderRead(br, 16)
-		hca.minResolution = bitreaderRead(br, 8)
-		hca.maxResolution = bitreaderRead(br, 8)
-		hca.totalBandCount = bitreaderRead(br, 8) + 1
-		hca.baseBandCount = bitreaderRead(br, 8) + 1
-		hca.trackCount = bitreaderRead(br, 4)
-		hca.channelConfig = bitreaderRead(br, 4)
-		hca.stereoType = bitreaderRead(br, 8)
-
-		if hca.stereoType == 0 {
-			hca.baseBandCount = hca.totalBandCount
-		}
-		hca.stereoBandCount = hca.totalBandCount - hca.baseBandCount
-		hca.bandsPerHfrGroup = 0
-
-		size -= 0x0c
-	} else {
-		return errors.New("missing comp/dec chunk")
+	if hca.channels < hcaMinChannels || hca.channels > hcaMaxChannels {
+		return errors.New("invalid channel count")
+	}
+	if hca.frameCount == 0 {
+		return errors.New("invalid frame count")
+	}
+	if hca.sampleRate < hcaMinSampleRate || hca.sampleRate > hcaMaxSampleRate {
+		return errors.New("invalid sample rate")
 	}
 
-	// VBR chunk (optional)
-	if size >= 0x08 && (bitreaderPeek(br, 32)&hcaMask) == 0x76627200 { // "vbr\0"
+	return nil
+}
+
+func (hca *ClHCA) decodeCompDecChunk(br *clData) error {
+	chunkType := bitreaderPeek(br, 32) & hcaMask
+
+	if chunkType == 0x636F6D70 { // "comp"
+		return hca.decodeCompChunk(br)
+	} else if chunkType == 0x64656300 { // "dec\0"
+		return hca.decodeDecChunk(br)
+	}
+
+	return errors.New("missing comp/dec chunk")
+}
+
+func (hca *ClHCA) decodeCompChunk(br *clData) error {
+	bitreaderSkip(br, 32)
+	hca.frameSize = bitreaderRead(br, 16)
+	hca.minResolution = bitreaderRead(br, 8)
+	hca.maxResolution = bitreaderRead(br, 8)
+	hca.trackCount = bitreaderRead(br, 8)
+	hca.channelConfig = bitreaderRead(br, 8)
+	hca.totalBandCount = bitreaderRead(br, 8)
+	hca.baseBandCount = bitreaderRead(br, 8)
+	hca.stereoBandCount = bitreaderRead(br, 8)
+	hca.bandsPerHfrGroup = bitreaderRead(br, 8)
+	hca.msStereo = bitreaderRead(br, 8)
+	hca.reserved = bitreaderRead(br, 8)
+
+	return nil
+}
+
+func (hca *ClHCA) decodeDecChunk(br *clData) error {
+	bitreaderSkip(br, 32)
+	hca.frameSize = bitreaderRead(br, 16)
+	hca.minResolution = bitreaderRead(br, 8)
+	hca.maxResolution = bitreaderRead(br, 8)
+	hca.totalBandCount = bitreaderRead(br, 8) + 1
+	hca.baseBandCount = bitreaderRead(br, 8) + 1
+	hca.trackCount = bitreaderRead(br, 4)
+	hca.channelConfig = bitreaderRead(br, 4)
+	hca.stereoType = bitreaderRead(br, 8)
+
+	if hca.stereoType == 0 {
+		hca.baseBandCount = hca.totalBandCount
+	}
+	hca.stereoBandCount = hca.totalBandCount - hca.baseBandCount
+	hca.bandsPerHfrGroup = 0
+
+	return nil
+}
+
+func (hca *ClHCA) decodeVbrChunk(br *clData) {
+	if (bitreaderPeek(br, 32) & hcaMask) == 0x76627200 { // "vbr\0"
 		bitreaderSkip(br, 32)
 		hca.vbrMaxFrameSize = bitreaderRead(br, 16)
 		hca.vbrNoiseLevel = bitreaderRead(br, 16)
-
-		if !(hca.frameSize == 0 && hca.vbrMaxFrameSize > 8 && hca.vbrMaxFrameSize <= 0x1FF) {
-			return errors.New("invalid VBR settings")
-		}
-
-		size -= 0x08
 	} else {
 		hca.vbrMaxFrameSize = 0
 		hca.vbrNoiseLevel = 0
 	}
+}
 
-	// ATH chunk (optional)
-	if size >= 0x06 && (bitreaderPeek(br, 32)&hcaMask) == 0x61746800 { // "ath\0"
+func (hca *ClHCA) decodeAthChunk(br *clData) {
+	if (bitreaderPeek(br, 32) & hcaMask) == 0x61746800 { // "ath\0"
 		bitreaderSkip(br, 32)
 		hca.athType = bitreaderRead(br, 16)
 	} else {
@@ -651,9 +704,10 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 			hca.athType = 0
 		}
 	}
+}
 
-	// Loop chunk (optional)
-	if size >= 0x10 && (bitreaderPeek(br, 32)&hcaMask) == 0x6C6F6F70 { // "loop"
+func (hca *ClHCA) decodeLoopChunk(br *clData) error {
+	if (bitreaderPeek(br, 32) & hcaMask) == 0x6C6F6F70 { // "loop"
 		bitreaderSkip(br, 32)
 		hca.loopStartFrame = bitreaderRead(br, 32)
 		hca.loopEndFrame = bitreaderRead(br, 32)
@@ -664,57 +718,71 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 		if !(hca.loopStartFrame <= hca.loopEndFrame && hca.loopEndFrame < hca.frameCount) {
 			return errors.New("invalid loop points")
 		}
-
-		size -= 0x10
 	} else {
 		hca.loopFlag = 0
 	}
 
-	// Cipher chunk (optional)
-	if size >= 0x06 && (bitreaderPeek(br, 32)&hcaMask) == 0x63697068 { // "ciph"
+	return nil
+}
+
+func (hca *ClHCA) decodeCipherChunk(br *clData) error {
+	if (bitreaderPeek(br, 32) & hcaMask) == 0x63697068 { // "ciph"
 		bitreaderSkip(br, 32)
 		hca.ciphType = bitreaderRead(br, 16)
 
 		if !(hca.ciphType == 0 || hca.ciphType == 1 || hca.ciphType == 56) {
 			return errors.New("invalid cipher type")
 		}
-
-		size -= 0x06
 	} else {
 		hca.ciphType = 0
 	}
 
-	// RVA chunk (optional)
-	if size >= 0x08 && (bitreaderPeek(br, 32)&hcaMask) == 0x72766100 { // "rva\0"
+	return nil
+}
+
+func (hca *ClHCA) decodeRvaChunk(br *clData) {
+	if (bitreaderPeek(br, 32) & hcaMask) == 0x72766100 { // "rva\0"
 		bitreaderSkip(br, 32)
 		rvaVolumeInt := bitreaderRead(br, 32)
 		hca.rvaVolume = math.Float32frombits(uint32(rvaVolumeInt))
-
-		size -= 0x08
 	} else {
 		hca.rvaVolume = 1.0
 	}
+}
 
-	// Comment chunk (optional)
-	if size >= 0x05 && (bitreaderPeek(br, 32)&hcaMask) == 0x636F6D6D { // "comm"
+func (hca *ClHCA) decodeCommentChunk(br *clData) error {
+	if (bitreaderPeek(br, 32) & hcaMask) == 0x636F6D6D { // "comm"
 		bitreaderSkip(br, 32)
 		hca.commentLen = bitreaderRead(br, 8)
-
-		if hca.commentLen > size {
-			return errors.New("invalid comment length")
-		}
 
 		for i := uint(0); i < hca.commentLen; i++ {
 			hca.comment[i] = byte(bitreaderRead(br, 8))
 		}
 		hca.comment[hca.commentLen] = 0
-
-		size -= 0x05 + hca.commentLen
 	} else {
 		hca.commentLen = 0
 	}
 
-	// Validations
+	return nil
+}
+
+func (hca *ClHCA) validateAndInitialize() error {
+	if err := hca.validateFrameAndResolution(); err != nil {
+		return err
+	}
+
+	if err := hca.validateTracksAndBands(); err != nil {
+		return err
+	}
+
+	if err := hca.initializeDecoderState(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (hca *ClHCA) validateFrameAndResolution() error {
 	if hca.frameSize < hcaMinFrameSize || hca.frameSize > hcaMaxFrameSize {
 		return errors.New("invalid frame size")
 	}
@@ -729,7 +797,10 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 		}
 	}
 
-	// Initialize state
+	return nil
+}
+
+func (hca *ClHCA) validateTracksAndBands() error {
 	if hca.trackCount == 0 {
 		hca.trackCount = 1
 	}
@@ -750,6 +821,10 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 		hca.totalBandCount-hca.baseBandCount-hca.stereoBandCount,
 		hca.bandsPerHfrGroup)
 
+	return nil
+}
+
+func (hca *ClHCA) initializeDecoderState() error {
 	if err := athInit(&hca.athCurve, int(hca.athType), hca.sampleRate); err != nil {
 		return err
 	}
@@ -758,7 +833,6 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 		return err
 	}
 
-	// Initialize channels
 	if err := hca.initChannels(); err != nil {
 		return err
 	}
@@ -769,7 +843,6 @@ func (hca *ClHCA) DecodeHeader(data []byte) error {
 		return errors.New("MS stereo not fully supported")
 	}
 
-	hca.isValid = true
 	return nil
 }
 

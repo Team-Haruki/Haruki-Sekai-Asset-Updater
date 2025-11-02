@@ -20,74 +20,126 @@ func ExtractACB(acbFile io.ReadSeeker, targetDir, acbFilePath string) ([]string,
 		return nil, err
 	}
 
-	// Get embedded AWB
-	var embeddedAwb *AFSArchive
-	awbData, err := getBytesField(utf.Rows[0], "AwbFile")
+	embeddedAwb := loadEmbeddedAwb(utf.Rows[0])
+	externalAwbs := loadExternalAwbs(utf.Rows[0], acbFilePath)
+
+	return extractAllTracks(trackList, targetDir, embeddedAwb, externalAwbs)
+}
+
+func loadEmbeddedAwb(row map[string]interface{}) *AFSArchive {
+	awbData, err := getBytesField(row, "AwbFile")
 	if err == nil && len(awbData) > 0 {
-		embeddedAwb, _ = NewAFSArchive(bytes.NewReader(awbData))
+		embeddedAwb, _ := NewAFSArchive(bytes.NewReader(awbData))
+		return embeddedAwb
+	}
+	return nil
+}
+
+func loadExternalAwbs(row map[string]interface{}, acbFilePath string) []*AFSArchive {
+	var externalAwbs []*AFSArchive
+
+	streamAwbHash, err := getBytesField(row, "StreamAwbHash")
+	if err != nil || len(streamAwbHash) == 0 {
+		return externalAwbs
 	}
 
-	// Get external AWBs
-	var externalAwbs []*AFSArchive
-	streamAwbHash, err := getBytesField(utf.Rows[0], "StreamAwbHash")
-	if err == nil && len(streamAwbHash) > 0 {
-		hashTable, err := NewUTFTable(bytes.NewReader(streamAwbHash))
-		if err == nil {
-			for _, awbRow := range hashTable.Rows {
-				awbName := getStringField(awbRow, "Name")
-				awbPath := filepath.Join(filepath.Dir(acbFilePath), awbName+".awb")
+	hashTable, err := NewUTFTable(bytes.NewReader(streamAwbHash))
+	if err != nil {
+		return externalAwbs
+	}
 
-				if _, err := os.Stat(awbPath); err == nil {
-					awbFile, err := os.Open(awbPath)
-					if err == nil {
-						awbData, _ := io.ReadAll(awbFile)
-						_ = awbFile.Close()
+	for _, awbRow := range hashTable.Rows {
+		awbName := getStringField(awbRow, "Name")
+		awbPath := filepath.Join(filepath.Dir(acbFilePath), awbName+".awb")
 
-						if awb, err := NewAFSArchive(bytes.NewReader(awbData)); err == nil {
-							externalAwbs = append(externalAwbs, awb)
-						}
-					}
-				}
-			}
+		if awb := loadExternalAwbFile(awbPath); awb != nil {
+			externalAwbs = append(externalAwbs, awb)
 		}
 	}
 
-	// Extract tracks
+	return externalAwbs
+}
+
+func loadExternalAwbFile(awbPath string) *AFSArchive {
+	if _, err := os.Stat(awbPath); err != nil {
+		return nil
+	}
+
+	awbFile, err := os.Open(awbPath)
+	if err != nil {
+		return nil
+	}
+	defer func(awbFile *os.File) {
+		_ = awbFile.Close()
+	}(awbFile)
+
+	awbData, err := io.ReadAll(awbFile)
+	if err != nil {
+		return nil
+	}
+
+	awb, err := NewAFSArchive(bytes.NewReader(awbData))
+	if err != nil {
+		return nil
+	}
+
+	return awb
+}
+
+func extractAllTracks(trackList *TrackList, targetDir string, embeddedAwb *AFSArchive, externalAwbs []*AFSArchive) ([]string, error) {
 	var outputs []string
 	_ = os.MkdirAll(targetDir, 0755)
 
 	for _, track := range trackList.Tracks {
-		ext := waveTypeExtensions[track.EncType]
-		if ext == "" {
-			ext = fmt.Sprintf(".%d", track.EncType)
+		outputPath := extractSingleTrack(track, targetDir, embeddedAwb, externalAwbs)
+		if outputPath != "" {
+			outputs = append(outputs, outputPath)
 		}
-
-		filename := track.Name + ext
-		outputPath := filepath.Join(targetDir, filename)
-
-		var data []byte
-		if track.IsStream {
-			if track.StreamAwbID >= 0 && track.StreamAwbID < len(externalAwbs) {
-				data, err = externalAwbs[track.StreamAwbID].FileDataForCueID(track.WavID)
-			}
-		} else {
-			if embeddedAwb != nil {
-				data, err = embeddedAwb.FileDataForCueID(track.WavID)
-			}
-		}
-
-		if err != nil || data == nil {
-			continue
-		}
-
-		if err := os.WriteFile(outputPath, data, 0644); err != nil {
-			continue
-		}
-
-		outputs = append(outputs, outputPath)
 	}
 
 	return outputs, nil
+}
+
+func extractSingleTrack(track Track, targetDir string, embeddedAwb *AFSArchive, externalAwbs []*AFSArchive) string {
+	ext := waveTypeExtensions[track.EncType]
+	if ext == "" {
+		ext = fmt.Sprintf(".%d", track.EncType)
+	}
+
+	filename := track.Name + ext
+	outputPath := filepath.Join(targetDir, filename)
+
+	data := getTrackData(track, embeddedAwb, externalAwbs)
+	if data == nil {
+		return ""
+	}
+
+	if err := os.WriteFile(outputPath, data, 0644); err != nil {
+		return ""
+	}
+
+	return outputPath
+}
+
+func getTrackData(track Track, embeddedAwb *AFSArchive, externalAwbs []*AFSArchive) []byte {
+	var data []byte
+	var err error
+
+	if track.IsStream {
+		if track.StreamAwbID >= 0 && track.StreamAwbID < len(externalAwbs) {
+			data, err = externalAwbs[track.StreamAwbID].FileDataForCueID(track.WavID)
+		}
+	} else {
+		if embeddedAwb != nil {
+			data, err = embeddedAwb.FileDataForCueID(track.WavID)
+		}
+	}
+
+	if err != nil {
+		return nil
+	}
+
+	return data
 }
 
 // ExtractACBFromFile is a convenience function to extract from a file path

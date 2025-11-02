@@ -246,42 +246,84 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 		vmask, amask = getMask(*key)
 	}
 
+	filename, hasAudio, err := parseUSMHeader(usmFile, fallbackName)
+	if err != nil {
+		return nil, err
+	}
+
+	decodedFilename, err := decodeShiftJIS(filename)
+	if err != nil {
+		decodedFilename = string(filename)
+	}
+
+	videoFile, audioFile, outputFiles, err := createOutputFiles(targetDir, decodedFilename, hasAudio, exportAudio)
+	if err != nil {
+		return nil, err
+	}
+	defer func(videoFile *os.File) {
+		_ = videoFile.Close()
+	}(videoFile)
+	if audioFile != nil {
+		defer func(audioFile *os.File) {
+			_ = audioFile.Close()
+		}(audioFile)
+	}
+
+	if err := extractUSMChunks(usmFile, videoFile, audioFile, vmask, amask); err != nil {
+		return nil, err
+	}
+
+	return outputFiles, nil
+}
+
+func parseUSMHeader(usmFile *utils.BinaryStream, fallbackName []byte) ([]byte, bool, error) {
 	sig, err := usmFile.ReadStringLength(4)
 	if err != nil || string(sig) != "CRID" {
-		return nil, fmt.Errorf("invalid CRID signature")
+		return nil, false, fmt.Errorf("invalid CRID signature")
 	}
 
 	blockSize, _ := usmFile.ReadUInt32()
 	_, _ = usmFile.BaseStream.Seek(0x20, io.SeekStart)
 	entryTable, err := getUTFTable(usmFile)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	var filename []byte
-	if len(entryTable) > 0 {
-		if fn, ok := entryTable[len(entryTable)-1]["filename"].([]byte); ok {
-			filename = fn
-		} else {
-			filename = fallbackName
-		}
-	} else {
-		filename = fallbackName
-	}
-
+	filename := extractFilename(entryTable, fallbackName)
 	offset := int64(8 + blockSize)
 
-	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
-	sig, _ = usmFile.ReadStringLength(4)
-	if string(sig) != "@SFV" {
-		return nil, fmt.Errorf("expected @SFV signature")
+	hasAudio, offset, err := parseUSMHeaderChunks(usmFile, offset)
+	if err != nil {
+		return nil, false, err
 	}
 
-	blockSize, _ = usmFile.ReadUInt32()
+	if err := skipMetadataSection(usmFile, offset); err != nil {
+		return nil, false, err
+	}
+
+	return filename, hasAudio, nil
+}
+
+func extractFilename(entryTable []map[string]interface{}, fallbackName []byte) []byte {
+	if len(entryTable) > 0 {
+		if fn, ok := entryTable[len(entryTable)-1]["filename"].([]byte); ok {
+			return fn
+		}
+	}
+	return fallbackName
+}
+
+func parseUSMHeaderChunks(usmFile *utils.BinaryStream, offset int64) (bool, int64, error) {
+	// First @SFV chunk
+	if err := seekAndCheckSignature(usmFile, offset, "@SFV"); err != nil {
+		return false, offset, err
+	}
+	blockSize, _ := usmFile.ReadUInt32()
 	_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 	_, _ = getUTFTable(usmFile)
 	offset += int64(8 + blockSize)
 
+	// Check for optional @SFA chunk
 	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
 	nextSig, _ := usmFile.ReadStringLength(4)
 	hasAudio := false
@@ -296,70 +338,76 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 		nextSig, _ = usmFile.ReadStringLength(4)
 	}
 
+	// Second @SFV with HEADER END
 	if string(nextSig) != "@SFV" {
-		return nil, fmt.Errorf("expected @SFV signature")
+		return false, offset, fmt.Errorf("expected @SFV signature")
 	}
-
 	blockSize, _ = usmFile.ReadUInt32()
 	_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 	headerEnd, _ := usmFile.ReadStringLength(11)
 	if string(headerEnd) != "#HEADER END" {
-		return nil, fmt.Errorf("expected #HEADER END")
+		return false, offset, fmt.Errorf("expected #HEADER END")
 	}
 	offset += int64(8 + blockSize)
 
+	// Optional @SFA with HEADER END
 	if hasAudio {
-		_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
-		sig, _ = usmFile.ReadStringLength(4)
-		if string(sig) != "@SFA" {
-			return nil, fmt.Errorf("expected @SFA signature")
+		if err := seekAndCheckSignature(usmFile, offset, "@SFA"); err != nil {
+			return false, offset, err
 		}
 		blockSize, _ = usmFile.ReadUInt32()
 		_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 		headerEnd, _ = usmFile.ReadStringLength(11)
 		if string(headerEnd) != "#HEADER END" {
-			return nil, fmt.Errorf("expected #HEADER END")
+			return false, offset, fmt.Errorf("expected #HEADER END")
 		}
 		offset += int64(8 + blockSize)
 	}
 
+	return hasAudio, offset, nil
+}
+
+func seekAndCheckSignature(usmFile *utils.BinaryStream, offset int64, expected string) error {
 	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
-	sig, _ = usmFile.ReadStringLength(4)
-	if string(sig) != "@SFV" {
-		return nil, fmt.Errorf("expected @SFV signature")
+	sig, _ := usmFile.ReadStringLength(4)
+	if string(sig) != expected {
+		return fmt.Errorf("expected %s signature", expected)
 	}
-	blockSize, _ = usmFile.ReadUInt32()
+	return nil
+}
+
+func skipMetadataSection(usmFile *utils.BinaryStream, offset int64) error {
+	// First metadata @SFV
+	if err := seekAndCheckSignature(usmFile, offset, "@SFV"); err != nil {
+		return err
+	}
+	blockSize, _ := usmFile.ReadUInt32()
 	_, _ = usmFile.BaseStream.Seek(offset+0x20, io.SeekStart)
 	_, _ = getUTFTable(usmFile)
 	offset += int64(8 + blockSize)
 
-	_, _ = usmFile.BaseStream.Seek(offset, io.SeekStart)
-	sig, _ = usmFile.ReadStringLength(4)
-	if string(sig) != "@SFV" {
-		return nil, fmt.Errorf("expected @SFV signature")
+	// Second metadata @SFV with METADATA END
+	if err := seekAndCheckSignature(usmFile, offset, "@SFV"); err != nil {
+		return err
 	}
 	_, _ = usmFile.BaseStream.Seek(28, io.SeekCurrent)
 	metadataEnd, _ := usmFile.ReadStringLength(13)
 	if string(metadataEnd) != "#METADATA END" {
-		return nil, fmt.Errorf("expected #METADATA END")
+		return fmt.Errorf("expected #METADATA END")
 	}
 	_ = usmFile.AlignStream(4)
 	_, _ = usmFile.BaseStream.Seek(16, io.SeekCurrent)
 
-	decodedFilename, err := decodeShiftJIS(filename)
-	if err != nil {
-		decodedFilename = string(filename)
-	}
+	return nil
+}
 
+func createOutputFiles(targetDir, decodedFilename string, hasAudio, exportAudio bool) (*os.File, *os.File, []string, error) {
 	baseName := strings.TrimSuffix(decodedFilename, filepath.Ext(decodedFilename))
 	videoPath := filepath.Join(targetDir, baseName+".m2v")
 	videoFile, err := os.Create(videoPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	defer func(videoFile *os.File) {
-		_ = videoFile.Close()
-	}(videoFile)
 
 	outputFiles := []string{videoPath}
 	var audioFile *os.File
@@ -368,14 +416,16 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 		audioPath := filepath.Join(targetDir, baseName+".adx")
 		audioFile, err = os.Create(audioPath)
 		if err != nil {
-			return nil, err
+			_ = videoFile.Close()
+			return nil, nil, nil, err
 		}
-		defer func(audioFile *os.File) {
-			_ = audioFile.Close()
-		}(audioFile)
 		outputFiles = append(outputFiles, audioPath)
 	}
 
+	return videoFile, audioFile, outputFiles, nil
+}
+
+func extractUSMChunks(usmFile *utils.BinaryStream, videoFile, audioFile *os.File, vmask [][]byte, amask []byte) error {
 	for {
 		nextSig, err := usmFile.ReadStringLength(4)
 		if err != nil {
@@ -390,7 +440,7 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 		chunkFooterSize, _ := usmFile.ReadUInt16()
 		_, _ = usmFile.ReadBytes(3)
 		dataTypeByte, _ := usmFile.ReadChar()
-		dataType := dataTypeByte & 0b11
+		dataType := byte(dataTypeByte & 0b11)
 		_, _ = usmFile.BaseStream.Seek(16, io.SeekCurrent)
 
 		contentsEnd, _ := usmFile.ReadStringLength(13)
@@ -401,24 +451,31 @@ func ExtractUSM(usm io.ReadSeeker, targetDir string, fallbackName []byte, key *u
 		_, _ = usmFile.BaseStream.Seek(-13, io.SeekCurrent)
 		readDataLen := int(blockSize) - int(chunkHeaderSize) - int(chunkFooterSize)
 
-		if string(nextSig) == "@SFV" {
-			content, _ := usmFile.ReadBytes(readDataLen)
-			if dataType == 0 && vmask != nil {
-				content = maskVideo(content, vmask)
-			}
-			_, _ = videoFile.Write(content)
-		} else if string(nextSig) == "@SFA" && audioFile != nil {
-			content, _ := usmFile.ReadBytes(readDataLen)
-			if dataType == 0 && amask != nil {
-				content = maskAudio(content, amask)
-			}
-			_, _ = audioFile.Write(content)
+		if err := processChunk(usmFile, nextSig, readDataLen, dataType, videoFile, audioFile, vmask, amask); err != nil {
+			return err
 		}
 
 		_, _ = usmFile.BaseStream.Seek(nextOffset, io.SeekStart)
 	}
 
-	return outputFiles, nil
+	return nil
+}
+
+func processChunk(usmFile *utils.BinaryStream, sig []byte, readDataLen int, dataType byte, videoFile, audioFile *os.File, vmask [][]byte, amask []byte) error {
+	if string(sig) == "@SFV" {
+		content, _ := usmFile.ReadBytes(readDataLen)
+		if dataType == 0 && vmask != nil {
+			content = maskVideo(content, vmask)
+		}
+		_, _ = videoFile.Write(content)
+	} else if string(sig) == "@SFA" && audioFile != nil {
+		content, _ := usmFile.ReadBytes(readDataLen)
+		if dataType == 0 && amask != nil {
+			content = maskAudio(content, amask)
+		}
+		_, _ = audioFile.Write(content)
+	}
+	return nil
 }
 
 func decodeShiftJIS(data []byte) (string, error) {
