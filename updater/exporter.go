@@ -73,7 +73,7 @@ func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportP
 		"-o", outputDir,
 		"--strip-path-prefix", excludePathPrefix,
 		"-r",
-		"--filter-blacklist-mode",
+		"--filter-exclude-mode",
 		"--filter-with-regex",
 	}
 	if serverConfig.UnityVersion != "" {
