@@ -10,7 +10,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// runUpdater starts the asset updater in a goroutine
 func runUpdater(server utils.HarukiSekaiServerRegion, payload updater.HarukiSekaiAssetUpdaterPayload) {
 	go func() {
 		serverConfig := config.Cfg.Servers[server]
@@ -44,16 +43,8 @@ func runUpdater(server utils.HarukiSekaiServerRegion, payload updater.HarukiSeka
 	}()
 }
 
-// RegisterRoutes registers all API routes
-func RegisterRoutes(app *fiber.App) {
-	app.Post("/update_asset", updateAssetHandler)
-}
-
-// updateAssetHandler handles asset update requests
 func updateAssetHandler(c *fiber.Ctx) error {
-	// 1. Check if authorization is enabled
 	if config.Cfg.Backend.EnableAuthorization {
-		// 2. Check User-Agent if configured
 		if config.Cfg.Backend.AcceptUserAgentPrefix != "" {
 			userAgent := c.Get("User-Agent")
 			if !strings.HasPrefix(userAgent, config.Cfg.Backend.AcceptUserAgentPrefix) {
@@ -63,7 +54,6 @@ func updateAssetHandler(c *fiber.Ctx) error {
 			}
 		}
 
-		// Check Authorization token if configured
 		if config.Cfg.Backend.AcceptAuthorizationToken != "" {
 			authHeader := c.Get("Authorization")
 			expectedAuth := "Bearer " + config.Cfg.Backend.AcceptAuthorizationToken
@@ -75,7 +65,6 @@ func updateAssetHandler(c *fiber.Ctx) error {
 		}
 	}
 
-	// Parse request payload
 	var payload updater.HarukiSekaiAssetUpdaterPayload
 	if err := c.BodyParser(&payload); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -84,7 +73,6 @@ func updateAssetHandler(c *fiber.Ctx) error {
 		})
 	}
 
-	// 3. Check if the server is enabled in configuration
 	serverConfig, exists := config.Cfg.Servers[payload.Server]
 	if !exists {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -99,11 +87,14 @@ func updateAssetHandler(c *fiber.Ctx) error {
 		})
 	}
 
-	// 4. Start the updater in a goroutine
 	runUpdater(payload.Server, payload)
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message": "Asset updater started running",
 		"server":  payload.Server,
 	})
+}
+
+func RegisterRoutes(app *fiber.App) {
+	app.Post("/update_asset", updateAssetHandler)
 }

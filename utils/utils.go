@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,12 +17,20 @@ func GetTimeArg() string {
 }
 
 func FindFilesByExtension(dir string, ext string) ([]string, error) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return []string{}, nil
+	}
+
 	var files []string
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	lowerExt := strings.ToLower(ext)
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ext) {
+		if d.IsDir() {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(d.Name())) == lowerExt {
 			files = append(files, path)
 		}
 		return nil

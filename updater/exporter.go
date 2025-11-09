@@ -11,56 +11,98 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 var logger = harukiLogger.NewLogger("HarukiAssetExporter", "INFO", nil)
 var usmSemaphore = make(chan struct{}, config.Cfg.Concurrents.ConcurrentUSM)
 var acbSemaphore = make(chan struct{}, config.Cfg.Concurrents.ConcurrentACB)
 
+func getExportGroup(exportPath string) string {
+	if exportPath == "" {
+		return "container"
+	}
+	p := filepath.ToSlash(exportPath)
+	p = strings.TrimPrefix(p, "/")
+	p = strings.ToLower(p)
+
+	prefixes := []string{
+		"event/center",
+		"event/thumbnail",
+		"gacha/icon",
+		"fix_prefab/mc_new",
+		"mysekai/character/",
+	}
+
+	for _, pre := range prefixes {
+		if strings.HasPrefix(p, pre) {
+			return "containerFull"
+		}
+	}
+	return "container"
+}
+
 func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportPath string, outputDir string, category HarukiSekaiAssetCategory, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
 	if assetStudioCLIPath == "" {
 		logger.Warnf("AssetStudioCLIPath is not configured, skipping exporting of %s", filePath)
 		return nil
 	}
-	var finalOutputPath string
+
+	var excludePathPrefix string
 	if serverConfig.ExportByCategory {
-		finalOutputPath = filepath.Join(outputDir, strings.ToLower(string(category)), exportPath)
+		excludePathPrefix = "assets/sekai/assetbundle/resources"
+	} else if strings.HasPrefix(exportPath, "mysekai") && !serverConfig.ExportByCategory {
+		excludePathPrefix = "assets/sekai/assetbundle/resources/ondemand"
 	} else {
-		finalOutputPath = filepath.Join(outputDir, exportPath)
+		excludePathPrefix = "assets/sekai/assetbundle/resources/" + strings.ToLower(string(category))
 	}
 
-	var assetTypes string
-	if strings.Contains(exportPath, "character/member_cutout") {
-		assetTypes = "monoBehaviour,textAsset,tex2d,tex2dArray,audio"
-		logger.Debugf("Using asset types without sprite for character/member_cutout: %s", exportPath)
+	var actualExportPath string
+	if serverConfig.ExportByCategory {
+		actualExportPath = filepath.Join(outputDir, strings.ToLower(string(category)), exportPath)
 	} else {
-		assetTypes = "monoBehaviour,textAsset,tex2d,sprite,tex2dArray,audio"
+		actualExportPath = filepath.Join(outputDir, exportPath)
 	}
 
 	args := []string{
 		filePath,
 		"-m", "export",
-		"-t", assetTypes,
-		"-g", "none",
+		"-t", "monoBehaviour,textAsset,tex2d,tex2dArray,audio",
+		"-g", getExportGroup(exportPath),
 		"-f", "assetName",
-		"-o", finalOutputPath,
+		"-o", outputDir,
+		"--strip-path-prefix", excludePathPrefix,
 		"-r",
+		"--filter-blacklist-mode",
+		"--filter-with-regex",
 	}
 	if serverConfig.UnityVersion != "" {
 		args = append(args, "--unity-version", serverConfig.UnityVersion)
 	}
+
+	var exts []string
+	if !serverConfig.ExportUSMFiles {
+		exts = append(exts, "usm")
+	}
+	if !serverConfig.ExportACBFiles {
+		exts = append(exts, "acb")
+	}
+	if len(exts) > 0 {
+		regex := fmt.Sprintf(`.*\.(%s)$`, strings.Join(exts, "|"))
+		args = append(args, "--filter-by-name", regex)
+	}
+
 	cmd := exec.Command(assetStudioCLIPath, args...)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	logger.Infof("Exporting asset bundle: %s to %s", filePath, finalOutputPath)
+	logger.Infof("Exporting asset bundle: %s to %s", filePath, actualExportPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to export asset bundle %s: %w", filePath, err)
 	}
-
 	logger.Infof("Successfully exported asset bundle: %s", filePath)
 
-	if err := postProcessExportedFiles(finalOutputPath, serverConfig, ffmpegPath, cwebpPath); err != nil {
-		return fmt.Errorf("post-processing failed for %s: %w", finalOutputPath, err)
+	if err := postProcessExportedFiles(actualExportPath, serverConfig, ffmpegPath, cwebpPath); err != nil {
+		return fmt.Errorf("post-processing failed for %s: %w", actualExportPath, err)
 	}
 
 	return nil
@@ -104,23 +146,6 @@ func handleUSMFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 		return err
 	}
 
-	if !serverConfig.ExportUSMFiles {
-		if len(usmFiles) == 0 {
-			return nil
-		}
-		if shouldDeleteDirectory(exportPath, usmFiles, "MovieBundleBuildData.json") {
-			logger.Infof("Deleting export path %s as it only contains USM files and ExportUSMFiles is false", exportPath)
-			return os.RemoveAll(exportPath)
-		}
-		for _, usmFile := range usmFiles {
-			logger.Infof("Deleting USM file: %s", usmFile)
-			if err := os.Remove(usmFile); err != nil {
-				return fmt.Errorf("failed to delete USM file %s: %w", usmFile, err)
-			}
-		}
-		return nil
-	}
-
 	if serverConfig.ExportUSMFiles && serverConfig.DecodeUSMFiles {
 		if len(usmFiles) == 0 {
 			return nil
@@ -148,30 +173,45 @@ func handleACBFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 	if err != nil {
 		return err
 	}
-	if !serverConfig.ExportACBFiles {
-		if len(acbFiles) == 0 {
-			return nil
-		}
-		if shouldDeleteDirectory(exportPath, acbFiles, "SoundBundleBuildData.json") {
-			logger.Infof("Deleting export path %s as it only contains ACB files and ExportACBFiles is false", exportPath)
-			return os.RemoveAll(exportPath)
-		}
-		for _, acbFile := range acbFiles {
-			logger.Infof("Deleting ACB file: %s", acbFile)
-			if err := os.Remove(acbFile); err != nil {
-				return fmt.Errorf("failed to delete ACB file %s: %w", acbFile, err)
-			}
-		}
-		return nil
-	}
 	if serverConfig.ExportACBFiles && serverConfig.DecodeACBFiles {
 		if len(acbFiles) == 0 {
 			return nil
 		}
-		acbSemaphore <- struct{}{}
-		defer func() { <-acbSemaphore }()
-		logger.Infof("Exporting ACB file: %s", acbFiles[0])
-		return exporter.ExportACB(acbFiles[0], exportPath, serverConfig.DecodeHCAFiles, serverConfig.RemoveWav, serverConfig.ConvertWavToMP3, serverConfig.ConvertWavToFLAC, ffmpegPath)
+
+		var wg sync.WaitGroup
+		errChan := make(chan error, len(acbFiles))
+
+		for _, acbFile := range acbFiles {
+			wg.Add(1)
+			go func(a string) {
+				defer wg.Done()
+				acbSemaphore <- struct{}{}
+				defer func() { <-acbSemaphore }()
+
+				logger.Infof("Exporting ACB file: %s", a)
+				acbOutputDir := filepath.Dir(a)
+				if err := exporter.ExportACB(a, acbOutputDir, serverConfig.DecodeHCAFiles, serverConfig.RemoveWav, serverConfig.ConvertWavToMP3, serverConfig.ConvertWavToFLAC, ffmpegPath); err != nil {
+					errChan <- fmt.Errorf("failed to export ACB %s: %w", a, err)
+				}
+			}(acbFile)
+		}
+
+		wg.Wait()
+		close(errChan)
+
+		var firstErr error
+		errorCount := 0
+		for e := range errChan {
+			errorCount++
+			if firstErr == nil {
+				firstErr = e
+			}
+			logger.Warnf("ACB export error: %v", e)
+		}
+
+		if errorCount > 0 {
+			return fmt.Errorf("failed to export %d ACB files: %w", errorCount, firstErr)
+		}
 	}
 
 	return nil
@@ -202,37 +242,6 @@ func handlePNGConversion(exportPath string, serverConfig utils.HarukiSekaiAssetU
 	}
 
 	return nil
-}
-
-func shouldDeleteDirectory(dir string, targetFiles []string, buildDataFileName string) bool {
-	if len(targetFiles) == 0 {
-		return false
-	}
-
-	var allFiles []string
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			allFiles = append(allFiles, path)
-		}
-		return nil
-	})
-	for _, file := range allFiles {
-		isTargetFile := false
-		for _, targetFile := range targetFiles {
-			if file == targetFile {
-				isTargetFile = true
-				break
-			}
-		}
-		if !isTargetFile && filepath.Base(file) != buildDataFileName {
-			return false
-		}
-	}
-
-	return true
 }
 
 func mergeUSMFiles(dir string, usmFiles []string) (string, error) {

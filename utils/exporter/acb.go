@@ -3,6 +3,8 @@ package exporter
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"haruki-sekai-asset/utils"
@@ -10,14 +12,42 @@ import (
 )
 
 func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalWav bool, convertToMP3 bool, convertToFLAC bool, ffmpegPath string) error {
-	_, err := acb.ExtractACBFromFile(acbFile, outputDir)
+	parentDir := filepath.Dir(acbFile)
+	extractDir, err := os.MkdirTemp(parentDir, "acb-extract-*")
+	if err != nil {
+		return fmt.Errorf("failed to create extraction directory: %w", err)
+	}
+	defer func() {
+		_ = os.RemoveAll(extractDir)
+	}()
+
+	_, err = acb.ExtractACBFromFile(acbFile, extractDir)
 	if err != nil {
 		return fmt.Errorf("failed to extract ACB file: %w", err)
 	}
-	hcaFiles, err := utils.FindFilesByExtension(outputDir, ".hca")
+	hcaFiles, err := utils.FindFilesByExtension(extractDir, ".hca")
 	if err != nil {
 		return fmt.Errorf("failed to find HCA files: %w", err)
 	}
+
+	acbPathSlash := strings.ToLower(filepath.ToSlash(acbFile))
+	if strings.Contains(acbPathSlash, "music/long") {
+		var filtered []string
+		for _, hf := range hcaFiles {
+			bn := strings.ToLower(filepath.Base(hf))
+			if strings.HasSuffix(bn, "_vr.hca") || strings.HasSuffix(bn, "_screen.hca") {
+				if err := os.Remove(hf); err != nil {
+					// fmt.Fprintf(os.Stderr, "failed to remove HCA variant %s: %v\n", hf, err)
+				} else {
+					// fmt.Fprintf(os.Stderr, "removed HCA variant: %s\n", hf)
+				}
+				continue
+			}
+			filtered = append(filtered, hf)
+		}
+		hcaFiles = filtered
+	}
+
 	if decodeHCA && len(hcaFiles) > 0 {
 		const maxWorkers = 16
 		var wg sync.WaitGroup
