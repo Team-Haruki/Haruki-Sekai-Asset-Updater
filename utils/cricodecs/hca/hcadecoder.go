@@ -1,0 +1,411 @@
+package hca
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+)
+
+// CriWareHCADecoder wraps the low-level HCA decoder with streaming capabilities
+type CriWareHCADecoder struct {
+	file         *os.File      // 如果从文件创建，保存文件句柄以便Close
+	reader       io.ReadSeeker // 实际用于读取的reader
+	info         *CriWareHCAInfo
+	handle       *ClHCA
+	buf          []byte
+	fbuf         []float32
+	currentDelay int
+	currentBlock uint
+}
+
+// KeyTest holds parameters for testing HCA decryption keys
+type KeyTest struct {
+	Key         uint64
+	Subkey      uint64
+	StartOffset uint
+	BestScore   int
+	BestKey     uint64
+}
+
+const (
+	// Key testing constants
+	hcaKeyScoreScale    = 10
+	hcaKeyMaxSkipBlanks = 1200
+	hcaKeyMinTestFrames = 3
+	hcaKeyMaxTestFrames = 7
+	hcaKeyMaxFrameScore = 600
+	hcaKeyMaxTotalScore = hcaKeyMaxTestFrames * 50 * hcaKeyScoreScale
+)
+
+// NewHCADecoder creates a new HCA decoder from a file
+func NewHCADecoder(filename string) (*CriWareHCADecoder, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	decoder, err := NewHCADecoderFromReader(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+
+	decoder.file = file // 保存文件句柄以便Close
+	return decoder, nil
+}
+
+// NewHCADecoderFromReader creates a new HCA decoder from an io.ReadSeeker
+func NewHCADecoderFromReader(reader io.ReadSeeker) (*CriWareHCADecoder, error) {
+	// Test header
+	headerBuf := make([]byte, 0x08)
+	if _, err := reader.Read(headerBuf); err != nil {
+		return nil, err
+	}
+
+	headerSize := IsOurFile(headerBuf)
+	if headerSize < 0 || headerSize > 0x1000 {
+		return nil, errors.New("invalid HCA header")
+	}
+
+	// Read full header
+	fullHeader := make([]byte, headerSize)
+	if _, err := reader.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(reader, fullHeader); err != nil {
+		return nil, err
+	}
+
+	// Initialize decoder
+	decoder := &CriWareHCADecoder{
+		reader: reader, // 保存reader引用
+	}
+	decoder.handle = NewClHCA()
+
+	// Parse header
+	if err := decoder.handle.DecodeHeader(fullHeader); err != nil {
+		return nil, fmt.Errorf("failed to decode header: %w", err)
+	}
+
+	// Get info
+	info, err := decoder.handle.GetInfo()
+	if err != nil {
+		return nil, err
+	}
+	decoder.info = info
+
+	// Allocate buffers
+	decoder.buf = make([]byte, info.BlockSize)
+	decoder.fbuf = make([]float32, info.ChannelCount*info.SamplesPerBlock)
+
+	// Set initial values
+	decoder.Reset()
+
+	return decoder, nil
+}
+
+// Reset resets the decoder to the beginning
+func (d *CriWareHCADecoder) Reset() {
+	d.handle.DecodeReset()
+	d.currentBlock = 0
+	d.currentDelay = int(d.info.EncoderDelay)
+}
+
+// Close closes the decoder and associated file
+func (d *CriWareHCADecoder) Close() error {
+	if d.file != nil {
+		return d.file.Close()
+	}
+	return nil
+}
+
+// Info returns the HCA file information
+func (d *CriWareHCADecoder) Info() *CriWareHCAInfo {
+	return d.info
+}
+
+// SetEncryptionKey sets the decryption key
+func (d *CriWareHCADecoder) SetEncryptionKey(keycode, subkey uint64) {
+	if subkey != 0 {
+		keycode = keycode * ((subkey << 16) | (uint64(^uint16(subkey)) + 2))
+	}
+	d.handle.SetKey(keycode)
+}
+
+// readPacket reads a single HCA frame/block
+func (d *CriWareHCADecoder) readPacket() error {
+	if d.currentBlock >= d.info.BlockCount {
+		return io.EOF
+	}
+
+	offset := int64(d.info.HeaderSize + d.currentBlock*d.info.BlockSize)
+	if _, err := d.reader.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+
+	n, err := io.ReadFull(d.reader, d.buf)
+	if err != nil {
+		return err
+	}
+	if n != int(d.info.BlockSize) {
+		return fmt.Errorf("read %d vs expected %d bytes", n, d.info.BlockSize)
+	}
+
+	d.currentBlock++
+	return nil
+}
+
+// DecodeFrame decodes a single frame and returns the samples
+// Returns (samples, numSamples, error)
+func (d *CriWareHCADecoder) DecodeFrame() ([]float32, int, error) {
+	// Read packet
+	if err := d.readPacket(); err != nil {
+		return nil, 0, err
+	}
+
+	// Decode frame
+	if err := d.handle.DecodeBlock(d.buf); err != nil {
+		return nil, 0, fmt.Errorf("decode failed: %w", err)
+	}
+
+	// Read samples
+	d.handle.ReadSamples(d.fbuf)
+
+	samples := int(d.info.SamplesPerBlock)
+	discard := 0
+
+	// Handle encoder delay
+	if d.currentDelay > 0 {
+		// If delay exceeds this block, skip entire block
+		if d.currentDelay >= samples {
+			d.currentDelay -= samples
+			// Return empty samples for this block
+			return d.fbuf[0:0], 0, nil
+		}
+		discard = d.currentDelay
+		d.currentDelay = 0
+	}
+
+	startIdx := discard * int(d.info.ChannelCount)
+	return d.fbuf[startIdx:], samples - discard, nil
+}
+
+// DecodeAll decodes the entire HCA file and returns all samples
+func (d *CriWareHCADecoder) DecodeAll() ([]float32, error) {
+	d.Reset()
+
+	totalSamples := int(d.info.BlockCount * d.info.SamplesPerBlock)
+	allSamples := make([]float32, 0, totalSamples*int(d.info.ChannelCount))
+
+	for {
+		samples, numSamples, err := d.DecodeFrame()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		// Append samples
+		samplesToAdd := numSamples * int(d.info.ChannelCount)
+		allSamples = append(allSamples, samples[:samplesToAdd]...)
+	}
+
+	return allSamples, nil
+}
+
+// Seek seeks to a specific sample position
+func (d *CriWareHCADecoder) Seek(sampleNum int) {
+	// Handle loop values if not set
+	if d.info.LoopStartBlock == 0 && d.info.LoopStartDelay == 0 {
+		targetSample := uint(sampleNum) + d.info.EncoderDelay
+
+		d.info.LoopStartBlock = targetSample / d.info.SamplesPerBlock
+		d.info.LoopStartDelay = targetSample - (d.info.LoopStartBlock * d.info.SamplesPerBlock)
+	}
+
+	d.currentBlock = d.info.LoopStartBlock
+	d.currentDelay = int(d.info.LoopStartDelay)
+}
+
+// TestKey tests if a key correctly decrypts the HCA file
+func (d *CriWareHCADecoder) TestKey(kt *KeyTest) {
+	score := d.testHCAScore(kt)
+
+	// Wrong key
+	if score < 0 {
+		return
+	}
+
+	// Update if something better is found
+	if kt.BestScore <= 0 || (score < kt.BestScore && score > 0) {
+		kt.BestScore = score
+		kt.BestKey = kt.Key
+	}
+}
+
+// testHCAScore tests a number of frames to see if key decrypts correctly
+// Returns: <0: error/wrong, 0: unknown/silent, >0: good (closer to 1 is better)
+func (d *CriWareHCADecoder) testHCAScore(kt *KeyTest) int {
+	testFrames := 0
+	currentFrame := uint(0)
+	blankFrames := 0
+	totalScore := 0
+
+	offset := kt.StartOffset
+	if offset == 0 {
+		offset = d.info.HeaderSize
+	}
+
+	d.SetEncryptionKey(kt.Key, kt.Subkey)
+
+	for testFrames < hcaKeyMaxTestFrames && currentFrame < d.info.BlockCount {
+		score, shouldBreak, newOffset := d.testSingleFrame(kt, offset, &blankFrames)
+		offset = newOffset
+
+		if shouldBreak {
+			totalScore = -1
+			break
+		}
+
+		if score < 0 {
+			break
+		}
+
+		currentFrame++
+
+		if shouldSkipBlankFrame(score, blankFrames) {
+			blankFrames++
+			continue
+		}
+
+		testFrames++
+		totalScore += scaleFrameScore(score)
+
+		if totalScore > hcaKeyMaxTotalScore {
+			break
+		}
+	}
+
+	d.handle.DecodeReset()
+	return finalizeScore(totalScore, testFrames)
+}
+
+func (d *CriWareHCADecoder) testSingleFrame(kt *KeyTest, offset uint, blankFrames *int) (int, bool, uint) {
+	if _, err := d.reader.Seek(int64(offset), io.SeekStart); err != nil {
+		return -1, false, offset
+	}
+
+	bytes, err := io.ReadFull(d.reader, d.buf)
+	if err != nil || bytes != int(d.info.BlockSize) {
+		return -1, false, offset
+	}
+
+	score := d.handle.TestBlock(d.buf)
+
+	// Get first non-blank frame
+	if kt.StartOffset == 0 && score != 0 {
+		kt.StartOffset = offset
+	}
+
+	newOffset := offset + uint(bytes)
+
+	if score < 0 || score > hcaKeyMaxFrameScore {
+		return 0, true, newOffset
+	}
+
+	return score, false, newOffset
+}
+
+func shouldSkipBlankFrame(score, blankFrames int) bool {
+	return score == 0 && blankFrames < hcaKeyMaxSkipBlanks
+}
+
+func scaleFrameScore(score int) int {
+	switch score {
+	case 1:
+		return 1
+	case 0:
+		return 3 * hcaKeyScoreScale
+	default:
+		return score * hcaKeyScoreScale
+	}
+}
+
+func finalizeScore(totalScore, testFrames int) int {
+	// Signal best possible score
+	if testFrames > hcaKeyMinTestFrames && totalScore > 0 && totalScore <= testFrames {
+		return 1
+	}
+	return totalScore
+}
+
+// DecodeToWav decodes the entire file to 16-bit WAV stream
+func (d *CriWareHCADecoder) DecodeToWav(w io.Writer) error {
+	d.Reset()
+	totalSamples := int(d.info.BlockCount * d.info.SamplesPerBlock)
+	totalPCMBytes := totalSamples * int(d.info.ChannelCount) * 2 // 16-bit = 2 bytes per sample
+	header := make([]byte, 44)
+	copy(header[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(header[4:8], uint32(36+totalPCMBytes)) // File size - 8
+	copy(header[8:12], "WAVE")
+	copy(header[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(header[16:20], 16) // fmt chunk size
+	binary.LittleEndian.PutUint16(header[20:22], 1)  // PCM format
+	binary.LittleEndian.PutUint16(header[22:24], uint16(d.info.ChannelCount))
+	binary.LittleEndian.PutUint32(header[24:28], uint32(d.info.SamplingRate))
+	binary.LittleEndian.PutUint32(header[28:32], uint32(d.info.SamplingRate)*uint32(d.info.ChannelCount)*2) // Byte rate
+	binary.LittleEndian.PutUint16(header[32:34], uint16(d.info.ChannelCount*2))                             // Block align
+	binary.LittleEndian.PutUint16(header[34:36], 16)                                                        // Bits per sample
+	copy(header[36:40], "data")
+	binary.LittleEndian.PutUint32(header[40:44], uint32(totalPCMBytes))
+
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+
+	pcmBuf := make([]int16, d.info.SamplesPerBlock*d.info.ChannelCount)
+
+	for {
+		if err := d.readPacket(); err == io.EOF {
+			break
+		} else if err != nil {
+			return err
+		}
+		if err := d.handle.DecodeBlock(d.buf); err != nil {
+			return err
+		}
+		d.handle.ReadSamples16(pcmBuf)
+		samples := int(d.info.SamplesPerBlock)
+		discard := 0
+		if d.currentDelay > 0 {
+			if d.currentDelay >= samples {
+				d.currentDelay -= samples
+				continue
+			}
+			discard = d.currentDelay
+			d.currentDelay = 0
+		}
+		start := discard * int(d.info.ChannelCount)
+		end := samples * int(d.info.ChannelCount)
+		if start < 0 || end < 0 || start >= end {
+			return fmt.Errorf("invalid sample range: start=%d, end=%d, discard=%d, samples=%d", start, end, discard, samples)
+		}
+		if end > len(pcmBuf) {
+			return fmt.Errorf("sample range out of bounds: end=%d, buffer_len=%d", end, len(pcmBuf))
+		}
+
+		data := make([]byte, (end-start)*2)
+		for i, sample := range pcmBuf[start:end] {
+			binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
+		}
+
+		if _, err := w.Write(data); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}

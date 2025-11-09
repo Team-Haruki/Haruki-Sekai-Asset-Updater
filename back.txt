@@ -1,0 +1,1 @@
+dotnet publish -c Release -r linux-x64 -f net9.0   --self-contained true   /p:PublishSingleFile=true   /p:EnableCompressionInSingleFile=true 
