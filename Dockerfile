@@ -12,12 +12,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -tags netgo \
     .
 
-FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    tzdata \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+FROM alpine:latest
+RUN apk --no-cache add ca-certificates tzdata ffmpeg aspnetcore9-runtime
 WORKDIR /app
 COPY --from=builder /app/haruki-sekai-asset-updater .
 RUN mkdir -p logs
