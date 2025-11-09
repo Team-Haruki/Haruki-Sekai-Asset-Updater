@@ -160,10 +160,10 @@ servers:
   tw:
     enabled: false
     export_by_category: false
-    nuverse_asset_version_url: ""
+    nuverse_asset_version_url: "https://lf16-mkovscdn-sg.bytedgame.com/obj/rt-game-alisg/gdl_app_5245/Oversea/{app_version}/Release/online/ios/version"
     nuverse_override_app_version: "5.2.0"
-    asset_info_url_template: ""
-    asset_url_template: ""
+    asset_info_url_template: "https://lf16-mkovscdn-sg.bytedgame.com/obj/sf-game-alisg/gdl_app_5245/AssetBundle/{app_version}/Release/online/ios{asset_version}/AssetBundleInfoNew.json"
+    asset_url_template: "https://lf16-mkovscdn-sg.bytedgame.com/obj/sf-game-alisg/gdl_app_5245/AssetBundle/{app_version}/Release/online/{bundle_path}"
     required_cookies: false
     aes_key_hex: ""
     aes_iv_hex: ""
@@ -217,10 +217,10 @@ servers:
   kr:
     enabled: false
     export_by_category: false
-    nuverse_asset_version_url: ""
+    nuverse_asset_version_url: "https://lf16-mkkr.bytedgame.com/obj/rt-game-alisg/gdl_app_292248/Oversea/{app_version}/Release/kr_online/ios/version"
     nuverse_override_app_version: "5.2.0"
-    asset_info_url_template: ""
-    asset_url_template: ""
+    asset_info_url_template: "https://lf16-mkkr.bytedgame.com/obj/sf-game-alisg/gdl_app_292248/AssetBundle/{app_version}/Release/kr_online/ios{asset_version}/AssetBundleInfoNew.json"
+    asset_url_template: "https://lf16-mkkr.bytedgame.com/obj/sf-game-alisg/gdl_app_292248/AssetBundle/{app_version}/Release/kr_online/{bundle_path}"
     required_cookies: false
     aes_key_hex: ""
     aes_iv_hex: ""
@@ -272,18 +272,27 @@ servers:
   cn:
     enabled: false
     export_by_category: false
-    nuverse_asset_version_url: ""
+    nuverse_asset_version_url: "https://lf3-mkcncdn-tos.dailygn.com/obj/rt-game-lf/gdl_app_5236/Mainland/{app_version}/Release/cn_online/ios/version"
     nuverse_override_app_version: "5.2.0"
-    asset_info_url_template: ""
-    asset_url_template: ""
+    asset_info_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/ios{asset_version}/AssetBundleInfoNew.json"
+    asset_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/{bundle_path}"
     required_cookies: false
     aes_key_hex: ""
     aes_iv_hex: ""
     unity_version: "2022.3.21f1"
     asset_save_dir: "./Data/cn-assets"
     downloaded_asset_record_file: "./Data/cn-assets/downloaded_assets.json"
-    start_app_prefixes: []
-    ondemand_prefixes: []
+    start_app_prefixes: # fill [] to disable download any startapp assets
+      # - ".*" # download all startapp assets
+      # - "bonds_honor"
+      # - "honor"
+      # - "rank_live"
+      # - "^music/short"
+      # - "mysekai/sound/se/fixture/toaster"
+      # - "^character/member.*"
+    ondemand_prefixes:   # fill [] to disable download any ondemand assets
+      - "music/long"
+      # - "^movie/gacha"
     skip_prefixes: []
     download_priority_list:
       - "^character/member.*"

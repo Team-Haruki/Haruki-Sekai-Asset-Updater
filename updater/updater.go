@@ -221,6 +221,8 @@ func (u *HarukiSekaiAssetUpdater) downloadAndExportAsset(downloadPath string, bu
 	if u.server == utils.HarukiSekaiServerRegionJP || u.server == utils.HarukiSekaiServerRegionEN {
 		assetURL = strings.ReplaceAll(assetURL, "{asset_version}", *u.assetVersion)
 		assetURL = strings.ReplaceAll(assetURL, "{asset_hash}", *u.assetHash)
+		assetURL = strings.ReplaceAll(assetURL, "{env}", u.serverConfig.CPAssetProfile)
+		assetURL = strings.ReplaceAll(assetURL, "{hash}", (*u.cpAssetProfiles)[u.serverConfig.CPAssetProfile])
 	} else {
 		assetURL = strings.ReplaceAll(assetURL, "{app_version}", u.serverConfig.NuverseOverrideAppVersion)
 	}
