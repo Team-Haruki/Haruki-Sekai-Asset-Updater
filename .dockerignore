@@ -1,0 +1,34 @@
+# Git files
+.git
+.gitignore
+
+# Build artifacts
+haruki-sekai-asset
+HarukiSekaiAssetUpdater
+*.exe
+
+# Logs
+logs/
+*.log
+
+# Configuration
+haruki-asset-configs.yaml
+back.txt
+
+# Data
+Data/
+
+# Documentation
+README.md
+LICENSE
+
+# Examples
+examples/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
