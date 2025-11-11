@@ -9,8 +9,8 @@ import (
 	"haruki-sekai-asset/config"
 	harukiLogger "haruki-sekai-asset/utils/logger"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/logger"
 )
 
 func main() {
@@ -33,9 +33,7 @@ func main() {
 	mainLogger.Infof("========================= Haruki Sekai Asset Updater %s =========================", config.Version)
 	mainLogger.Infof("Powered By Haruki Dev Team")
 
-	app := fiber.New(fiber.Config{
-		BodyLimit: 30 * 1024 * 1024,
-	})
+	app := fiber.New(fiber.Config{BodyLimit: 30 * 1024 * 1024})
 
 	if config.Cfg.Backend.AccessLog != "" {
 		logCfg := logger.Config{Format: config.Cfg.Backend.AccessLog}
@@ -48,7 +46,7 @@ func main() {
 			defer func(accessLogFile *os.File) {
 				_ = accessLogFile.Close()
 			}(accessLogFile)
-			logCfg.Output = accessLogFile
+			logCfg.Stream = accessLogFile
 		}
 		app.Use(logger.New(logCfg))
 	}
@@ -56,15 +54,22 @@ func main() {
 	api.RegisterRoutes(app)
 
 	addr := fmt.Sprintf("%s:%d", config.Cfg.Backend.Host, config.Cfg.Backend.Port)
-	if config.Cfg.Backend.SSL {
-		if err := app.ListenTLS(addr, config.Cfg.Backend.SSLCert, config.Cfg.Backend.SSLKey); err != nil {
-			mainLogger.Errorf("failed to start HTTPS server: %v", err)
-			os.Exit(1)
-		}
-	} else {
-		if err := app.Listen(addr); err != nil {
-			mainLogger.Errorf("failed to start HTTP server: %v", err)
-			os.Exit(1)
-		}
+	var listenServerType = "HTTP"
+	listenCfg := fiber.ListenConfig{
+		DisableStartupMessage: true,
 	}
+	if config.Cfg.Backend.SSL {
+		listenServerType = "HTTPS"
+		mainLogger.Infof("SSL enabled, using certificate: %s", config.Cfg.Backend.SSLCert)
+		listenCfg.CertFile = config.Cfg.Backend.SSLCert
+		listenCfg.CertKeyFile = config.Cfg.Backend.SSLKey
+	} else {
+		mainLogger.Infof("SSL disabled, starting HTTP server")
+	}
+	err := app.Listen(addr, listenCfg)
+	if err != nil {
+		mainLogger.Errorf("failed to start server: %v", err)
+		os.Exit(1)
+	}
+	mainLogger.Infof("Started listen %s server on %s...", listenServerType, addr)
 }

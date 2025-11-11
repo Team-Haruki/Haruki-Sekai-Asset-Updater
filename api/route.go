@@ -7,7 +7,7 @@ import (
 	"haruki-sekai-asset/utils"
 	"strings"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
 func runUpdater(server utils.HarukiSekaiServerRegion, payload updater.HarukiSekaiAssetUpdaterPayload) {
@@ -43,7 +43,7 @@ func runUpdater(server utils.HarukiSekaiServerRegion, payload updater.HarukiSeka
 	}()
 }
 
-func updateAssetHandler(c *fiber.Ctx) error {
+func updateAssetHandler(c fiber.Ctx) error {
 	if config.Cfg.Backend.EnableAuthorization {
 		if config.Cfg.Backend.AcceptUserAgentPrefix != "" {
 			userAgent := c.Get("User-Agent")
@@ -66,7 +66,7 @@ func updateAssetHandler(c *fiber.Ctx) error {
 	}
 
 	var payload updater.HarukiSekaiAssetUpdaterPayload
-	if err := c.BodyParser(&payload); err != nil {
+	if err := c.Bind().Body(&payload); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"message": "Invalid request payload",
 			"error":   err.Error(),
