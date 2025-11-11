@@ -43,8 +43,10 @@ func ExportHCA(hcaFile string, outputDir string, convertToMP3 bool, convertToFLA
 			return fmt.Errorf("failed to convert WAV to FLAC: %w", err)
 		}
 	} else if deleteOriginalWav {
-		if err := os.Remove(wavFile); err != nil {
-			return fmt.Errorf("failed to delete original WAV file: %w", err)
+		if _, err := os.Stat(wavFile); err == nil {
+			if err := os.Remove(wavFile); err != nil {
+				return fmt.Errorf("failed to delete original WAV file: %w", err)
+			}
 		}
 	}
 	if err := os.Remove(hcaFile); err != nil {
