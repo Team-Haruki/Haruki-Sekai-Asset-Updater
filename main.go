@@ -66,10 +66,11 @@ func main() {
 	} else {
 		mainLogger.Infof("SSL disabled, starting HTTP server")
 	}
+	mainLogger.Infof("Start listening %s server on %s...", listenServerType, addr)
 	err := app.Listen(addr, listenCfg)
 	if err != nil {
 		mainLogger.Errorf("failed to start server: %v", err)
 		os.Exit(1)
 	}
-	mainLogger.Infof("Started listen %s server on %s...", listenServerType, addr)
+
 }
