@@ -281,10 +281,13 @@ func (u *HarukiSekaiAssetUpdater) Run() {
 		return
 	}
 	u.logger.Infof("found %d new assets to download", len(toDownloadList))
+	startTime := time.Now()
 	successResults, failedResults := u.downloadAssetsConcurrently(toDownloadList)
+	consumedTime := time.Since(startTime)
 	u.logger.Infof("Flushing remaining pending results...")
 	u.flushPendingResults()
 	u.logger.Infof("all downloads completed, total successful: %d, failed: %d", len(successResults), len(failedResults))
+	u.logger.Infof("total time taken: %s", consumedTime.String())
 }
 
 func (u *HarukiSekaiAssetUpdater) buildDownloadList(
