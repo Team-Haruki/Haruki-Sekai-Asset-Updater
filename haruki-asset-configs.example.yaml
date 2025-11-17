@@ -54,7 +54,7 @@ servers:
     unity_version: "2022.3.21f1"
     asset_save_dir: "./Data/jp-assets"
     downloaded_asset_record_file: "./Data/jp-assets/downloaded_assets.json"
-    start_app_prefixes:
+    start_app_regexes:
       - "bonds_honor"
       - "honor"
       - "thumbnail"
@@ -64,12 +64,12 @@ servers:
       - "stamp"
       - "home/banner"
       - "mysekai"
-    ondemand_prefixes:
+    ondemand_regexes:
       - "event"
       - "gacha"
       - "music"
       - "mysekai"
-    skip_prefixes: []
+    skip_regexes: []
     download_priority_list:
       - "^character/member.*"
       - "^event/.*"
@@ -115,14 +115,14 @@ servers:
     unity_version: "2022.3.52f1"
     asset_save_dir: "./Data/en-assets"
     downloaded_asset_record_file: "./Data/en-assets/downloaded_assets.json"
-    start_app_prefixes:
+    start_app_regexes:
       - "bonds_honor"
       - "honor"
       - "rank_live"
       - "music"
-    ondemand_prefixes:
+    ondemand_regexes:
       - "mysekai"
-    skip_prefixes: []
+    skip_regexes: []
     download_priority_list:
       - "^character/member.*"
       - "^event/.*"
@@ -170,16 +170,16 @@ servers:
     unity_version: "2022.3.21f1"
     asset_save_dir: "./Data/tw-assets"
     downloaded_asset_record_file: "./Data/tw-assets/downloaded_assets.json"
-    start_app_prefixes:
+    start_app_regexes:
       - "bonds_honor"
       - "honor"
       - "rank_live"
       - "music"
       - "thumbnail"
       - "mysekai"
-    ondemand_prefixes:
+    ondemand_regexes:
       - "mysekai"
-    skip_prefixes: []
+    skip_regexes: []
     download_priority_list:
       - "^character/member.*"
       - "^event/.*"
@@ -227,14 +227,14 @@ servers:
     unity_version: "2022.3.21f1"
     asset_save_dir: "./Data/kr-assets"
     downloaded_asset_record_file: "./Data/kr-assets/downloaded_assets.json"
-    start_app_prefixes:
+    start_app_regexes:
       - "bonds_honor"
       - "honor"
       - "rank_live"
       - "music"
-    ondemand_prefixes:
+    ondemand_regexes:
       - "mysekai"
-    skip_prefixes: []
+    skip_regexes: []
     download_priority_list:
       - "^character/member.*"
       - "^event/.*"
@@ -282,7 +282,7 @@ servers:
     unity_version: "2022.3.21f1"
     asset_save_dir: "./Data/cn-assets"
     downloaded_asset_record_file: "./Data/cn-assets/downloaded_assets.json"
-    start_app_prefixes: # fill [] to disable download any startapp assets
+    start_app_regexes: # fill [] to disable download any startapp assets
       # - ".*" # download all startapp assets
       # - "bonds_honor"
       # - "honor"
@@ -290,10 +290,10 @@ servers:
       # - "^music/short"
       # - "mysekai/sound/se/fixture/toaster"
       # - "^character/member.*"
-    ondemand_prefixes:   # fill [] to disable download any ondemand assets
+    ondemand_regexes:   # fill [] to disable download any ondemand assets
       - "music/long"
       # - "^movie/gacha"
-    skip_prefixes: []
+    skip_regexes: []
     download_priority_list:
       - "^character/member.*"
       - "^event/.*"
