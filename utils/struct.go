@@ -16,9 +16,9 @@ type HarukiSekaiAssetUpdaterConfig struct {
 	UnityVersion              string    `yaml:"unity_version,omitempty"`
 	AssetSaveDir              string    `yaml:"asset_save_dir,omitempty"`
 	DownloadedAssetRecordFile string    `yaml:"downloaded_asset_record_file,omitempty"`
-	StartAppPrefixes          []string  `yaml:"start_app_prefixes,omitempty"`
-	OndemandPrefixes          []string  `yaml:"ondemand_prefixes,omitempty"`
-	SkipPrefixes              []string  `yaml:"skip_prefixes,omitempty"`
+	StartAppRegexes           []string  `yaml:"start_app_regexes,omitempty"`
+	OndemandRegexes           []string  `yaml:"ondemand_regexes,omitempty"`
+	SkipRegexes               []string  `yaml:"skip_regexes,omitempty"`
 	DownloadPriorityList      *[]string `yaml:"download_priority_list,omitempty"`
 	ExportUSMFiles            bool      `yaml:"export_usm_files,omitempty"`
 	DecodeUSMFiles            bool      `yaml:"decode_usm_files,omitempty"`

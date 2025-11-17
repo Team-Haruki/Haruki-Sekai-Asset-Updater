@@ -318,11 +318,11 @@ func (u *HarukiSekaiAssetUpdater) buildDownloadList(
 }
 
 func (u *HarukiSekaiAssetUpdater) shouldSkipBundle(bundleName string) bool {
-	if len(u.serverConfig.SkipPrefixes) == 0 {
+	if len(u.serverConfig.SkipRegexes) == 0 {
 		return false
 	}
 
-	for _, pattern := range u.serverConfig.SkipPrefixes {
+	for _, pattern := range u.serverConfig.SkipRegexes {
 		re, err := regexp2.Compile(pattern, 0)
 		if err != nil {
 			u.logger.Warnf("invalid skip prefix pattern '%s': %v", pattern, err)
@@ -344,10 +344,10 @@ func (u *HarukiSekaiAssetUpdater) shouldSkipBundle(bundleName string) bool {
 func (u *HarukiSekaiAssetUpdater) shouldDownloadBundle(bundleName string, category HarukiSekaiAssetCategory) bool {
 	switch category {
 	case HarukiSekaiAssetCategoryStartApp:
-		if len(u.serverConfig.StartAppPrefixes) == 0 {
+		if len(u.serverConfig.StartAppRegexes) == 0 {
 			return false
 		}
-		for _, pattern := range u.serverConfig.StartAppPrefixes {
+		for _, pattern := range u.serverConfig.StartAppRegexes {
 			re, err := regexp2.Compile(pattern, 0)
 			if err != nil {
 				u.logger.Warnf("invalid StartApp pattern '%s': %v", pattern, err)
@@ -364,10 +364,10 @@ func (u *HarukiSekaiAssetUpdater) shouldDownloadBundle(bundleName string, catego
 		}
 		return false
 	case HarukiSekaiAssetCategoryOnDemand:
-		if len(u.serverConfig.OndemandPrefixes) == 0 {
+		if len(u.serverConfig.OndemandRegexes) == 0 {
 			return false
 		}
-		for _, pattern := range u.serverConfig.OndemandPrefixes {
+		for _, pattern := range u.serverConfig.OndemandRegexes {
 			re, err := regexp2.Compile(pattern, 0)
 			if err != nil {
 				u.logger.Warnf("invalid OnDemand pattern '%s': %v", pattern, err)
