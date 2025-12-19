@@ -1,28 +1,74 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"haruki-sekai-asset/config"
 	harukiLogger "haruki-sekai-asset/utils/logger"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 var semaphore = make(chan struct{}, config.Cfg.Concurrents.ConcurrentUpload)
 var logger = harukiLogger.NewLogger("HarukiCloudStorageUploader", "INFO", nil)
 
+func UploadToS3Storage(
+	filePath string,
+	remotePath string,
+	endpoint string,
+	ssl bool,
+	bucket string,
+	accessKey string,
+	secretKey string,
+) error {
+	minioClient, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: ssl,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+
+	// Create bucket if not exist
+	exists, err := minioClient.BucketExists(ctx, bucket)
+	if err != nil {
+		return fmt.Errorf("failed to check bucket %s: %w", bucket, err)
+	}
+
+	if !exists {
+		err = minioClient.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
+		}
+		logger.Infof("Successfully created %s\n", bucket)
+	}
+
+	// Upload the test file with FPutObject
+	info, err := minioClient.FPutObject(ctx, bucket, remotePath, filePath, minio.PutObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to upload file %s to bucket %s: %w", filePath, bucket, err)
+	}
+	logger.Infof("Successfully uploaded %s of size %d\n", filePath, info.Size)
+	return nil
+}
+
 func UploadToStorage(
 	exportedList []string,
 	extractedSavePath string,
-	remoteBase string,
-	uploadProgram string,
-	uploadArgs []string,
+	endpoint string,
+	ssl bool,
+	bucket string,
+	accessKey string,
+	secretKey string,
 	removeLocalAfterUpload bool,
 ) error {
-
 	errChan := make(chan error, len(exportedList))
 	var wg sync.WaitGroup
 	uploadFile := func(filePath string) {
@@ -34,28 +80,19 @@ func UploadToStorage(
 			errChan <- fmt.Errorf("failed to get relative path for %s: %w", filePath, err)
 			return
 		}
-		remotePath := filepath.Join(remoteBase, relativePath)
-		args := make([]string, len(uploadArgs))
-		copy(args, uploadArgs)
-		for i, arg := range args {
-			if arg == "src" {
-				args[i] = filePath
-			} else if arg == "dst" {
-				args[i] = remotePath
-			}
+
+		schema := "http"
+		if ssl {
+			schema = "https"
 		}
-		logger.Debugf("Uploading %s to %s using command: %s %s",
-			filePath, remotePath, uploadProgram, strings.Join(args, " "))
-		cmd := exec.Command(uploadProgram, args...)
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-		if err := cmd.Run(); err != nil {
-			logger.Errorf("Failed to upload %s to %s", filePath, remotePath)
-			errChan <- fmt.Errorf("failed to upload %s to %s using command: %s %s: %w",
-				filePath, remotePath, uploadProgram, strings.Join(args, " "), err)
-			return
+		remotePath := fmt.Sprintf("%s://%s/%s", schema, endpoint, relativePath)
+		logger.Debugf("Uploading %s to %s", filePath, remotePath)
+
+		err = UploadToS3Storage(filePath, relativePath, endpoint, ssl, bucket, accessKey, secretKey)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to get Upload %s: %w", filePath, err)
 		}
-		logger.Infof("Successfully uploaded %s to %s", filePath, remotePath)
+
 		if removeLocalAfterUpload {
 			if err := os.Remove(filePath); err != nil {
 				errChan <- fmt.Errorf("uploaded but failed to delete local file %s: %w", filePath, err)
@@ -84,6 +121,7 @@ func UploadToAllStorages(
 	exportedList []string,
 	extractedSavePath string,
 	removeLocal bool,
+	serverName string,
 ) error {
 	if len(config.Cfg.RemoteStorages) == 0 {
 		logger.Infof("No remote storages configured, skipping upload")
@@ -91,19 +129,22 @@ func UploadToAllStorages(
 	}
 
 	for _, storage := range config.Cfg.RemoteStorages {
-		logger.Infof("Uploading to remote storage: %s (type: %s)", storage.Base, storage.Type)
+		logger.Infof("Uploading to remote storage: %s (type: %s)", storage.Endpoint, storage.Type)
+		bucket := strings.ReplaceAll(storage.Bucket, "{server}", serverName)
 		err := UploadToStorage(
 			exportedList,
 			extractedSavePath,
-			storage.Base,
-			storage.Program,
-			storage.Args,
+			storage.Endpoint,
+			storage.SSL,
+			bucket,
+			storage.AccessKey,
+			storage.SecretKey,
 			removeLocal,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to upload to storage %s: %w", storage.Base, err)
+			return fmt.Errorf("failed to upload to storage %s: %w", storage.Endpoint, err)
 		}
-		logger.Infof("Successfully uploaded all files to storage: %s", storage.Base)
+		logger.Infof("Successfully uploaded all files to storage: %s", storage.Endpoint)
 	}
 
 	logger.Infof("Successfully uploaded to all configured remote storages")

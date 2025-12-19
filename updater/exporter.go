@@ -42,7 +42,7 @@ func getExportGroup(exportPath string) string {
 	return "container"
 }
 
-func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportPath string, outputDir string, category HarukiSekaiAssetCategory, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
+func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportPath string, outputDir string, category HarukiSekaiAssetCategory, server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
 	if assetStudioCLIPath == "" {
 		logger.Warnf("AssetStudioCLIPath is not configured, skipping exporting of %s", filePath)
 		return nil
@@ -101,14 +101,14 @@ func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportP
 	}
 	logger.Infof("Successfully exported asset bundle: %s", filePath)
 
-	if err := postProcessExportedFiles(actualExportPath, serverConfig, ffmpegPath, cwebpPath); err != nil {
+	if err := postProcessExportedFiles(actualExportPath, server, serverConfig, ffmpegPath, cwebpPath); err != nil {
 		return fmt.Errorf("post-processing failed for %s: %w", actualExportPath, err)
 	}
 
 	return nil
 }
 
-func postProcessExportedFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
+func postProcessExportedFiles(exportPath string, server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
 	if _, err := os.Stat(exportPath); os.IsNotExist(err) {
 		return nil
 	}
@@ -129,7 +129,7 @@ func postProcessExportedFiles(exportPath string, serverConfig utils.HarukiSekaiA
 
 		if len(exportedFiles) > 0 {
 			logger.Infof("Found %d files to upload from %s", len(exportedFiles), exportPath)
-			if err := cloud.UploadToAllStorages(exportedFiles, exportPath, serverConfig.RemoveLocalAfterUpload); err != nil {
+			if err := cloud.UploadToAllStorages(exportedFiles, serverConfig.AssetSaveDir, serverConfig.RemoveLocalAfterUpload, string(server)); err != nil {
 				return fmt.Errorf("failed to upload files from %s: %w", exportPath, err)
 			}
 		} else {

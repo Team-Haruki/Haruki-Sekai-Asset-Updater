@@ -29,11 +29,13 @@ type ToolConfig struct {
 	CwebpPath          string `yaml:"cwebp_path,omitempty"`
 }
 
-type RemoteStorageConfig struct {
-	Type    string   `yaml:"type"`
-	Base    string   `yaml:"base"`
-	Program string   `yaml:"program"`
-	Args    []string `yaml:"args"`
+type S3RemoteStorageConfig struct {
+	Type      string `yaml:"type"`
+	Endpoint  string `yaml:"endpoint"`
+	SSL       bool   `yaml:"ssl"`
+	Bucket    string `yaml:"bucket"`
+	AccessKey string `yaml:"access_key,omitempty"`
+	SecretKey string `yaml:"secret_key,omitempty"`
 }
 
 type Config struct {
@@ -43,7 +45,7 @@ type Config struct {
 	Tools          ToolConfig                                                            `yaml:"tool,omitempty"`
 	Profiles       map[utils.HarukiSekaiServerRegion]map[string]string                   `yaml:"profiles,omitempty"`
 	Servers        map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiAssetUpdaterConfig `yaml:"servers"`
-	RemoteStorages []RemoteStorageConfig                                                 `yaml:"remote_storages,omitempty"`
+	RemoteStorages []S3RemoteStorageConfig                                               `yaml:"remote_storages,omitempty"`
 }
 
 var Version = "v4.0.1-dev"
