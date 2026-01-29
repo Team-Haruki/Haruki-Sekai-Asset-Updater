@@ -14,8 +14,12 @@ import (
 	"sync"
 	"time"
 
+	"haruki-sekai-asset/utils/git"
+	"sort"
+
 	"github.com/bytedance/sonic"
 	"github.com/dlclark/regexp2"
+	gogit "github.com/go-git/go-git/v6"
 	"github.com/go-resty/resty/v2"
 )
 
@@ -286,6 +290,7 @@ func (u *HarukiSekaiAssetUpdater) Run() {
 	consumedTime := time.Since(startTime)
 	u.logger.Infof("Flushing remaining pending results...")
 	u.flushPendingResults()
+	u.collectAndPushMusicChartHashes()
 	u.logger.Infof("all downloads completed, total successful: %d, failed: %d", len(successResults), len(failedResults))
 	u.logger.Infof("total time taken: %s", consumedTime.String())
 }
@@ -556,4 +561,55 @@ func (u *HarukiSekaiAssetUpdater) flushPendingResultsUnsafe() {
 
 func (u *HarukiSekaiAssetUpdater) Close() {
 	u.client = nil
+}
+
+func (u *HarukiSekaiAssetUpdater) collectAndPushMusicChartHashes() {
+	if !config.Cfg.SekaiMusicChartHashCollection.Enabled {
+		return
+	}
+	u.logger.Infof("Starting music chart hash collection...")
+	charts := make(map[string]string)
+	for key, hash := range u.downloadedAssets {
+		if strings.HasPrefix(key, "music/music_score") {
+			charts[key] = hash
+		}
+	}
+	if len(charts) == 0 {
+		u.logger.Infof("No music charts found, skipping hash collection.")
+		return
+	}
+	keys := make([]string, 0, len(charts))
+	for k := range charts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	orderedCharts := make(map[string]string)
+	for _, k := range keys {
+		orderedCharts[k] = charts[k]
+	}
+	jsonData, err := sonic.ConfigDefault.MarshalIndent(orderedCharts, "", "  ")
+	if err != nil {
+		u.logger.Errorf("Failed to marshal chart hashes: %v", err)
+		return
+	}
+	repoDir := config.Cfg.SekaiMusicChartHashCollection.RepositoryDir
+	fileName := fmt.Sprintf("%s_chart_hashes.json", u.server)
+	filePath := filepath.Join(repoDir, fileName)
+	if err := os.WriteFile(filePath, jsonData, 0644); err != nil {
+		u.logger.Errorf("Failed to write chart hashes to file %s: %v", filePath, err)
+		return
+	}
+	u.logger.Infof("Successfully wrote %d chart hashes to %s", len(charts), filePath)
+	gitConfig := config.Cfg.SekaiMusicChartHashCollection
+	gitUpdater := git.NewHarukiGitUpdater(gitConfig.Username, gitConfig.Email, gitConfig.Password, config.Cfg.Proxy)
+	repo, err := gogit.PlainOpen(repoDir)
+	if err != nil {
+		u.logger.Errorf("Failed to open git repository at %s: %v", repoDir, err)
+		return
+	}
+	if err := gitUpdater.PushRemote(repo, *u.assetVersion); err != nil {
+		u.logger.Errorf("Failed to push changes to remote: %v", err)
+		return
+	}
+	u.logger.Infof("Successfully pushed chart hashes to remote.")
 }

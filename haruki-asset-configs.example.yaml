@@ -11,6 +11,14 @@ concurrents:
   concurrent_acb: 16
   concurrent_usm: 4
 
+# Music chart hashes collection configuration for somebody
+sekai_music_chart_hash_collection:
+  enabled: false
+  repository_dir: "./sekai-chart-hash"
+  username: "none"
+  email: "none"
+  password: "yourpassword"
+
 # Backend API server configuration
 backend:
   host: "0.0.0.0"

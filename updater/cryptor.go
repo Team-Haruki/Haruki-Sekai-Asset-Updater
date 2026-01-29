@@ -1,7 +1,6 @@
 package updater
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/hex"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/iancoleman/orderedmap"
 	"github.com/vgorin/cryptogo/pad"
-	"github.com/vmihailenco/msgpack/v5"
 )
 
 type SekaiCryptor struct {
@@ -109,8 +107,7 @@ func (c *SekaiCryptor) UnpackInto(content []byte, out any) error {
 		*dst = om
 		return nil
 	default:
-		dec := msgpack.NewDecoder(bytes.NewReader(unpadded))
-		if err := dec.Decode(out); err != nil {
+		if err := orderedmsgpack.Unmarshal(unpadded, out); err != nil {
 			return fmt.Errorf("msgpack decode: %w", err)
 		}
 		return nil

@@ -8,6 +8,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type SekaiMusicChartHashCollectionConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	RepositoryDir string `yaml:"repository_dir,omitempty"`
+	Username      string `yaml:"username,omitempty"`
+	Email         string `yaml:"email,omitempty"`
+	Password      string `yaml:"password,omitempty"`
+}
+
 type BackendConfig struct {
 	Host                     string `yaml:"host"`
 	Port                     int    `yaml:"port"`
@@ -37,13 +45,14 @@ type RemoteStorageConfig struct {
 }
 
 type Config struct {
-	Proxy          string                                                                `yaml:"proxy,omitempty"`
-	Concurrents    utils.ConcurrentConfig                                                `yaml:"concurrents,omitempty"`
-	Backend        BackendConfig                                                         `yaml:"backend,omitempty"`
-	Tools          ToolConfig                                                            `yaml:"tool,omitempty"`
-	Profiles       map[utils.HarukiSekaiServerRegion]map[string]string                   `yaml:"profiles,omitempty"`
-	Servers        map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiAssetUpdaterConfig `yaml:"servers"`
-	RemoteStorages []RemoteStorageConfig                                                 `yaml:"remote_storages,omitempty"`
+	Proxy                         string                                                                `yaml:"proxy,omitempty"`
+	Concurrents                   utils.ConcurrentConfig                                                `yaml:"concurrents,omitempty"`
+	SekaiMusicChartHashCollection SekaiMusicChartHashCollectionConfig                                   `yaml:"sekai_music_chart_hash_collection,omitempty"`
+	Backend                       BackendConfig                                                         `yaml:"backend,omitempty"`
+	Tools                         ToolConfig                                                            `yaml:"tool,omitempty"`
+	Profiles                      map[utils.HarukiSekaiServerRegion]map[string]string                   `yaml:"profiles,omitempty"`
+	Servers                       map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiAssetUpdaterConfig `yaml:"servers"`
+	RemoteStorages                []RemoteStorageConfig                                                 `yaml:"remote_storages,omitempty"`
 }
 
 var Version = "v4.0.1-dev"
