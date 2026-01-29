@@ -607,7 +607,7 @@ func (u *HarukiSekaiAssetUpdater) collectAndPushMusicChartHashes() {
 		u.logger.Errorf("Failed to open git repository at %s: %v", repoDir, err)
 		return
 	}
-	if err := gitUpdater.PushRemote(repo, *u.assetVersion); err != nil {
+	if err := gitUpdater.PushRemote(repo, u.server); err != nil {
 		u.logger.Errorf("Failed to push changes to remote: %v", err)
 		return
 	}

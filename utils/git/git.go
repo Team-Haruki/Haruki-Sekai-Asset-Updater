@@ -3,6 +3,7 @@ package git
 import (
 	"crypto/tls"
 	"fmt"
+	"haruki-sekai-asset/utils"
 	harukiLogger "haruki-sekai-asset/utils/logger"
 	"net/http"
 	"net/url"
@@ -58,11 +59,11 @@ func checkUnpushedCommits(repo *git.Repository, logger *harukiLogger.Logger) (bo
 	return false, nil
 }
 
-func (g *HarukiGitUpdater) commitChanges(w *git.Worktree, dataVersion string, logger *harukiLogger.Logger) (plumbing.Hash, error) {
-	commitMsg := fmt.Sprintf("Update data version %s", dataVersion)
+func (g *HarukiGitUpdater) commitChanges(w *git.Worktree, region utils.HarukiSekaiServerRegion, logger *harukiLogger.Logger) (plumbing.Hash, error) {
+	commitMsg := fmt.Sprintf("Updated %s server chart hashes", region)
 	commit, err := w.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{
-			Name:  "Haruki Sekai Master Update Bot",
+			Name:  "Haruki Automation Git Bot",
 			Email: "no-reply@seiunx.com",
 			When:  time.Now(),
 		},
@@ -200,7 +201,7 @@ func (g *HarukiGitUpdater) setupProxyTransport(logger *harukiLogger.Logger) (fun
 	return cleanup, nil
 }
 
-func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, dataVersion string) error {
+func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, region utils.HarukiSekaiServerRegion) error {
 	logger := harukiLogger.NewLogger("HarukiGitUpdater", "INFO", nil)
 	w, err := repo.Worktree()
 	if err != nil {
@@ -234,7 +235,7 @@ func (g *HarukiGitUpdater) PushRemote(repo *git.Repository, dataVersion string) 
 	}
 
 	if hasUncommittedChanges {
-		if _, err := g.commitChanges(w, dataVersion, logger); err != nil {
+		if _, err := g.commitChanges(w, region, logger); err != nil {
 			return err
 		}
 	} else {
