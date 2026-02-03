@@ -1,8 +1,7 @@
 package utils
 
 type UploadParam struct {
-	Endpoint    string
-	SSL         bool
+	URL         string
 	Bucket      string
 	AccessKey   string
 	ACLPublic   bool

@@ -29,7 +29,7 @@ func uploadToS3(
 		region = param.Region
 	}
 	cfg := aws.Config{
-		BaseEndpoint: aws.String(param.Endpoint),
+		BaseEndpoint: aws.String(param.URL),
 		Region:       region,
 		Credentials:  credentials.NewStaticCredentialsProvider(param.AccessKey, param.SecretKey, ""),
 	}
@@ -67,16 +67,20 @@ func uploadToS3(
 	return nil
 }
 
-func constructRemotePath(param UploadParam, extractedSavePath, filePath string) (string, error) {
+func constructEndpointURL(endpoint string, ssl bool) string {
+	schema := "http"
+	if ssl {
+		schema = "https"
+	}
+	return fmt.Sprintf("%s://%s", schema, endpoint)
+}
+
+func constructRemotePath(extractedSavePath, filePath string) (string, error) {
 	relativePath, err := filepath.Rel(extractedSavePath, filePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to get relative path for %s: %w", filePath, err)
 	}
-	schema := "http"
-	if param.SSL {
-		schema = "https"
-	}
-	return fmt.Sprintf("%s://%s/%s", schema, param.Endpoint, relativePath), nil
+	return relativePath, nil
 }
 
 func UploadToStorage(
@@ -92,7 +96,7 @@ func UploadToStorage(
 		semaphore <- struct{}{}
 		defer func() { <-semaphore }()
 
-		remotePath, err := constructRemotePath(param, extractedSavePath, filePath)
+		remotePath, err := constructRemotePath(extractedSavePath, filePath)
 		if err != nil {
 			errChan <- err
 			return
@@ -141,8 +145,7 @@ func UploadToAllStorages(
 		logger.Infof("Uploading to remote storage: %s (type: %s)", storage.Endpoint, storage.Type)
 		bucket := strings.ReplaceAll(storage.Bucket, "{server}", serverName)
 		param := UploadParam{
-			Endpoint:    storage.Endpoint,
-			SSL:         storage.SSL,
+			URL:         constructEndpointURL(storage.Endpoint, storage.SSL),
 			Bucket:      bucket,
 			ACLPublic:   storage.ACLPublic,
 			AccessKey:   storage.AccessKey,
