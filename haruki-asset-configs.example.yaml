@@ -331,7 +331,10 @@ servers:
 # remote_storages:
 #   - type: "s3"
 #     endpoint: your-s3-server
+#     path_style: true
+#     region: us-east-1
 #     ssl: true
 #     access_key: s3-key
 #     secret_key: s3-token
 #     bucket: sekai-{server}-assets
+#     acl_public: false

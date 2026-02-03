@@ -34,6 +34,9 @@ type S3RemoteStorageConfig struct {
 	Endpoint  string `yaml:"endpoint"`
 	SSL       bool   `yaml:"ssl"`
 	Bucket    string `yaml:"bucket"`
+	PathStyle bool   `yaml:"path_style"`
+	Region    string `yaml:"region,omitempty"`
+	ACLPublic bool   `yaml:"acl_public,omitempty"`
 	AccessKey string `yaml:"access_key,omitempty"`
 	SecretKey string `yaml:"secret_key,omitempty"`
 }

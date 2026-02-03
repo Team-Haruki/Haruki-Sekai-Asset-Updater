@@ -10,109 +10,118 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 var semaphore = make(chan struct{}, config.Cfg.Concurrents.ConcurrentUpload)
 var logger = harukiLogger.NewLogger("HarukiCloudStorageUploader", "INFO", nil)
 
-func UploadToS3Storage(
+func uploadToS3(
 	filePath string,
 	remotePath string,
-	endpoint string,
-	ssl bool,
-	bucket string,
-	accessKey string,
-	secretKey string,
+	param UploadParam,
 ) error {
-	minioClient, err := minio.New(endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: ssl,
-	})
-	if err != nil {
-		return err
+	region := "us-east-1"
+	if len(param.Region) != 0 {
+		region = param.Region
 	}
+	cfg := aws.Config{
+		BaseEndpoint: aws.String(param.Endpoint),
+		Region:       region,
+		Credentials:  credentials.NewStaticCredentialsProvider(param.AccessKey, param.SecretKey, ""),
+	}
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = param.PathStyle
+	})
 
 	ctx := context.Background()
 
-	// Create bucket if not exist
-	exists, err := minioClient.BucketExists(ctx, bucket)
+	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to check bucket %s: %w", bucket, err)
+		return fmt.Errorf("failed to open file %s: %w", filePath, err)
 	}
-
-	if !exists {
-		err = minioClient.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
+	defer func(file *os.File) {
+		err := file.Close()
 		if err != nil {
-			return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
+			logger.Errorf("failed to close file %s: %s", filePath, err)
 		}
-		logger.Infof("Successfully created %s\n", bucket)
+	}(file)
+
+	input := s3.PutObjectInput{
+		Bucket: aws.String(param.Bucket),
+		Key:    aws.String(remotePath),
+		Body:   file,
+	}
+	if param.ACLPublic {
+		input.ACL = types.ObjectCannedACLPublicRead
 	}
 
-	// Upload the test file with FPutObject
-	info, err := minioClient.FPutObject(ctx, bucket, remotePath, filePath, minio.PutObjectOptions{})
+	info, err := client.PutObject(ctx, &input)
 	if err != nil {
-		return fmt.Errorf("failed to upload file %s to bucket %s: %w", filePath, bucket, err)
+		return fmt.Errorf("failed to upload file %s to bucket %s: %w", filePath, param.Bucket, err)
 	}
 	logger.Infof("Successfully uploaded %s of size %d\n", filePath, info.Size)
 	return nil
 }
 
+func constructRemotePath(param UploadParam, extractedSavePath, filePath string) (string, error) {
+	relativePath, err := filepath.Rel(extractedSavePath, filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to get relative path for %s: %w", filePath, err)
+	}
+	schema := "http"
+	if param.SSL {
+		schema = "https"
+	}
+	return fmt.Sprintf("%s://%s/%s", schema, param.Endpoint, relativePath), nil
+}
+
 func UploadToStorage(
 	exportedList []string,
 	extractedSavePath string,
-	endpoint string,
-	ssl bool,
-	bucket string,
-	accessKey string,
-	secretKey string,
-	removeLocalAfterUpload bool,
+	param UploadParam,
 ) error {
 	errChan := make(chan error, len(exportedList))
 	var wg sync.WaitGroup
+
 	uploadFile := func(filePath string) {
 		defer wg.Done()
 		semaphore <- struct{}{}
 		defer func() { <-semaphore }()
-		relativePath, err := filepath.Rel(extractedSavePath, filePath)
+
+		remotePath, err := constructRemotePath(param, extractedSavePath, filePath)
 		if err != nil {
-			errChan <- fmt.Errorf("failed to get relative path for %s: %w", filePath, err)
+			errChan <- err
 			return
 		}
 
-		schema := "http"
-		if ssl {
-			schema = "https"
-		}
-		remotePath := fmt.Sprintf("%s://%s/%s", schema, endpoint, relativePath)
 		logger.Debugf("Uploading %s to %s", filePath, remotePath)
-
-		err = UploadToS3Storage(filePath, relativePath, endpoint, ssl, bucket, accessKey, secretKey)
-		if err != nil {
-			errChan <- fmt.Errorf("failed to get Upload %s: %w", filePath, err)
+		if err := uploadToS3(filePath, remotePath, param); err != nil {
+			errChan <- err
+			return
 		}
 
-		if removeLocalAfterUpload {
+		if param.RemoveLocal {
 			if err := os.Remove(filePath); err != nil {
 				errChan <- fmt.Errorf("uploaded but failed to delete local file %s: %w", filePath, err)
-			} else {
-				logger.Debugf("Deleted local file %s after successful upload", filePath)
+				return
 			}
+			logger.Debugf("Deleted local file %s after successful upload", filePath)
 		}
 	}
+
 	for _, filePath := range exportedList {
 		wg.Add(1)
 		go uploadFile(filePath)
 	}
 	wg.Wait()
 	close(errChan)
-	var errors []error
+
 	for err := range errChan {
-		errors = append(errors, err)
-	}
-	if len(errors) > 0 {
-		return errors[0]
+		return err
 	}
 	return nil
 }
@@ -131,17 +140,18 @@ func UploadToAllStorages(
 	for _, storage := range config.Cfg.RemoteStorages {
 		logger.Infof("Uploading to remote storage: %s (type: %s)", storage.Endpoint, storage.Type)
 		bucket := strings.ReplaceAll(storage.Bucket, "{server}", serverName)
-		err := UploadToStorage(
-			exportedList,
-			extractedSavePath,
-			storage.Endpoint,
-			storage.SSL,
-			bucket,
-			storage.AccessKey,
-			storage.SecretKey,
-			removeLocal,
-		)
-		if err != nil {
+		param := UploadParam{
+			Endpoint:    storage.Endpoint,
+			SSL:         storage.SSL,
+			Bucket:      bucket,
+			ACLPublic:   storage.ACLPublic,
+			AccessKey:   storage.AccessKey,
+			SecretKey:   storage.SecretKey,
+			PathStyle:   storage.PathStyle,
+			RemoveLocal: removeLocal,
+		}
+
+		if err := UploadToStorage(exportedList, extractedSavePath, param); err != nil {
 			return fmt.Errorf("failed to upload to storage %s: %w", storage.Endpoint, err)
 		}
 		logger.Infof("Successfully uploaded all files to storage: %s", storage.Endpoint)
