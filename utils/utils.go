@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"io/fs"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,4 +37,15 @@ func FindFilesByExtension(dir string, ext string) ([]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+func DetermineFileMimeType(filePath string) string {
+	var ContentType string
+	// Set contentType based on filepath extension if not given or default
+	// value of "application/octet-stream" if the extension has no associated type.
+	ContentType = mime.TypeByExtension(filepath.Ext(filePath))
+	if ContentType == "" {
+		ContentType = "application/octet-stream"
+	}
+	return ContentType
 }

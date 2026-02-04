@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"haruki-sekai-asset/config"
+	"haruki-sekai-asset/utils"
 	harukiLogger "haruki-sekai-asset/utils/logger"
 	"os"
 	"path/filepath"
@@ -43,27 +44,30 @@ func uploadToS3(
 	if err != nil {
 		return fmt.Errorf("failed to open file %s: %w", filePath, err)
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			logger.Errorf("failed to close file %s: %s", filePath, err)
-		}
-	}(file)
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to read file stat: %w", err)
+	}
+	size := stat.Size()
+	mime := utils.DetermineFileMimeType(filePath)
 
 	input := s3.PutObjectInput{
-		Bucket: aws.String(param.Bucket),
-		Key:    aws.String(remotePath),
-		Body:   file,
+		Bucket:      aws.String(param.Bucket),
+		Key:         aws.String(remotePath),
+		ContentType: aws.String(mime),
+		Body:        file,
 	}
 	if param.ACLPublic {
 		input.ACL = types.ObjectCannedACLPublicRead
 	}
 
-	info, err := client.PutObject(ctx, &input)
+	_, err = client.PutObject(ctx, &input)
 	if err != nil {
 		return fmt.Errorf("failed to upload file %s to bucket %s: %w", filePath, param.Bucket, err)
 	}
-	logger.Infof("Successfully uploaded %s of size %d\n", filePath, info.Size)
+	logger.Infof("Successfully uploaded %s of size %d\n", filePath, size)
 	return nil
 }
 
@@ -107,14 +111,6 @@ func UploadToStorage(
 			errChan <- err
 			return
 		}
-
-		if param.RemoveLocal {
-			if err := os.Remove(filePath); err != nil {
-				errChan <- fmt.Errorf("uploaded but failed to delete local file %s: %w", filePath, err)
-				return
-			}
-			logger.Debugf("Deleted local file %s after successful upload", filePath)
-		}
 	}
 
 	for _, filePath := range exportedList {
@@ -145,19 +141,34 @@ func UploadToAllStorages(
 		logger.Infof("Uploading to remote storage: %s (type: %s)", storage.Endpoint, storage.Type)
 		bucket := strings.ReplaceAll(storage.Bucket, "{server}", serverName)
 		param := UploadParam{
-			URL:         constructEndpointURL(storage.Endpoint, storage.SSL),
-			Bucket:      bucket,
-			ACLPublic:   storage.ACLPublic,
-			AccessKey:   storage.AccessKey,
-			SecretKey:   storage.SecretKey,
-			PathStyle:   storage.PathStyle,
-			RemoveLocal: removeLocal,
+			URL:       constructEndpointURL(storage.Endpoint, storage.SSL),
+			Bucket:    bucket,
+			ACLPublic: storage.ACLPublic,
+			AccessKey: storage.AccessKey,
+			SecretKey: storage.SecretKey,
+			PathStyle: storage.PathStyle,
 		}
 
 		if err := UploadToStorage(exportedList, extractedSavePath, param); err != nil {
 			return fmt.Errorf("failed to upload to storage %s: %w", storage.Endpoint, err)
 		}
 		logger.Infof("Successfully uploaded all files to storage: %s", storage.Endpoint)
+	}
+
+	if removeLocal {
+		errChan := make(chan error, len(exportedList))
+		for _, filePath := range exportedList {
+			if err := os.Remove(filePath); err != nil {
+				errChan <- fmt.Errorf("uploaded but failed to delete local file %s: %w", filePath, err)
+				continue
+			}
+			logger.Debugf("Deleted local file %s after successful upload", filePath)
+		}
+		close(errChan)
+
+		for err := range errChan {
+			return err
+		}
 	}
 
 	logger.Infof("Successfully uploaded to all configured remote storages")
