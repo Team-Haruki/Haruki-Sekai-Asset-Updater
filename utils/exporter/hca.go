@@ -11,7 +11,9 @@ import (
 
 func ExportHCA(hcaFile string, outputDir string, convertToMP3 bool, convertToFLAC bool, deleteOriginalWav bool, ffmpegPath string) error {
 	baseName := strings.TrimSuffix(filepath.Base(hcaFile), filepath.Ext(hcaFile))
-	wavFile := filepath.Join(outputDir, baseName+".wav")
+	// Write intermediate WAV to the HCA's own directory (unique temp extract dir)
+	// to avoid race conditions when multiple ACBs have tracks with the same name.
+	wavFile := filepath.Join(filepath.Dir(hcaFile), baseName+".wav")
 
 	decoder, err := hca.NewHCADecoder(hcaFile)
 	if err != nil {

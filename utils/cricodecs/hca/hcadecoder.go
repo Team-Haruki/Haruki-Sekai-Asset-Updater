@@ -345,7 +345,7 @@ func finalizeScore(totalScore, testFrames int) int {
 // DecodeToWav decodes the entire file to 16-bit WAV stream
 func (d *CriWareHCADecoder) DecodeToWav(w io.Writer) error {
 	d.Reset()
-	totalSamples := int(d.info.BlockCount * d.info.SamplesPerBlock)
+	totalSamples := int(d.info.BlockCount*d.info.SamplesPerBlock) - int(d.info.EncoderDelay)
 	totalPCMBytes := totalSamples * int(d.info.ChannelCount) * 2 // 16-bit = 2 bytes per sample
 	header := make([]byte, 44)
 	copy(header[0:4], "RIFF")
