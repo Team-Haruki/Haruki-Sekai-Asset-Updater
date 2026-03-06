@@ -1,24 +1,30 @@
 package acb
 
-// Column storage and type constants
+// Column flag and type constants (matching vgmstream's cri_utf.c)
+//
+// The upper nibble is a bitmask of independent flags, NOT an enum.
+// Valid combinations: NAME+DEFAULT (0x30), NAME+ROW (0x50), NAME+DEFAULT+ROW (0x70).
+// NAME-only (0x10) means the column has no data.
 const (
-	columnStorageMask      = 0xF0
-	columnStoragePerRow    = 0x50
-	columnStorageConstant  = 0x30
-	columnStorageConstant2 = 0x70
-	columnStorageZero      = 0x10
+	columnFlagMask      = 0xF0
+	columnFlagName      = 0x10 // column has a name
+	columnFlagDefault   = 0x20 // data relative to schema area (constant for all rows)
+	columnFlagRow       = 0x40 // data relative to row start (per-row value)
+	columnFlagUndefined = 0x80 // shouldn't exist
 
 	columnTypeMask   = 0x0F
-	columnTypeData   = 0x0B
+	columnType1Byte  = 0x00 // uint8
+	columnType1Byte2 = 0x01 // int8
+	columnType2Byte  = 0x02 // uint16
+	columnType2Byte2 = 0x03 // int16
+	columnType4Byte  = 0x04 // uint32
+	columnType4Byte2 = 0x05 // int32
+	columnType8Byte  = 0x06 // uint64
+	// columnType8Byte2 = 0x07 // int64 (unused)
+	columnTypeFloat = 0x08 // float32
+	// columnTypeDouble = 0x09 // float64 (unused)
 	columnTypeString = 0x0A
-	columnTypeFloat  = 0x08
-	columnType8Byte  = 0x06
-	columnType4Byte2 = 0x05
-	columnType4Byte  = 0x04
-	columnType2Byte2 = 0x03
-	columnType2Byte  = 0x02
-	columnType1Byte2 = 0x01
-	columnType1Byte  = 0x00
+	columnTypeData   = 0x0B // variable-length data (offset+size)
 )
 
 // Waveform encoding types

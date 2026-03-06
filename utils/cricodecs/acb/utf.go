@@ -4,12 +4,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 )
 
 // UTFHeader represents the UTF table header
 type UTFHeader struct {
 	TableSize         uint32
-	U1                uint16
+	Version           uint16
 	RowOffset         uint16
 	StringTableOffset uint32
 	DataOffset        uint32
@@ -17,6 +18,14 @@ type UTFHeader struct {
 	NumberOfFields    uint16
 	RowSize           uint16
 	NumberOfRows      uint32
+}
+
+// columnSchema holds pre-parsed schema info for a single column
+type columnSchema struct {
+	flag   uint8
+	typ    uint8
+	name   string
+	offset uint32 // for DEFAULT: offset within schema buf; for ROW: offset within row
 }
 
 // UTFTable represents a UTF table
@@ -27,6 +36,7 @@ type UTFTable struct {
 	Constants   map[string]interface{}
 	Rows        []map[string]interface{}
 	reader      *Reader
+	schema      []columnSchema // pre-parsed column schema
 }
 
 type dataPromise struct {
@@ -36,6 +46,8 @@ type dataPromise struct {
 type stringPromise struct {
 	offset uint32
 }
+
+const utfMaxSchemaSize = 0x8000
 
 // NewUTFTable parses a UTF table from a reader
 func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
@@ -49,13 +61,13 @@ func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
 		return nil, fmt.Errorf("bad UTF magic: 0x%08X", magic)
 	}
 
-	// Read header
+	// Read header fields (all big-endian)
 	header := UTFHeader{}
 	if err := binary.Read(buf.r, binary.BigEndian, &header.TableSize); err != nil {
 		return nil, fmt.Errorf("failed to read table size: %w", err)
 	}
-	if err := binary.Read(buf.r, binary.BigEndian, &header.U1); err != nil {
-		return nil, fmt.Errorf("failed to read u1: %w", err)
+	if err := binary.Read(buf.r, binary.BigEndian, &header.Version); err != nil {
+		return nil, fmt.Errorf("failed to read version: %w", err)
 	}
 	if err := binary.Read(buf.r, binary.BigEndian, &header.RowOffset); err != nil {
 		return nil, fmt.Errorf("failed to read row offset: %w", err)
@@ -79,6 +91,26 @@ func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
 		return nil, fmt.Errorf("failed to read number of rows: %w", err)
 	}
 
+	// Offsets in the header are relative to byte 8 (after magic + table_size)
+	// Add 8 to make them absolute within the stream
+	absRowOffset := uint32(header.RowOffset) + 8
+	absStringOffset := header.StringTableOffset + 8
+	absDataOffset := header.DataOffset + 8
+
+	// Validation (matching vgmstream)
+	schemaOffset := uint32(0x20)
+	schemaSize := absRowOffset - schemaOffset
+	if header.NumberOfFields == 0 {
+		return nil, fmt.Errorf("UTF table has no columns")
+	}
+	if schemaSize >= utfMaxSchemaSize {
+		return nil, fmt.Errorf("UTF schema too large: %d", schemaSize)
+	}
+	if absRowOffset > header.TableSize+8 || absStringOffset > header.TableSize+8 || absDataOffset > header.TableSize+8 {
+		return nil, fmt.Errorf("UTF offset out of bounds: row=%d str=%d data=%d tableSize=%d",
+			absRowOffset, absStringOffset, absDataOffset, header.TableSize+8)
+	}
+
 	table := &UTFTable{
 		Header:    header,
 		Constants: make(map[string]interface{}),
@@ -86,19 +118,21 @@ func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
 	}
 
 	// Read table name
-	tableName, err := buf.ReadString0At(int64(header.StringTableOffset + 8 + header.TableNameOffset))
+	tableName, err := buf.ReadString0At(int64(absStringOffset + header.TableNameOffset))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read table name: %w", err)
 	}
 	table.Name = tableName
 
-	// Read schema
-	if err := table.readSchema(buf); err != nil {
+	log.Printf("[DEBUG][UTF] table=%q, fields=%d, rows=%d, rowSize=%d, schemaSize=%d",
+		tableName, header.NumberOfFields, header.NumberOfRows, header.RowSize, schemaSize)
+
+	// Parse schema (once, cached in table.schema)
+	if err := table.parseSchema(buf); err != nil {
 		return nil, err
 	}
 
-	// Read rows
-	_, _ = buf.Seek(int64(header.RowOffset+8), io.SeekStart)
+	// Read rows using pre-parsed schema
 	if err := table.readRows(buf); err != nil {
 		return nil, err
 	}
@@ -106,60 +140,122 @@ func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
 	return table, nil
 }
 
-func (t *UTFTable) readSchema(buf *Reader) error {
+// columnValueSize returns how many bytes a column type needs for its value
+func columnValueSize(typ uint8) (uint32, error) {
+	switch typ {
+	case columnType1Byte, columnType1Byte2:
+		return 1, nil
+	case columnType2Byte, columnType2Byte2:
+		return 2, nil
+	case columnType4Byte, columnType4Byte2, columnTypeFloat, columnTypeString:
+		return 4, nil
+	case columnType8Byte, columnTypeData:
+		return 8, nil
+	default:
+		return 0, fmt.Errorf("unknown column type: 0x%02X", typ)
+	}
+}
+
+func (t *UTFTable) parseSchema(buf *Reader) error {
 	_, _ = buf.Seek(0x20, io.SeekStart)
+
+	absStringOffset := t.Header.StringTableOffset + 8
 
 	var dynamicKeys []string
 	constants := make(map[string]interface{})
+	schema := make([]columnSchema, t.Header.NumberOfFields)
+
+	var rowColumnOffset uint32 // running offset within a row
 
 	for i := 0; i < int(t.Header.NumberOfFields); i++ {
-		fieldType, err := buf.ReadUint8()
+		info, err := buf.ReadUint8()
 		if err != nil {
-			return fmt.Errorf("读取字段类型失败 [字段%d]: %w", i, err)
+			return fmt.Errorf("failed to read field info [field %d]: %w", i, err)
 		}
 
 		nameOffset, err := buf.ReadUint32()
 		if err != nil {
-			return fmt.Errorf("读取名称偏移失败 [字段%d]: %w", i, err)
+			return fmt.Errorf("failed to read name offset [field %d]: %w", i, err)
 		}
 
-		occurrence := fieldType & columnStorageMask
-		typeKey := fieldType & columnTypeMask
+		flag := info & columnFlagMask
+		typ := info & columnTypeMask
 
-		name, err := buf.ReadString0At(int64(t.Header.StringTableOffset + 8 + nameOffset))
+		// Validate flags (matching vgmstream)
+		if flag == 0 || (flag&columnFlagName) == 0 || (flag&columnFlagUndefined) != 0 {
+			return fmt.Errorf("unknown column flag combo 0x%02X for field %d", flag, i)
+		}
+
+		// Read column name
+		name, err := buf.ReadString0At(int64(absStringOffset + nameOffset))
 		if err != nil {
-			return fmt.Errorf("读取字段名称失败 [字段%d, 偏移%d]: %w", i, nameOffset, err)
+			return fmt.Errorf("failed to read field name [field %d, offset %d]: %w", i, nameOffset, err)
 		}
 
-		if occurrence == columnStorageConstant || occurrence == columnStorageConstant2 {
-			val, err := t.readColumnData(buf, typeKey, true)
+		col := columnSchema{
+			flag: flag,
+			typ:  typ,
+			name: name,
+		}
+
+		valSize, err := columnValueSize(typ)
+		if err != nil {
+			return fmt.Errorf("field %d (%s): %w", i, name, err)
+		}
+
+		// Handle DEFAULT: data is inline in schema area (constant value for all rows)
+		// If both DEFAULT and ROW are set, DEFAULT takes priority (per vgmstream)
+		if flag&columnFlagDefault != 0 {
+			// Read constant value from current position in schema
+			val, err := t.readColumnValue(buf, typ, true)
 			if err != nil {
-				return fmt.Errorf("读取常量数据失败 [字段%s]: %w", name, err)
+				return fmt.Errorf("failed to read constant data [field %s]: %w", name, err)
 			}
 			constants[name] = val
-		} else {
+			log.Printf("[DEBUG][UTF]   field[%d] %q: flag=0x%02X type=0x%02X DEFAULT (constant)", i, name, flag, typ)
+		} else if flag&columnFlagRow != 0 {
+			// ROW: data is in per-row area at this offset
+			col.offset = rowColumnOffset
+			rowColumnOffset += valSize
 			dynamicKeys = append(dynamicKeys, name)
+			log.Printf("[DEBUG][UTF]   field[%d] %q: flag=0x%02X type=0x%02X ROW offset=%d", i, name, flag, typ, col.offset)
+		} else {
+			// NAME-only (flag == 0x10): column exists but has no data
+			// Don't add to dynamicKeys, don't read any data
+			log.Printf("[DEBUG][UTF]   field[%d] %q: flag=0x%02X type=0x%02X NAME-ONLY (no data)", i, name, flag, typ)
 		}
+
+		schema[i] = col
 	}
 
+	t.schema = schema
 	t.DynamicKeys = dynamicKeys
 	t.Constants = constants
 
 	return nil
 }
 
-func (t *UTFTable) readColumnData(buf *Reader, typeKey uint8, isConstant bool) (interface{}, error) {
+func (t *UTFTable) readColumnValue(buf *Reader, typeKey uint8, isConstant bool) (interface{}, error) {
 	switch typeKey {
 	case columnTypeData:
-		offset, _ := buf.ReadUint32()
-		size, _ := buf.ReadUint32()
+		offset, err := buf.ReadUint32()
+		if err != nil {
+			return nil, err
+		}
+		size, err := buf.ReadUint32()
+		if err != nil {
+			return nil, err
+		}
 		if isConstant {
 			return &dataPromise{offset: offset, size: size}, nil
 		}
 		return buf.ReadBytesAt(int(size), int64(t.Header.DataOffset+8+offset))
 
 	case columnTypeString:
-		offset, _ := buf.ReadUint32()
+		offset, err := buf.ReadUint32()
+		if err != nil {
+			return nil, err
+		}
 		if isConstant {
 			return &stringPromise{offset: offset}, nil
 		}
@@ -190,7 +286,7 @@ func (t *UTFTable) readColumnData(buf *Reader, typeKey uint8, isConstant bool) (
 		return buf.ReadUint8()
 
 	default:
-		return nil, fmt.Errorf("unknown column type: %d", typeKey)
+		return nil, fmt.Errorf("unknown column type: 0x%02X", typeKey)
 	}
 }
 
@@ -208,73 +304,46 @@ func (t *UTFTable) resolvePromise(val interface{}) (interface{}, error) {
 func (t *UTFTable) readRows(buf *Reader) error {
 	rows := make([]map[string]interface{}, t.Header.NumberOfRows)
 
-	// Build a list of field types in order by re-reading schema
-	type fieldInfo struct {
-		name       string
-		typeKey    uint8
-		isConstant bool
-	}
+	absRowOffset := uint32(t.Header.RowOffset) + 8
 
-	var fields []fieldInfo
-
-	_, _ = buf.Seek(0x20, io.SeekStart)
-	for i := 0; i < int(t.Header.NumberOfFields); i++ {
-		fieldType, _ := buf.ReadUint8()
-		nameOffset, _ := buf.ReadUint32()
-
-		occurrence := fieldType & columnStorageMask
-		typeKey := fieldType & columnTypeMask
-
-		name, _ := buf.ReadString0At(int64(t.Header.StringTableOffset + 8 + nameOffset))
-
-		isConstant := occurrence == columnStorageConstant || occurrence == columnStorageConstant2
-
-		if isConstant {
-			// Skip reading the constant value - we already have it in t.Constants
-			t.skipColumnData(buf, typeKey)
-		}
-
-		fields = append(fields, fieldInfo{
-			name:       name,
-			typeKey:    typeKey,
-			isConstant: isConstant,
-		})
-	}
-
-	// Now read each row
 	for rowIdx := 0; rowIdx < int(t.Header.NumberOfRows); rowIdx++ {
 		row := make(map[string]interface{})
 
-		// Copy constants first
+		// Copy resolved constants into every row
 		for k, v := range t.Constants {
 			resolved, err := t.resolvePromise(v)
 			if err != nil {
-				return fmt.Errorf("解析常量失败 [行%d, 字段%s]: %w", rowIdx, k, err)
+				return fmt.Errorf("failed to resolve constant [row %d, field %s]: %w", rowIdx, k, err)
 			}
 			row[k] = resolved
 		}
 
-		// Seek to row data
-		rowStart := int64(uint32(t.Header.RowOffset) + 8 + uint32(rowIdx)*uint32(t.Header.RowSize))
-		_, _ = buf.Seek(rowStart, io.SeekStart)
-
-		// Read dynamic fields in order
-		for _, field := range fields {
-			if field.isConstant {
+		// Read per-row dynamic fields using pre-parsed schema
+		for _, col := range t.schema {
+			// Skip columns that are not ROW columns
+			if col.flag&columnFlagRow == 0 || col.flag&columnFlagDefault != 0 {
 				continue
 			}
 
-			val, err := t.readColumnData(buf, field.typeKey, false)
+			// Seek to exact position: row start + column offset within row
+			rowStart := int64(absRowOffset + uint32(rowIdx)*uint32(t.Header.RowSize))
+			fieldPos := rowStart + int64(col.offset)
+			_, err := buf.Seek(fieldPos, io.SeekStart)
 			if err != nil {
-				return fmt.Errorf("读取字段数据失败 [行%d, 字段%s]: %w", rowIdx, field.name, err)
+				return fmt.Errorf("failed to seek to field [row %d, field %s]: %w", rowIdx, col.name, err)
+			}
+
+			val, err := t.readColumnValue(buf, col.typ, false)
+			if err != nil {
+				return fmt.Errorf("failed to read field data [row %d, field %s]: %w", rowIdx, col.name, err)
 			}
 
 			resolved, err := t.resolvePromise(val)
 			if err != nil {
-				return fmt.Errorf("解析字段数据失败 [行%d, 字段%s]: %w", rowIdx, field.name, err)
+				return fmt.Errorf("failed to resolve field data [row %d, field %s]: %w", rowIdx, col.name, err)
 			}
 
-			row[field.name] = resolved
+			row[col.name] = resolved
 		}
 
 		rows[rowIdx] = row
@@ -282,49 +351,4 @@ func (t *UTFTable) readRows(buf *Reader) error {
 
 	t.Rows = rows
 	return nil
-}
-
-func (t *UTFTable) getTypeForKey(key string) uint8 {
-	// Reparse schema to find type for key
-	_, _ = t.reader.Seek(0x20, io.SeekStart)
-
-	for i := 0; i < int(t.Header.NumberOfFields); i++ {
-		fieldType, _ := t.reader.ReadUint8()
-		nameOffset, _ := t.reader.ReadUint32()
-
-		name, _ := t.reader.ReadString0At(int64(t.Header.StringTableOffset + 8 + nameOffset))
-
-		occurrence := fieldType & columnStorageMask
-		typeKey := fieldType & columnTypeMask
-
-		if name == key && (occurrence != columnStorageConstant && occurrence != columnStorageConstant2) {
-			return typeKey
-		}
-
-		if occurrence == columnStorageConstant || occurrence == columnStorageConstant2 {
-			t.skipColumnData(t.reader, typeKey)
-		}
-	}
-
-	return 0
-}
-
-func (t *UTFTable) skipColumnData(buf *Reader, typeKey uint8) {
-	switch typeKey {
-	case columnTypeData:
-		_, _ = buf.ReadUint32()
-		_, _ = buf.ReadUint32()
-	case columnTypeString:
-		_, _ = buf.ReadUint32()
-	case columnTypeFloat:
-		_, _ = buf.ReadFloat32()
-	case columnType8Byte:
-		_, _ = buf.ReadUint64()
-	case columnType4Byte2, columnType4Byte:
-		_, _ = buf.ReadUint32()
-	case columnType2Byte2, columnType2Byte:
-		_, _ = buf.ReadUint16()
-	case columnType1Byte2, columnType1Byte:
-		_, _ = buf.ReadUint8()
-	}
 }

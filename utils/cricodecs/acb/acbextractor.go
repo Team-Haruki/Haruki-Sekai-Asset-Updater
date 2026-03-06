@@ -144,6 +144,15 @@ func getTrackData(track Track, embeddedAwb *AFSArchive, externalAwbs []*AFSArchi
 
 // ExtractACBFromFile is a convenience function to extract from a file path
 func ExtractACBFromFile(acbPath, targetDir string) ([]string, error) {
+	info, err := os.Stat(acbPath)
+	if err != nil {
+		return nil, err
+	}
+	// A valid ACB file must have at least @UTF magic (4 bytes) + header (28 bytes) = 32 bytes
+	if info.Size() < 32 {
+		return nil, nil
+	}
+
 	file, err := os.Open(acbPath)
 	if err != nil {
 		return nil, err
@@ -151,5 +160,23 @@ func ExtractACBFromFile(acbPath, targetDir string) ([]string, error) {
 	defer func(file *os.File) {
 		_ = file.Close()
 	}(file)
+
+	// Read and validate the first 4 bytes before passing to ExtractACB
+	header := make([]byte, 4)
+	_, err = io.ReadFull(file, header)
+	if err != nil {
+		return nil, nil // skip gracefully
+	}
+
+	// Check for @UTF magic (0x40 0x55 0x54 0x46)
+	if header[0] != 0x40 || header[1] != 0x55 || header[2] != 0x54 || header[3] != 0x46 {
+		return nil, nil // skip gracefully — not a valid ACB file
+	}
+
+	// Seek back to start so ExtractACB can read from the beginning
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+
 	return ExtractACB(file, targetDir, acbPath)
 }

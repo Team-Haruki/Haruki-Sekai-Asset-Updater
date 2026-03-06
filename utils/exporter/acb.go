@@ -54,6 +54,9 @@ func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalW
 		semaphore := make(chan struct{}, maxWorkers)
 		errChan := make(chan error, len(hcaFiles))
 
+		// Write all HCA output (WAV/MP3/FLAC) to the unique extractDir first,
+		// then move to outputDir after all goroutines complete.
+		// This avoids race conditions when multiple ACBs share the same track names.
 		for _, hcaFile := range hcaFiles {
 			wg.Add(1)
 			go func(hcaPath string) {
@@ -65,7 +68,7 @@ func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalW
 				}()
 				semaphore <- struct{}{}
 				defer func() { <-semaphore }()
-				err := ExportHCA(hcaPath, outputDir, convertToMP3, convertToFLAC, deleteOriginalWav, ffmpegPath)
+				err := ExportHCA(hcaPath, extractDir, convertToMP3, convertToFLAC, deleteOriginalWav, ffmpegPath)
 				if err != nil {
 					errChan <- fmt.Errorf("failed to export HCA %s: %w", hcaPath, err)
 				}
@@ -88,9 +91,40 @@ func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalW
 			fmt.Fprintf(os.Stderr, "Error: %d HCA files failed to export\n", errorCount)
 			return fmt.Errorf("failed to export %d HCA files: %w", errorCount, firstError)
 		}
+
+		// Move result files from extractDir to outputDir
+		if err := moveResultFiles(extractDir, outputDir); err != nil {
+			return fmt.Errorf("failed to move results to output dir: %w", err)
+		}
 	}
 	if err := os.Remove(acbFile); err != nil {
 		return fmt.Errorf("failed to delete original ACB file: %w", err)
+	}
+	return nil
+}
+
+// moveResultFiles moves final audio output files from srcDir to dstDir.
+// This is used to move MP3/FLAC/WAV results out of the per-ACB temp directory
+// into the shared output directory after all concurrent goroutines have finished.
+func moveResultFiles(srcDir, dstDir string) error {
+	resultExts := map[string]bool{".mp3": true, ".flac": true, ".wav": true}
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if !resultExts[ext] {
+			continue
+		}
+		src := filepath.Join(srcDir, entry.Name())
+		dst := filepath.Join(dstDir, entry.Name())
+		if err := os.Rename(src, dst); err != nil {
+			return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+		}
 	}
 	return nil
 }

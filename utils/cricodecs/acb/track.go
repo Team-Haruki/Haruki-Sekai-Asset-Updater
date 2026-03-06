@@ -70,13 +70,21 @@ func parseACBTables(row map[string]interface{}) (*acbTables, error) {
 func extractTableBytes(row map[string]interface{}) (map[string][]byte, error) {
 	tables := make(map[string][]byte)
 
-	requiredTables := []string{"CueTable", "CueNameTable", "WaveformTable", "SynthTable", "TrackTable"}
+	requiredTables := []string{"CueTable", "CueNameTable", "TrackTable"}
 	for _, name := range requiredTables {
 		data, err := getBytesField(row, name)
 		if err != nil {
 			return nil, err
 		}
 		tables[name] = data
+	}
+
+	// WaveformTable and SynthTable can be empty in stub/placeholder ACBs
+	optionalTables := []string{"WaveformTable", "SynthTable"}
+	for _, name := range optionalTables {
+		if data, _ := getBytesField(row, name); len(data) > 0 {
+			tables[name] = data
+		}
 	}
 
 	// TrackEventTable or CommandTable
@@ -108,14 +116,21 @@ func parseUTFTables(tableBytes map[string][]byte) (*acbTables, error) {
 		return nil, err
 	}
 
-	wavs, err := NewUTFTable(bytes.NewReader(tableBytes["WaveformTable"]))
-	if err != nil {
-		return nil, err
+	// WaveformTable and SynthTable may be absent in stub/placeholder ACBs
+	var wavs *UTFTable
+	if wavData, ok := tableBytes["WaveformTable"]; ok && len(wavData) > 0 {
+		wavs, err = NewUTFTable(bytes.NewReader(wavData))
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	syns, err := NewUTFTable(bytes.NewReader(tableBytes["SynthTable"]))
-	if err != nil {
-		return nil, err
+	var syns *UTFTable
+	if synData, ok := tableBytes["SynthTable"]; ok && len(synData) > 0 {
+		syns, err = NewUTFTable(bytes.NewReader(synData))
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	tras, err := NewUTFTable(bytes.NewReader(tableBytes["TrackTable"]))
@@ -275,7 +290,7 @@ func extractTrackFromCommand(paramBytes []byte, syns, wavs *UTFTable, nameMap ma
 	}
 
 	synIdx := binary.BigEndian.Uint16(paramBytes[2:])
-	if int(synIdx) >= len(syns.Rows) {
+	if syns == nil || int(synIdx) >= len(syns.Rows) {
 		return nil
 	}
 
@@ -287,7 +302,7 @@ func extractTrackFromCommand(paramBytes []byte, syns, wavs *UTFTable, nameMap ma
 	a := binary.BigEndian.Uint16(rData[0:])
 	wavIdx := binary.BigEndian.Uint16(rData[2:])
 
-	if a != 1 || int(wavIdx) >= len(wavs.Rows) {
+	if a != 1 || wavs == nil || int(wavIdx) >= len(wavs.Rows) {
 		return nil
 	}
 
