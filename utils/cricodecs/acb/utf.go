@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 )
 
 // UTFHeader represents the UTF table header
@@ -124,9 +123,6 @@ func NewUTFTable(r io.ReadSeeker) (*UTFTable, error) {
 	}
 	table.Name = tableName
 
-	log.Printf("[DEBUG][UTF] table=%q, fields=%d, rows=%d, rowSize=%d, schemaSize=%d",
-		tableName, header.NumberOfFields, header.NumberOfRows, header.RowSize, schemaSize)
-
 	// Parse schema (once, cached in table.schema)
 	if err := table.parseSchema(buf); err != nil {
 		return nil, err
@@ -212,17 +208,14 @@ func (t *UTFTable) parseSchema(buf *Reader) error {
 				return fmt.Errorf("failed to read constant data [field %s]: %w", name, err)
 			}
 			constants[name] = val
-			log.Printf("[DEBUG][UTF]   field[%d] %q: flag=0x%02X type=0x%02X DEFAULT (constant)", i, name, flag, typ)
 		} else if flag&columnFlagRow != 0 {
 			// ROW: data is in per-row area at this offset
 			col.offset = rowColumnOffset
 			rowColumnOffset += valSize
 			dynamicKeys = append(dynamicKeys, name)
-			log.Printf("[DEBUG][UTF]   field[%d] %q: flag=0x%02X type=0x%02X ROW offset=%d", i, name, flag, typ, col.offset)
 		} else {
 			// NAME-only (flag == 0x10): column exists but has no data
 			// Don't add to dynamicKeys, don't read any data
-			log.Printf("[DEBUG][UTF]   field[%d] %q: flag=0x%02X type=0x%02X NAME-ONLY (no data)", i, name, flag, typ)
 		}
 
 		schema[i] = col

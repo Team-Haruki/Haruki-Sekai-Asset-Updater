@@ -4,6 +4,7 @@ import (
 	"haruki-sekai-asset/utils"
 	harukiLogger "haruki-sekai-asset/utils/logger"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -62,9 +63,24 @@ type Config struct {
 var Version = "v4.0.1-dev"
 var Cfg Config
 
+func openConfigFile() (*os.File, error) {
+	candidates := []string{
+		"haruki-asset-configs.yaml",
+		filepath.Join("..", "haruki-asset-configs.yaml"),
+		filepath.Join("..", "..", "haruki-asset-configs.yaml"),
+	}
+	for _, p := range candidates {
+		f, err := os.Open(p)
+		if err == nil {
+			return f, nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
 func init() {
 	logger := harukiLogger.NewLogger("ConfigLoader", "DEBUG", nil)
-	f, err := os.Open("haruki-asset-configs.yaml")
+	f, err := openConfigFile()
 	if err != nil {
 		logger.Errorf("Failed to open config file: %v", err)
 		os.Exit(1)
