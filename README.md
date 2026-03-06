@@ -3,7 +3,7 @@
 **Haruki Sekai Asset Updater** is a companion project for [HarukiBot](https://github.com/Team-Haruki), designed to export game assets and provide a HTTP API.
 
 ## Requirements
-+ `AssetStudioModCLI` modified version ( click [here]("https://github.com/Team-Haruki/AssetStudio") )  
++ `AssetStudioModCLI` modified version ( click [here](https://github.com/Team-Haruki/AssetStudio) )  
 + `ffmpeg` (For converting audio files and video files)
 
 ## How to Use
