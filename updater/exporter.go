@@ -42,7 +42,7 @@ func getExportGroup(exportPath string) string {
 	return "container"
 }
 
-func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportPath string, outputDir string, category HarukiSekaiAssetCategory, server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
+func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportPath string, outputDir string, category HarukiSekaiAssetCategory, server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string) error {
 	if assetStudioCLIPath == "" {
 		logger.Warnf("AssetStudioCLIPath is not configured, skipping exporting of %s", filePath)
 		return nil
@@ -75,6 +75,7 @@ func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportP
 		"-r",
 		"--filter-exclude-mode",
 		"--filter-with-regex",
+		"--sekai-keep-single-container-filename",
 	}
 	if serverConfig.UnityVersion != "" {
 		args = append(args, "--unity-version", serverConfig.UnityVersion)
@@ -101,14 +102,14 @@ func ExtractUnityAssetBundle(assetStudioCLIPath string, filePath string, exportP
 	}
 	logger.Infof("Successfully exported asset bundle: %s", filePath)
 
-	if err := postProcessExportedFiles(actualExportPath, server, serverConfig, ffmpegPath, cwebpPath); err != nil {
+	if err := postProcessExportedFiles(actualExportPath, server, serverConfig, ffmpegPath); err != nil {
 		return fmt.Errorf("post-processing failed for %s: %w", actualExportPath, err)
 	}
 
 	return nil
 }
 
-func postProcessExportedFiles(exportPath string, server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string, cwebpPath string) error {
+func postProcessExportedFiles(exportPath string, server utils.HarukiSekaiServerRegion, serverConfig utils.HarukiSekaiAssetUpdaterConfig, ffmpegPath string) error {
 	if _, err := os.Stat(exportPath); os.IsNotExist(err) {
 		return nil
 	}
@@ -118,7 +119,7 @@ func postProcessExportedFiles(exportPath string, server utils.HarukiSekaiServerR
 	if err := handleACBFiles(exportPath, serverConfig, ffmpegPath); err != nil {
 		return fmt.Errorf("failed to handle ACB files in %s: %w", exportPath, err)
 	}
-	if err := handlePNGConversion(exportPath, serverConfig, cwebpPath); err != nil {
+	if err := handlePNGConversion(exportPath, serverConfig); err != nil {
 		return fmt.Errorf("failed to handle PNG conversion in %s: %w", exportPath, err)
 	}
 	if serverConfig.UploadToCloud {
@@ -217,7 +218,7 @@ func handleACBFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 	return nil
 }
 
-func handlePNGConversion(exportPath string, serverConfig utils.HarukiSekaiAssetUpdaterConfig, cwebpPath string) error {
+func handlePNGConversion(exportPath string, serverConfig utils.HarukiSekaiAssetUpdaterConfig) error {
 	if !serverConfig.ConvertPhotoToWebp {
 		return nil
 	}
@@ -230,7 +231,7 @@ func handlePNGConversion(exportPath string, serverConfig utils.HarukiSekaiAssetU
 	for _, pngFile := range pngFiles {
 		webpFile := strings.TrimSuffix(pngFile, ".png") + ".webp"
 		logger.Infof("Converting PNG to WebP: %s -> %s", pngFile, webpFile)
-		if err := exporter.ConvertPNGToWebP(pngFile, webpFile, cwebpPath); err != nil {
+		if err := exporter.ConvertPNGToWebP(pngFile, webpFile); err != nil {
 			return fmt.Errorf("failed to convert %s to WebP: %w", pngFile, err)
 		}
 

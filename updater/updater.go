@@ -253,7 +253,7 @@ func (u *HarukiSekaiAssetUpdater) downloadAndExportAsset(downloadPath string, bu
 		}()
 
 		if err = ExtractUnityAssetBundle(config.Cfg.Tools.AssetStudioCLIPath, tempFilePath, bundleName, u.assetSaveDir,
-			category, u.server, u.serverConfig, config.Cfg.Tools.FFMPEGPath, config.Cfg.Tools.CwebpPath); err != nil {
+			category, u.server, u.serverConfig, config.Cfg.Tools.FFMPEGPath); err != nil {
 			return nil, nil, err
 		}
 		return &bundleName, &bundleHash, nil
