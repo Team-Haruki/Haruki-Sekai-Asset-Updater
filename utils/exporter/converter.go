@@ -1,18 +1,39 @@
 package exporter
 
 import (
+	"bytes"
 	"fmt"
+	"image/png"
 	"os"
 	"os/exec"
+
+	"github.com/HugoSmits86/nativewebp"
 )
 
-func ConvertPNGToWebP(pngFile string, webpFile string, cwebpPath string) error {
-	cmd := exec.Command(cwebpPath, "-q", "80", pngFile, "-o", webpFile)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to convert PNG to WebP: %w", err)
+func ConvertPNGToWebP(pngFile string, webpFile string) error {
+	// Read and decode PNG
+	pngData, err := os.ReadFile(pngFile)
+	if err != nil {
+		return fmt.Errorf("failed to read PNG file: %w", err)
 	}
+
+	img, err := png.Decode(bytes.NewReader(pngData))
+	if err != nil {
+		return fmt.Errorf("failed to decode PNG: %w", err)
+	}
+
+	// Encode to WebP (VP8L lossless)
+	outFile, err := os.Create(webpFile)
+	if err != nil {
+		return fmt.Errorf("failed to create WebP file: %w", err)
+	}
+	defer func() { _ = outFile.Close() }()
+
+	if err := nativewebp.Encode(outFile, img, nil); err != nil {
+		_ = os.Remove(webpFile) // clean up partial file
+		return fmt.Errorf("failed to encode WebP: %w", err)
+	}
+
 	return nil
 }
 
@@ -50,11 +71,12 @@ func ConvertWavToFLAC(wavFile string, flacFile string, deleteOriginal bool, ffmp
 }
 
 func ConvertWavToMP3(wavFile string, mp3File string, deleteOriginal bool, ffmpegPath string) error {
+	var stderr bytes.Buffer
 	cmd := exec.Command(ffmpegPath, "-i", wavFile, "-b:a", "320k", "-y", mp3File)
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to convert WAV to MP3: %w", err)
+		return fmt.Errorf("failed to convert WAV to MP3: %w\nffmpeg stderr: %s", err, stderr.String())
 	}
 	if deleteOriginal {
 		if _, err := os.Stat(wavFile); err == nil {

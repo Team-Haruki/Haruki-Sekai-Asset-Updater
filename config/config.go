@@ -34,7 +34,6 @@ type BackendConfig struct {
 type ToolConfig struct {
 	FFMPEGPath         string `yaml:"ffmpeg_path,omitempty"`
 	AssetStudioCLIPath string `yaml:"asset_studio_cli_path,omitempty"`
-	CwebpPath          string `yaml:"cwebp_path,omitempty"`
 }
 
 type S3RemoteStorageConfig struct {
@@ -57,7 +56,7 @@ type Config struct {
 	Tools                         ToolConfig                                                            `yaml:"tool,omitempty"`
 	Profiles                      map[utils.HarukiSekaiServerRegion]map[string]string                   `yaml:"profiles,omitempty"`
 	Servers                       map[utils.HarukiSekaiServerRegion]utils.HarukiSekaiAssetUpdaterConfig `yaml:"servers"`
-	RemoteStorages                []S3RemoteStorageConfig                                                 `yaml:"remote_storages,omitempty"`
+	RemoteStorages                []S3RemoteStorageConfig                                               `yaml:"remote_storages,omitempty"`
 }
 
 var Version = "v4.0.1-dev"
