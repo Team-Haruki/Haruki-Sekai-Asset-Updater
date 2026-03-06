@@ -338,10 +338,11 @@ servers:
 # Remote storage configurations (optional)
 # remote_storages:
 #   - type: "s3"
-#     base: "s3://your-bucket-name/sekai-assets"
-#     program: "s3cmd"
-#     args:
-#       - "sync"
-#       - "--delete-removed"
-#       - "--acl-public"
-
+#     endpoint: your-s3-server
+#     path_style: true
+#     region: us-east-1
+#     ssl: true
+#     access_key: s3-key
+#     secret_key: s3-token
+#     bucket: sekai-{server}-assets
+#     acl_public: false
