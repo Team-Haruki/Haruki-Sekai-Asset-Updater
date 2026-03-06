@@ -40,7 +40,6 @@ backend:
 tool:
   ffmpeg_path: "ffmpeg"
   asset_studio_cli_path: ""
-  cwebp_path: "cwebp"
 
 # CP Asset profiles (optional)
 # profiles:

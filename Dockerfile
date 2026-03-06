@@ -12,27 +12,33 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -tags netgo \
     .
 
-FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine AS assetstudio-builder
+FROM mcr.microsoft.com/dotnet/sdk:9.0-bookworm-slim AS assetstudio-builder
 WORKDIR /src
-RUN apk add --no-cache git && \
-    git clone --depth 1 https://github.com/Team-Haruki/AssetStudio.git && \
-    cd AssetStudio/AssetStudioCLI && \
-    dotnet publish -c Release -r linux-musl-x64 -f net9.0 --self-contained false -o /app/assetstudio \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --single-branch --branch sekai-modify https://github.com/Team-Haruki/AssetStudio.git
+RUN cd AssetStudio/AssetStudioCLI && \
+    dotnet publish -c Release -r linux-x64 -f net9.0 --self-contained true -o /app/assetstudio \
     -p:PublishTrimmed=false \
-    -p:PublishSingleFile=false
+    -p:PublishSingleFile=true \
+    -p:IncludeNativeLibrariesForSelfExtract=true
 
-FROM mcr.microsoft.com/dotnet/runtime:9.0-alpine
+FROM mwader/static-ffmpeg:7.1.1 AS ffmpeg-builder
 
-RUN apk --no-cache add \
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
-    ffmpeg \
-    libgdiplus \
-    icu-libs
+    libicu76 \
+    libxml2 && \
+    rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=builder /app/haruki-sekai-asset-updater .
 COPY --from=assetstudio-builder /app/assetstudio /app/assetstudio
-RUN mkdir -p logs
+COPY --from=ffmpeg-builder /ffmpeg /usr/local/bin/ffmpeg
+RUN ln -sf /app/assetstudio/AssetStudioModCLI /app/assetstudio/AssetStudioCLI && \
+    mkdir -p logs
 ENV TZ=Asia/Shanghai \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
     ASSET_STUDIO_CLI_PATH=/app/assetstudio/AssetStudioCLI
