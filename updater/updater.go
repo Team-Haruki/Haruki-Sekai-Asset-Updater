@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"haruki-sekai-asset/utils/git"
-	"sort"
 
 	"github.com/bytedance/sonic"
 	"github.com/dlclark/regexp2"
@@ -308,13 +307,17 @@ func (u *HarukiSekaiAssetUpdater) buildDownloadList(
 		if !u.shouldDownloadBundle(bundleName, bundleInfo.Category) {
 			continue
 		}
-		if existingHash, exists := downloadedAssets[bundleName]; exists && existingHash == bundleInfo.Hash {
+		bundleHash := bundleInfo.Hash
+		if u.server == utils.HarukiSekaiServerRegionTW || u.server == utils.HarukiSekaiServerRegionKR || u.server == utils.HarukiSekaiServerRegionCN {
+			bundleHash = fmt.Sprintf("%d", bundleInfo.Crc)
+		}
+		if existingHash, exists := downloadedAssets[bundleName]; exists && existingHash == bundleHash {
 			continue
 		}
 		downloadPath := u.getDownloadPath(bundleName, bundleInfo)
 		toDownloadList[downloadPath] = downloadTask{
 			bundlePath: bundleName,
-			bundleHash: bundleInfo.Hash,
+			bundleHash: bundleHash,
 			category:   bundleInfo.Category,
 		}
 	}
@@ -578,16 +581,7 @@ func (u *HarukiSekaiAssetUpdater) collectAndPushMusicChartHashes() {
 		u.logger.Infof("No music charts found, skipping hash collection.")
 		return
 	}
-	keys := make([]string, 0, len(charts))
-	for k := range charts {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	orderedCharts := make(map[string]string)
-	for _, k := range keys {
-		orderedCharts[k] = charts[k]
-	}
-	jsonData, err := sonic.ConfigDefault.MarshalIndent(orderedCharts, "", "  ")
+	jsonData, err := sonic.ConfigStd.MarshalIndent(charts, "", "  ")
 	if err != nil {
 		u.logger.Errorf("Failed to marshal chart hashes: %v", err)
 		return
