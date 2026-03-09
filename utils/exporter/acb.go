@@ -11,7 +11,7 @@ import (
 	"haruki-sekai-asset/utils/cricodecs/acb"
 )
 
-func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalWav bool, convertToMP3 bool, convertToFLAC bool, ffmpegPath string) error {
+func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalWav bool, convertToMP3 bool, convertToFLAC bool, ffmpegPath string, concurrentHCA int) error {
 	parentDir := filepath.Dir(acbFile)
 	extractDir, err := os.MkdirTemp(parentDir, "acb-extract-*")
 	if err != nil {
@@ -49,7 +49,10 @@ func ExportACB(acbFile string, outputDir string, decodeHCA bool, deleteOriginalW
 	}
 
 	if decodeHCA && len(hcaFiles) > 0 {
-		const maxWorkers = 16
+		maxWorkers := concurrentHCA
+		if maxWorkers <= 0 {
+			maxWorkers = 16
+		}
 		var wg sync.WaitGroup
 		semaphore := make(chan struct{}, maxWorkers)
 		errChan := make(chan error, len(hcaFiles))

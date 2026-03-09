@@ -191,7 +191,7 @@ func handleACBFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 
 				logger.Infof("Exporting ACB file: %s", a)
 				acbOutputDir := filepath.Dir(a)
-				if err := exporter.ExportACB(a, acbOutputDir, serverConfig.DecodeHCAFiles, serverConfig.RemoveWav, serverConfig.ConvertWavToMP3, serverConfig.ConvertWavToFLAC, ffmpegPath); err != nil {
+				if err := exporter.ExportACB(a, acbOutputDir, serverConfig.DecodeHCAFiles, serverConfig.RemoveWav, serverConfig.ConvertWavToMP3, serverConfig.ConvertWavToFLAC, ffmpegPath, config.Cfg.Concurrents.ConcurrentHCA); err != nil {
 					errChan <- fmt.Errorf("failed to export ACB %s: %w", a, err)
 				}
 			}(acbFile)

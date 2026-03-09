@@ -41,6 +41,7 @@ type ConcurrentConfig struct {
 	ConcurrentUpload   int `yaml:"concurrent_upload"`
 	ConcurrentACB      int `yaml:"concurrent_acb"`
 	ConcurrentUSM      int `yaml:"concurrent_usm"`
+	ConcurrentHCA      int `yaml:"concurrent_hca"`
 }
 
 type HarukiSekaiServerRegion string
