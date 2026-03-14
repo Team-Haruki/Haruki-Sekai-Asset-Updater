@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"haruki-sekai-asset/utils"
@@ -97,5 +98,53 @@ func TestCreateOutputFiles(t *testing.T) {
 	}
 	if len(files2) != 1 || filepath.Ext(files2[0]) != ".m2v" {
 		t.Fatalf("unexpected output files: %v", files2)
+	}
+}
+
+func TestNormalizeMetadataValue(t *testing.T) {
+	if got := normalizeMetadataValue([]byte("movie.usm")); got != "movie.usm" {
+		t.Fatalf("expected text bytes to normalize to string, got %#v", got)
+	}
+
+	got := normalizeMetadataValue([]byte{0x00, 0xff, 0x10})
+	want := map[string]interface{}{
+		"preview_hex": "00ff10",
+		"size":        3,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected binary normalization: got %#v want %#v", got, want)
+	}
+}
+
+func TestReadMetadataRejectsInvalidSignature(t *testing.T) {
+	_, err := ReadMetadata(bytes.NewReader([]byte("NOTU")), []byte("fallback.usm"))
+	if err == nil {
+		t.Fatalf("expected invalid signature error")
+	}
+}
+
+func TestMetadataVideoFrameRate(t *testing.T) {
+	metadata := &Metadata{
+		Sections: []MetadataSection{
+			{
+				Kind: "video_header",
+				Data: map[string]interface{}{
+					"rows": []map[string]interface{}{
+						{
+							"framerate_n": uint32(15),
+							"framerate_d": uint32(1),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	numerator, denominator, ok := metadata.VideoFrameRate()
+	if !ok {
+		t.Fatalf("expected frame rate to be found")
+	}
+	if numerator != 15 || denominator != 1 {
+		t.Fatalf("unexpected frame rate: %d/%d", numerator, denominator)
 	}
 }

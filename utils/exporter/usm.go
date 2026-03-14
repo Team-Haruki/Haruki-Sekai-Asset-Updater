@@ -10,6 +10,14 @@ import (
 )
 
 func ExportUSM(usmFile string, outputDir string, convertToMP4 bool, deleteOriginalM2V bool, ffmpegPath string) error {
+	var frameRate *FrameRate
+	if numerator, denominator, err := usm.ReadVideoFrameRateFile(usmFile); err == nil && numerator > 0 && denominator > 0 {
+		frameRate = &FrameRate{
+			Numerator:   numerator,
+			Denominator: denominator,
+		}
+	}
+
 	extractedFiles, err := usm.ExtractUSMFile(usmFile, outputDir, nil, false)
 	if err != nil {
 		return fmt.Errorf("failed to extract USM file: %w", err)
@@ -18,7 +26,7 @@ func ExportUSM(usmFile string, outputDir string, convertToMP4 bool, deleteOrigin
 		for _, extractedFile := range extractedFiles {
 			if strings.ToLower(filepath.Ext(extractedFile)) == ".m2v" {
 				mp4File := strings.TrimSuffix(extractedFile, filepath.Ext(extractedFile)) + ".mp4"
-				if err := ConvertM2VToMP4(extractedFile, mp4File, deleteOriginalM2V, ffmpegPath); err != nil {
+				if err := ConvertM2VToMP4(extractedFile, mp4File, deleteOriginalM2V, ffmpegPath, frameRate); err != nil {
 					return fmt.Errorf("failed to convert M2V to MP4: %w", err)
 				}
 			}
