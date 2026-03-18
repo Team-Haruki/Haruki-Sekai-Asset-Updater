@@ -28,6 +28,7 @@ type HarukiSekaiAssetUpdaterConfig struct {
 	ConvertPhotoToWebp        bool      `yaml:"convert_photo_to_webp,omitempty"`
 	RemovePNG                 bool      `yaml:"remove_png,omitempty"`
 	ConvertM2VToMP4           bool      `yaml:"convert_video_to_mp4,omitempty"`
+	DirectUSMToMP4WithFFmpeg  bool      `yaml:"direct_usm_to_mp4_with_ffmpeg,omitempty"`
 	RemoveM2V                 bool      `yaml:"remove_m2v,omitempty"`
 	ConvertWavToMP3           bool      `yaml:"convert_audio_to_mp3,omitempty"`
 	ConvertWavToFLAC          bool      `yaml:"convert_wav_to_flac,omitempty"`

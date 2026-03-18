@@ -79,6 +79,27 @@ func ConvertM2VToMP4(m2vFile string, mp4File string, deleteOriginal bool, ffmpeg
 	return nil
 }
 
+func ConvertUSMToMP4(usmFile string, mp4File string, ffmpegPath string) error {
+	args := []string{
+		"-i", usmFile,
+		"-c:v", "libx264",
+		"-c:a", "aac",
+		"-b:a", "192k",
+		"-movflags", "+faststart",
+		"-y", mp4File,
+	}
+
+	var stderr bytes.Buffer
+	cmd := exec.Command(ffmpegPath, args...)
+	cmd.Stdout = nil
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to convert USM to MP4: %w\nffmpeg stderr: %s", err, stderr.String())
+	}
+
+	return nil
+}
+
 func ConvertWavToFLAC(wavFile string, flacFile string, deleteOriginal bool, ffmpegPath string) error {
 	cmd := exec.Command(ffmpegPath, "-i", wavFile, "-compression_level", "12", "-y", flacFile)
 	cmd.Stdout = nil

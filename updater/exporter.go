@@ -155,14 +155,28 @@ func handleUSMFiles(exportPath string, serverConfig utils.HarukiSekaiAssetUpdate
 		defer func() { <-usmSemaphore }()
 		if len(usmFiles) == 1 {
 			logger.Infof("Exporting single USM file: %s", usmFiles[0])
-			return exporter.ExportUSM(usmFiles[0], exportPath, serverConfig.ConvertM2VToMP4, serverConfig.RemoveM2V, ffmpegPath)
+			return exporter.ExportUSM(
+				usmFiles[0],
+				exportPath,
+				serverConfig.ConvertM2VToMP4,
+				serverConfig.DirectUSMToMP4WithFFmpeg,
+				serverConfig.RemoveM2V,
+				ffmpegPath,
+			)
 		} else {
 			logger.Infof("Found %d USM files in %s, merging before export", len(usmFiles), exportPath)
 			mergedFile, err := mergeUSMFiles(exportPath, usmFiles)
 			if err != nil {
 				return fmt.Errorf("failed to merge USM files: %w", err)
 			}
-			return exporter.ExportUSM(mergedFile, exportPath, serverConfig.ConvertM2VToMP4, serverConfig.RemoveM2V, ffmpegPath)
+			return exporter.ExportUSM(
+				mergedFile,
+				exportPath,
+				serverConfig.ConvertM2VToMP4,
+				serverConfig.DirectUSMToMP4WithFFmpeg,
+				serverConfig.RemoveM2V,
+				ffmpegPath,
+			)
 		}
 	}
 

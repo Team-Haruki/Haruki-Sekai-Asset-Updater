@@ -103,6 +103,7 @@ servers:
     convert_photo_to_webp: false
     remove_png: false
     convert_video_to_mp4: true
+    direct_usm_to_mp4_with_ffmpeg: false
     remove_m2v: true
     convert_audio_to_mp3: true
     convert_wav_to_flac: false
@@ -156,6 +157,7 @@ servers:
     convert_photo_to_webp: false
     remove_png: false
     convert_video_to_mp4: true
+    direct_usm_to_mp4_with_ffmpeg: false
     remove_m2v: true
     convert_audio_to_mp3: true
     convert_wav_to_flac: false
@@ -213,6 +215,7 @@ servers:
     convert_photo_to_webp: false
     remove_png: false
     convert_video_to_mp4: true
+    direct_usm_to_mp4_with_ffmpeg: false
     remove_m2v: true
     convert_audio_to_mp3: true
     convert_wav_to_flac: false
@@ -268,6 +271,7 @@ servers:
     convert_photo_to_webp: false
     remove_png: false
     convert_video_to_mp4: true
+    direct_usm_to_mp4_with_ffmpeg: false
     remove_m2v: true
     convert_audio_to_mp3: true
     convert_wav_to_flac: false
@@ -327,6 +331,7 @@ servers:
     convert_photo_to_webp: false
     remove_png: false
     convert_video_to_mp4: true
+    direct_usm_to_mp4_with_ffmpeg: false
     remove_m2v: true
     convert_audio_to_mp3: true
     convert_wav_to_flac: false
