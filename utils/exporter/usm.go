@@ -10,8 +10,9 @@ import (
 )
 
 func ExportUSM(usmFile string, outputDir string, convertToMP4 bool, directUSMToMP4WithFFmpeg bool, deleteOriginalM2V bool, ffmpegPath string) error {
+	outputName := strings.TrimSuffix(filepath.Base(usmFile), filepath.Ext(usmFile))
 	if convertToMP4 && directUSMToMP4WithFFmpeg {
-		mp4File := filepath.Join(outputDir, resolveUSMOutputName(usmFile)+".mp4")
+		mp4File := filepath.Join(outputDir, outputName+".mp4")
 		if err := ConvertUSMToMP4(usmFile, mp4File, ffmpegPath); err != nil {
 			return fmt.Errorf("failed to convert USM to MP4 directly: %w", err)
 		}
@@ -36,7 +37,7 @@ func ExportUSM(usmFile string, outputDir string, convertToMP4 bool, directUSMToM
 	if convertToMP4 {
 		for _, extractedFile := range extractedFiles {
 			if strings.ToLower(filepath.Ext(extractedFile)) == ".m2v" {
-				mp4File := strings.TrimSuffix(extractedFile, filepath.Ext(extractedFile)) + ".mp4"
+				mp4File := filepath.Join(outputDir, outputName+".mp4")
 				if err := ConvertM2VToMP4(extractedFile, mp4File, deleteOriginalM2V, ffmpegPath, frameRate); err != nil {
 					return fmt.Errorf("failed to convert M2V to MP4: %w", err)
 				}
@@ -47,15 +48,4 @@ func ExportUSM(usmFile string, outputDir string, convertToMP4 bool, directUSMToM
 		return fmt.Errorf("failed to delete original USM file: %w", err)
 	}
 	return nil
-}
-
-func resolveUSMOutputName(usmFile string) string {
-	if metadata, err := usm.ReadMetadataFile(usmFile); err == nil && metadata.ContainerFilename != "" {
-		name := strings.TrimSuffix(filepath.Base(metadata.ContainerFilename), filepath.Ext(metadata.ContainerFilename))
-		if name != "" {
-			return name
-		}
-	}
-
-	return strings.TrimSuffix(filepath.Base(usmFile), filepath.Ext(usmFile))
 }
