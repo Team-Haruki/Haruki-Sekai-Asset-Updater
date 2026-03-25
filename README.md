@@ -1,6 +1,10 @@
-# Haruki Sekai Asset Updater
+> [!Caution]
+> This project was rewritten in Rust.  
+> Go edition is not maintained anymore.   
+> If you want to use Go edition, please go to [old go branch](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater/tree/old-go).
 
-This repository is now organized as a Rust service project. The legacy Go implementation has been retired from the main runtime layout, and the repo root is the active Cargo crate.
+# Haruki Sekai Asset Updater
+**Haruki Sekai Asset Updater** is a companion project for [HarukiBot](https://github.com/Team-Haruki), it's a high performance game asset extractor and exporter of the game `Project Sekai`.
 
 ## Scope
 
