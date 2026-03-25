@@ -1,0 +1,37 @@
+[package]
+name = "haruki-sekai-asset-updater"
+version = "0.1.0"
+edition = "2021"
+description = "Rust service for Haruki Sekai Asset Updater"
+license = "MIT"
+
+[dependencies]
+aes = "0.8.4"
+axum = { version = "0.8.8", features = ["macros", "json"] }
+aws-config = "1.8.15"
+aws-sdk-s3 = "1.127.0"
+cbc = "0.1.2"
+chrono = { version = "0.4.44", features = ["clock", "serde"] }
+clap = { version = "4.6.0", features = ["derive"] }
+cridecoder = "0.1.1"
+git2 = "0.20.4"
+hex = "0.4.3"
+image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
+mime_guess = "2.0.5"
+regex = "1.12.3"
+reqwest = { version = "0.13.2", default-features = false, features = ["brotli", "deflate", "gzip", "http2", "json", "rustls"] }
+rmp-serde = "1.3.1"
+serde = { version = "1.0.228", features = ["derive"] }
+sonic-rs = "0.5.8"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tokio = { version = "1.50.0", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1.44"
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1.22.0", features = ["serde", "v4"] }
+yaml_serde = "0.10.4"
+
+[dev-dependencies]
+sha2 = "0.11.0"
+tower = { version = "0.5.3", features = ["util"] }

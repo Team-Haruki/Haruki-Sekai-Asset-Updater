@@ -12,73 +12,86 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            arch: amd64
             name: windows-x64
           - os: ubuntu-latest
-            arch: amd64
             name: linux-amd64
-          - os: ubuntu-latest
-            arch: arm64
-            name: linux-arm64
           - os: macos-latest
-            arch: arm64
             name: macos-arm64
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         fetch-depth: 0
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Rust build artifacts
+      uses: Swatinem/rust-cache@v2
       with:
-        go-version: '1.26.0'
+        workspaces: ". -> target"
 
     - name: Get version
       id: version
       run: |
-        # Prefer the pushed tag (refs/tags/vX.Y.Z -> vX.Y.Z)
-        VERSION="${GITHUB_REF##*/}"
-        # Fallback to the source placeholder if not running for a tag
-        if [ -z "$VERSION" ] || [ "$VERSION" = "refs/tags/" ]; then
-          VERSION=$(grep 'var Version' config/config.go | cut -d'"' -f2)
+        TAG="${GITHUB_REF##*/}"
+        if [ -z "$TAG" ] || [ "$TAG" = "refs/tags/" ]; then
+          TAG="v$(grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)"
         fi
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION"
+        CRATE_VERSION="${TAG#v}"
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "crate_version=$CRATE_VERSION" >> $GITHUB_OUTPUT
+        echo "Tag: $TAG"
+        echo "Crate version: $CRATE_VERSION"
+
+    - name: Stamp Cargo version from tag
+      env:
+        CRATE_VERSION: ${{ steps.version.outputs.crate_version }}
+      run: |
+        python3 - <<'PY'
+        import os
+        import re
+        from pathlib import Path
+
+        path = Path("Cargo.toml")
+        text = path.read_text()
+        version = os.environ["CRATE_VERSION"]
+        updated, count = re.subn(
+            r'(?m)^version = ".*"$',
+            f'version = "{version}"',
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise SystemExit("failed to update Cargo.toml version")
+        path.write_text(updated)
+        PY
 
     - name: Build for ${{ matrix.name }}
-      env:
-        GOOS: ${{ matrix.os == 'windows-latest' && 'windows' || matrix.os == 'ubuntu-latest' && 'linux' || 'darwin' }}
-        GOARCH: ${{ matrix.arch }}
-        CGO_ENABLED: 0
       run: |
-        BINARY_NAME="HarukiSekaiAssetUpdater"
-        if [ "$GOOS" = "windows" ]; then
+        BINARY_NAME="haruki-sekai-asset-updater"
+        if [ "${{ runner.os }}" = "Windows" ]; then
           BINARY_NAME="${BINARY_NAME}.exe"
         fi
-        
+
         mkdir -p dist
-        
-        MODULE=$(go list -m)
-        go build -ldflags "-s -w -X ${MODULE}/config.Version=${{ steps.version.outputs.version }}" \
-                 -o "dist/${BINARY_NAME}" \
-                 -trimpath \
-                 -tags netgo \
-                 .
-        
+
+        cargo build --release --bin haruki-sekai-asset-updater
+        cp "target/release/${BINARY_NAME}" "dist/${BINARY_NAME}"
+
         cd dist
-        if [ "$GOOS" = "windows" ]; then
-          zip "HarukiSekaiAssetUpdater-${{ matrix.name }}.zip" "$BINARY_NAME"
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          zip "haruki-sekai-asset-updater-${{ matrix.name }}.zip" "$BINARY_NAME"
         else
-          tar -czf "HarukiSekaiAssetUpdater-${{ matrix.name }}.tar.gz" "$BINARY_NAME"
+          tar -czf "haruki-sekai-asset-updater-${{ matrix.name }}.tar.gz" "$BINARY_NAME"
         fi
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ matrix.name }}
-        path: dist/HarukiSekaiAssetUpdater-${{ matrix.name }}.*
+        path: dist/haruki-sekai-asset-updater-${{ matrix.name }}.*
 
   release:
     needs: build
@@ -92,12 +105,12 @@ jobs:
 
     steps:
     - name: Checkout repo
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         fetch-depth: 0
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         path: artifacts
 

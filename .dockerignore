@@ -6,6 +6,8 @@
 haruki-sekai-asset
 HarukiSekaiAssetUpdater
 *.exe
+target/
+cricodecs/target/
 
 # Logs
 logs/
@@ -18,17 +20,9 @@ back.txt
 # Data
 Data/
 
-# Documentation
-README.md
-LICENSE
-
-# Examples
-examples/
-
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
-
