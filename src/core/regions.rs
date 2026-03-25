@@ -132,23 +132,39 @@ pub fn build_url_preview(region: &RegionConfig, request: &AssetUpdateRequest) ->
 }
 
 pub fn should_skip_bundle(filters: &RegionFiltersConfig, bundle_name: &str) -> bool {
-    filters
-        .skip
-        .iter()
-        .filter_map(|pattern| Regex::new(pattern).ok())
-        .any(|regex| regex.is_match(bundle_name))
+    let skip_patterns = compile_patterns(&filters.skip);
+    should_skip_bundle_compiled(&skip_patterns, bundle_name)
 }
 
 pub fn download_priority(filters: &RegionFiltersConfig, bundle_name: &str) -> Option<usize> {
-    filters
-        .priority
+    let priority_patterns = compile_patterns(&filters.priority);
+    download_priority_compiled(&priority_patterns, bundle_name)
+}
+
+pub(crate) fn compile_patterns(patterns: &[String]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| Regex::new(pattern).ok())
+        .collect()
+}
+
+pub(crate) fn matches_any(patterns: &[Regex], bundle_name: &str) -> bool {
+    patterns.iter().any(|regex| regex.is_match(bundle_name))
+}
+
+pub(crate) fn first_match_index(patterns: &[Regex], bundle_name: &str) -> Option<usize> {
+    patterns
         .iter()
         .enumerate()
-        .find_map(|(idx, pattern)| {
-            Regex::new(pattern)
-                .ok()
-                .and_then(|regex| regex.is_match(bundle_name).then_some(idx))
-        })
+        .find_map(|(idx, regex)| regex.is_match(bundle_name).then_some(idx))
+}
+
+pub fn should_skip_bundle_compiled(skip_patterns: &[Regex], bundle_name: &str) -> bool {
+    matches_any(skip_patterns, bundle_name)
+}
+
+pub fn download_priority_compiled(priority_patterns: &[Regex], bundle_name: &str) -> Option<usize> {
+    first_match_index(priority_patterns, bundle_name)
 }
 
 #[cfg(test)]

@@ -22,6 +22,7 @@ use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::extract_unity_asset_bundle;
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
+use crate::core::regions::{compile_patterns, first_match_index, matches_any};
 use crate::core::retry::retry_async;
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
@@ -703,24 +704,6 @@ fn is_retryable_http_error(err: &AssetExecutionError) -> bool {
     }
 }
 
-fn compile_patterns(patterns: &[String]) -> Vec<regex::Regex> {
-    patterns
-        .iter()
-        .filter_map(|pattern| regex::Regex::new(pattern).ok())
-        .collect()
-}
-
-fn matches_any(patterns: &[regex::Regex], bundle_name: &str) -> bool {
-    patterns.iter().any(|regex| regex.is_match(bundle_name))
-}
-
-fn first_match_index(patterns: &[regex::Regex], bundle_name: &str) -> Option<usize> {
-    patterns
-        .iter()
-        .enumerate()
-        .find_map(|(idx, regex)| regex.is_match(bundle_name).then_some(idx))
-}
-
 pub fn decrypt_asset_bundle_info(
     aes_key_hex: &str,
     aes_iv_hex: &str,
@@ -799,19 +782,15 @@ pub fn should_download_bundle(
     bundle_name: &str,
     category: &AssetCategory,
 ) -> bool {
-    let patterns = match category {
-        AssetCategory::StartApp => &region.filters.start_app,
-        AssetCategory::OnDemand => &region.filters.on_demand,
+    let compiled = match category {
+        AssetCategory::StartApp => compile_patterns(&region.filters.start_app),
+        AssetCategory::OnDemand => compile_patterns(&region.filters.on_demand),
         AssetCategory::Other(_) => return false,
     };
-    if patterns.is_empty() {
+    if compiled.is_empty() {
         return false;
     }
-    patterns.iter().any(|pattern| {
-        regex::Regex::new(pattern)
-            .ok()
-            .is_some_and(|regex| regex.is_match(bundle_name))
-    })
+    matches_any(&compiled, bundle_name)
 }
 
 fn download_path_for_region(

@@ -35,14 +35,38 @@ jobs:
     - name: Get version
       id: version
       run: |
-        # Prefer the pushed tag (refs/tags/vX.Y.Z -> vX.Y.Z)
-        VERSION="${GITHUB_REF##*/}"
-        # Fallback to the source placeholder if not running for a tag
-        if [ -z "$VERSION" ] || [ "$VERSION" = "refs/tags/" ]; then
-          VERSION="v$(grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)"
+        TAG="${GITHUB_REF##*/}"
+        if [ -z "$TAG" ] || [ "$TAG" = "refs/tags/" ]; then
+          TAG="v$(grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)"
         fi
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Version: $VERSION"
+        CRATE_VERSION="${TAG#v}"
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        echo "crate_version=$CRATE_VERSION" >> $GITHUB_OUTPUT
+        echo "Tag: $TAG"
+        echo "Crate version: $CRATE_VERSION"
+
+    - name: Stamp Cargo version from tag
+      env:
+        CRATE_VERSION: ${{ steps.version.outputs.crate_version }}
+      run: |
+        python3 - <<'PY'
+        import os
+        import re
+        from pathlib import Path
+
+        path = Path("Cargo.toml")
+        text = path.read_text()
+        version = os.environ["CRATE_VERSION"]
+        updated, count = re.subn(
+            r'(?m)^version = ".*"$',
+            f'version = "{version}"',
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise SystemExit("failed to update Cargo.toml version")
+        path.write_text(updated)
+        PY
 
     - name: Build for ${{ matrix.name }}
       run: |

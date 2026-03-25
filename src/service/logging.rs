@@ -57,12 +57,12 @@ impl<'a> MakeWriter<'a> for SharedFileMakeWriter {
 impl io::Write for SharedFileWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut file = self.file.lock().expect("log file lock poisoned");
-        file.write(buf)
+        io::Write::write(&mut *file, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         let mut file = self.file.lock().expect("log file lock poisoned");
-        file.flush()
+        io::Write::flush(&mut *file)
     }
 }
 
@@ -187,7 +187,7 @@ async fn write_access_log(file_path: Option<&str>, line: &str) -> io::Result<()>
     let file_path = file_path.map(str::trim).filter(|path| !path.is_empty());
     if let Some(file_path) = file_path {
         let path = PathBuf::from(file_path);
-        ensure_parent_dir(&path)?;
+        ensure_parent_dir_async(&path).await?;
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -205,6 +205,13 @@ async fn write_access_log(file_path: Option<&str>, line: &str) -> io::Result<()>
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+async fn ensure_parent_dir_async(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
     }
     Ok(())
 }
