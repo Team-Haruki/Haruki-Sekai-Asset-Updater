@@ -16,6 +16,7 @@ fn sample_path(name: &str) -> PathBuf {
 
 fn sha256_hex(path: &Path) -> String {
     use std::io::Read;
+    use sha2::Digest;
 
     let mut file = fs::File::open(path).unwrap();
     let mut hasher = sha2::Sha256::new();
@@ -25,11 +26,9 @@ fn sha256_hex(path: &Path) -> String {
         if n == 0 {
             break;
         }
-        use sha2::Digest;
         hasher.update(&buf[..n]);
     }
-    use sha2::Digest;
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn frozen_hash(rel_path: &str) -> &'static str {
