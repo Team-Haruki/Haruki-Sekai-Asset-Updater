@@ -63,7 +63,8 @@ pub async fn upload_to_all_storages(
     let mut tasks = JoinSet::new();
 
     for provider in storage.providers.clone() {
-        for file in files.iter().cloned() {
+        for file in files {
+            let file = file.clone();
             let extracted_save_path = extracted_save_path.to_path_buf();
             let semaphore = semaphore.clone();
             let region_name = region_name.to_string();

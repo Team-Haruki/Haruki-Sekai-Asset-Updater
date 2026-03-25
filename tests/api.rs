@@ -11,6 +11,7 @@ use haruki_sekai_asset_updater::core::config::{
     RegionProviderConfig, ServerConfig,
 };
 use haruki_sekai_asset_updater::service::http::{build_router, AppState};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 use tower::ServiceExt;
 
 const TEST_AES_KEY_HEX: &str = "00112233445566778899aabbccddeeff";
@@ -153,7 +154,7 @@ async fn submit_update_accepts_and_job_can_be_queried() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     let job_id = payload["job"]["id"].as_str().unwrap().to_string();
 
     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -174,7 +175,7 @@ async fn submit_update_accepts_and_job_can_be_queried() {
     let body = axum::body::to_bytes(job_response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     assert_eq!(payload["job"]["status"].as_str(), Some("completed"));
     assert_eq!(
         payload["job"]["message"].as_str(),
@@ -185,8 +186,8 @@ async fn submit_update_accepts_and_job_can_be_queried() {
         Some("completed")
     );
     assert!(payload["job"]["failure"].is_null());
-    assert!(payload["job"]["plan"]["download_record_file"].is_string());
-    assert!(payload["job"]["plan"]["url_preview"]["asset_info_url"].is_string());
+    assert!(payload["job"]["plan"]["download_record_file"].is_str());
+    assert!(payload["job"]["plan"]["url_preview"]["asset_info_url"].is_str());
 }
 
 #[tokio::test]
@@ -361,7 +362,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     let job_id = payload["job"]["id"].as_str().unwrap().to_string();
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -382,7 +383,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
     let body = axum::body::to_bytes(job_response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     assert_eq!(payload["job"]["status"].as_str(), Some("completed"));
     assert_eq!(
         payload["job"]["execution"]["completed_downloads"].as_u64(),
@@ -396,6 +397,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
         payload["job"]["progress"]["phase"].as_str(),
         Some("completed")
     );
+    assert!(payload["job"]["progress"]["recent_events"].is_array());
     assert!(payload["job"]["progress"]["recent_events"]
         .as_array()
         .is_some_and(|events| !events.is_empty()));
@@ -427,7 +429,7 @@ async fn cancel_job_marks_snapshot_cancelled() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     let job_id = payload["job"]["id"].as_str().unwrap().to_string();
 
     let response = app
@@ -447,7 +449,7 @@ async fn cancel_job_marks_snapshot_cancelled() {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     assert_eq!(payload["job"]["status"].as_str(), Some("cancelled"));
     assert_eq!(
         payload["job"]["progress"]["phase"].as_str(),

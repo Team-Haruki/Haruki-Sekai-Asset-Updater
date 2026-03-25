@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sonic_rs::JsonValueTrait;
 use tempfile::tempdir;
 
 fn repo_root() -> PathBuf {
@@ -76,7 +77,7 @@ fn usmmeta_exports_pretty_json_for_sample_if_present() {
 
     let metadata_path = dir.path().join("0703.metadata.json");
     let body = fs::read_to_string(metadata_path).unwrap();
-    let metadata: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let metadata: sonic_rs::Value = sonic_rs::from_str(&body).unwrap();
     assert_eq!(
         metadata["input_file"].as_str(),
         Some(input.to_string_lossy().as_ref())

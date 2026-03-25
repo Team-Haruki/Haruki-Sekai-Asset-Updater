@@ -8,7 +8,7 @@ pub type DownloadRecord = BTreeMap<String, String>;
 pub fn load_download_record(path: impl AsRef<Path>) -> Result<DownloadRecord, DownloadRecordError> {
     let path = path.as_ref();
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| DownloadRecordError::Parse {
+        Ok(bytes) => sonic_rs::from_slice(&bytes).map_err(|source| DownloadRecordError::Parse {
             path: path.to_path_buf(),
             source,
         }),
@@ -32,7 +32,7 @@ pub fn save_download_record(
         })?;
     }
     let data =
-        serde_json::to_vec_pretty(record).map_err(|source| DownloadRecordError::Serialize {
+        sonic_rs::to_vec_pretty(record).map_err(|source| DownloadRecordError::Serialize {
             path: path.to_path_buf(),
             source,
         })?;

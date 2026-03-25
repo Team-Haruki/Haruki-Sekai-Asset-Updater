@@ -81,7 +81,7 @@ pub fn sync_chart_hashes(
     }
 
     let data =
-        serde_json::to_vec_pretty(&chart_hashes).map_err(|source| GitSyncError::Serialize {
+        sonic_rs::to_vec_pretty(&chart_hashes).map_err(|source| GitSyncError::Serialize {
             path: output_file.clone(),
             source,
         })?;

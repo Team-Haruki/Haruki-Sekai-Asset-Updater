@@ -1,6 +1,6 @@
 use std::fs;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -36,7 +36,7 @@ fn binary_path() -> PathBuf {
         .join("haruki-sekai-asset-updater")
 }
 
-fn write_config(path: &PathBuf, port: u16, main_log: &PathBuf, access_log: &PathBuf) {
+fn write_config(path: &Path, port: u16, main_log: &Path, access_log: &Path) {
     let yaml = format!(
         r#"
 config_version: 2

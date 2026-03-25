@@ -61,7 +61,7 @@ impl AppConfig {
             path: path.clone(),
             source,
         })?;
-        let mut config: Self = serde_yaml::from_str(&raw).map_err(|source| ConfigError::Parse {
+        let mut config: Self = yaml_serde::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
             source,
         })?;
@@ -201,17 +201,12 @@ pub struct TlsConfig {
     pub key_file: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
+    #[default]
     Pretty,
     Json,
-}
-
-impl Default for LogFormat {
-    fn default() -> Self {
-        Self::Pretty
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -620,7 +615,7 @@ regions:
         production: abc123
 "#;
 
-        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: AppConfig = yaml_serde::from_str(yaml).unwrap();
         config.validate().unwrap();
 
         assert_eq!(config.server.port, 18080);

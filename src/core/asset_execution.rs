@@ -712,7 +712,7 @@ pub fn decrypt_asset_bundle_info(
     if content.is_empty() {
         return Err(AssetExecutionError::EmptyEncryptedContent);
     }
-    if content.len() % 16 != 0 {
+    if !content.len().is_multiple_of(16) {
         return Err(AssetExecutionError::InvalidEncryptedBlockSize);
     }
 

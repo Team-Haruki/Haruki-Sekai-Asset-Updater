@@ -14,7 +14,7 @@ pub enum ConfigError {
     Parse {
         path: PathBuf,
         #[source]
-        source: serde_yaml::Error,
+        source: yaml_serde::Error,
     },
     #[error("config_version must be 2, got {0}")]
     UnsupportedVersion(u32),
@@ -46,7 +46,7 @@ pub enum DownloadRecordError {
     Parse {
         path: PathBuf,
         #[source]
-        source: serde_json::Error,
+        source: sonic_rs::Error,
     },
     #[error("failed to create parent directory for {path}: {source}")]
     CreateParent {
@@ -64,7 +64,7 @@ pub enum DownloadRecordError {
     Serialize {
         path: PathBuf,
         #[source]
-        source: serde_json::Error,
+        source: sonic_rs::Error,
     },
 }
 
@@ -116,7 +116,7 @@ pub enum GitSyncError {
     Serialize {
         path: PathBuf,
         #[source]
-        source: serde_json::Error,
+        source: sonic_rs::Error,
     },
     #[error("repository workdir is unavailable")]
     MissingWorkdir,

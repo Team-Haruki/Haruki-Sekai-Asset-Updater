@@ -6,6 +6,7 @@ use haruki_sekai_asset_updater::core::asset_execution::{
 };
 use haruki_sekai_asset_updater::core::config::AppConfig;
 use haruki_sekai_asset_updater::core::models::AssetUpdateRequest;
+use sonic_rs::JsonValueTrait;
 
 #[derive(Debug, Parser)]
 #[command(name = "assetinfo_dump")]
@@ -69,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .map(|(name, detail)| {
-            serde_json::json!({
+            sonic_rs::json!({
                 "bundle_name": name,
                 "category": category_name(&detail.category),
                 "file_size": detail.file_size,
@@ -88,11 +89,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .then_with(|| a["bundle_name"].as_str().cmp(&b["bundle_name"].as_str()))
     });
 
-    let payload = serde_json::json!({
+    let payload = sonic_rs::json!({
         "region": args.region,
         "bundle_count": info.bundles.len(),
         "returned": bundles.iter().take(args.limit).cloned().collect::<Vec<_>>(),
     });
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    println!("{}", sonic_rs::to_string_pretty(&payload)?);
     Ok(())
 }

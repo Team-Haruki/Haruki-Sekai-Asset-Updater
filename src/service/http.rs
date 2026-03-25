@@ -188,6 +188,6 @@ impl IntoResponse for ApiError {
         };
 
         warn!(status = %status, error = %message, "request failed");
-        (status, Json(serde_json::json!({ "message": message }))).into_response()
+        (status, Json(sonic_rs::json!({ "message": message }))).into_response()
     }
 }

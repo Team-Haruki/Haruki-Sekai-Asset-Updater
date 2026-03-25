@@ -35,9 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = std::fs::File::create(&output)?;
-    let writer = std::io::BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, &metadata)?;
+    std::fs::write(&output, sonic_rs::to_string_pretty(&metadata)?)?;
     println!("exported metadata to {}", output.display());
     Ok(())
 }
