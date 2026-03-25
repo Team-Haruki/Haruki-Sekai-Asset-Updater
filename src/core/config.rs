@@ -259,6 +259,10 @@ pub struct ToolsConfig {
 pub struct ExecutionConfig {
     pub timeout_seconds: u64,
     pub allow_cancel: bool,
+    /// How many successful downloads to accumulate before flushing the download
+    /// record to disk mid-run.  Set to `0` to disable mid-run flushing (record
+    /// is only written once at the end).  Mirrors Go's `batchSaveSize`.
+    pub batch_save_size: usize,
     pub retry: RetryConfig,
 }
 
@@ -267,6 +271,7 @@ impl Default for ExecutionConfig {
         Self {
             timeout_seconds: 300,
             allow_cancel: true,
+            batch_save_size: 50,
             retry: RetryConfig::default(),
         }
     }

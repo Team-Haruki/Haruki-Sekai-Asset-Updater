@@ -25,6 +25,7 @@ logging:
 execution:
   timeout_seconds: 300
   allow_cancel: true
+  batch_save_size: 50
   retry:
     attempts: 4
     initial_backoff_ms: 1000

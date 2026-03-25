@@ -235,6 +235,8 @@ impl AssetExecutionContext {
 
         let mut completed = 0usize;
         let mut failed = 0usize;
+        let mut pending_save_count = 0usize;
+        let batch_save_size = app_config.execution.batch_save_size;
         let semaphore = std::sync::Arc::new(Semaphore::new(app_config.concurrency.download.max(1)));
         let mut joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
@@ -283,12 +285,34 @@ impl AssetExecutionContext {
                 Ok(()) => {
                     completed += 1;
                     downloaded_assets.insert(bundle_path.clone(), bundle_hash);
+                    pending_save_count += 1;
                     Self::send_progress(
                         &progress,
                         ExecutionProgressUpdate::BundleCompleted {
                             bundle: bundle_path,
                         },
                     );
+                    if batch_save_size > 0 && pending_save_count >= batch_save_size {
+                        tracing::info!(
+                            region = %self.region_name,
+                            batch = pending_save_count,
+                            "batch-flushing download record"
+                        );
+                        match save_download_record(&record_path, &downloaded_assets) {
+                            Ok(()) => Self::send_progress(
+                                &progress,
+                                ExecutionProgressUpdate::RecordSaved {
+                                    entries: downloaded_assets.len(),
+                                },
+                            ),
+                            Err(err) => tracing::warn!(
+                                region = %self.region_name,
+                                error = %err,
+                                "mid-run batch save of download record failed; will retry at end"
+                            ),
+                        }
+                        pending_save_count = 0;
+                    }
                 }
                 Err(AssetExecutionError::Cancelled) => {
                     return Err(AssetExecutionError::Cancelled);
