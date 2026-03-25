@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::HeaderMap;
 use axum::http::{Method, Request, StatusCode};
+use axum::Router;
 use haruki_sekai_asset_updater::core::config::{
     AppConfig, AuthConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionPathsConfig,
     RegionProviderConfig, ServerConfig,
@@ -64,6 +65,38 @@ fn test_config() -> AppConfig {
         regions,
         ..AppConfig::default()
     }
+}
+
+async fn wait_for_job(app: &Router, job_id: &str) -> sonic_rs::Value {
+    for _ in 0..50 {
+        let job_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v2/jobs/{job_id}"))
+                    .header("user-agent", "HarukiTest/1.0")
+                    .header("authorization", "Bearer secret-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(job_response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(job_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
+        if matches!(
+            payload["job"]["status"].as_str(),
+            Some("completed" | "failed" | "cancelled")
+        ) {
+            return payload;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    panic!("job {job_id} did not reach a terminal state in time");
 }
 
 #[tokio::test]
@@ -157,25 +190,7 @@ async fn submit_update_accepts_and_job_can_be_queried() {
     let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     let job_id = payload["job"]["id"].as_str().unwrap().to_string();
 
-    tokio::time::sleep(Duration::from_millis(25)).await;
-
-    let job_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/v2/jobs/{job_id}"))
-                .header("user-agent", "HarukiTest/1.0")
-                .header("authorization", "Bearer secret-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(job_response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(job_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
+    let payload = wait_for_job(&app, &job_id).await;
     assert_eq!(payload["job"]["status"].as_str(), Some("completed"));
     assert_eq!(
         payload["job"]["message"].as_str(),
@@ -365,25 +380,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
     let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
     let job_id = payload["job"]["id"].as_str().unwrap().to_string();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let job_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/v2/jobs/{job_id}"))
-                .header("user-agent", "HarukiTest/1.0")
-                .header("authorization", "Bearer secret-token")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(job_response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(job_response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
+    let payload = wait_for_job(&app, &job_id).await;
     assert_eq!(payload["job"]["status"].as_str(), Some("completed"));
     assert_eq!(
         payload["job"]["execution"]["completed_downloads"].as_u64(),
