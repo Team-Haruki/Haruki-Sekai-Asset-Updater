@@ -1,0 +1,130 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rust-ci.yml"
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docs/migration/**"
+      - "haruki-asset-configs.example.yaml"
+  pull_request:
+    paths:
+      - ".github/workflows/rust-ci.yml"
+      - "src/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "docs/migration/**"
+      - "haruki-asset-configs.example.yaml"
+  workflow_dispatch:
+    inputs:
+      run_assetstudio:
+        description: "Run optional real AssetStudio integration job"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  rust-tests:
+    name: Rust Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Run Rust test suite
+        run: cargo test
+
+  assetstudio-integration:
+    name: AssetStudio Integration
+    needs: rust-tests
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_RUST_ASSETSTUDIO_CI == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_assetstudio) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      ASSET_STUDIO_UNITY_VERSION: ${{ vars.RUST_ASSETSTUDIO_UNITY_VERSION }}
+      ASSET_STUDIO_EXPORT_PATH: ${{ vars.RUST_ASSETSTUDIO_EXPORT_PATH }}
+      ASSET_STUDIO_CATEGORY: ${{ vars.RUST_ASSETSTUDIO_CATEGORY }}
+      ASSET_STUDIO_BY_CATEGORY: ${{ vars.RUST_ASSETSTUDIO_BY_CATEGORY }}
+      ASSET_STUDIO_EXPECTED_RELATIVE_FILE: ${{ vars.RUST_ASSETSTUDIO_EXPECTED_RELATIVE_FILE }}
+      ASSET_STUDIO_BUNDLE_URL: ${{ secrets.RUST_ASSETSTUDIO_BUNDLE_URL }}
+      ASSET_STUDIO_BUNDLE_NAME: ${{ vars.RUST_ASSETSTUDIO_BUNDLE_NAME }}
+      ASSET_STUDIO_REPO_URL: https://github.com/Team-Haruki/AssetStudio.git
+      ASSET_STUDIO_REPO_REF: sekai-modify
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Validate AssetStudio CI configuration
+        run: |
+          set -euo pipefail
+          for required in ASSET_STUDIO_BUNDLE_URL ASSET_STUDIO_EXPECTED_RELATIVE_FILE; do
+            if [[ -z "${!required:-}" ]]; then
+              echo "Missing required CI setting: $required" >&2
+              exit 1
+            fi
+          done
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Clone AssetStudio source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/assetstudio"
+          git clone --depth 1 --branch "$ASSET_STUDIO_REPO_REF" "$ASSET_STUDIO_REPO_URL" "$RUNNER_TEMP/assetstudio/src"
+
+      - name: Build AssetStudio CLI from source
+        run: |
+          set -euo pipefail
+          dotnet build "$RUNNER_TEMP/assetstudio/src/AssetStudioCLI/AssetStudioCLI.csproj" \
+            -c Release \
+            -f net9.0 \
+            -r linux-x64 \
+            -p:SolutionDir="$RUNNER_TEMP/assetstudio/src/"
+          CLI_SOURCE="$RUNNER_TEMP/assetstudio/src/AssetStudioCLI/bin/Release/net9.0/linux-x64/AssetStudioModCLI"
+          if [[ ! -f "$CLI_SOURCE" ]]; then
+            echo "Built AssetStudio CLI binary not found at $CLI_SOURCE" >&2
+            exit 1
+          fi
+          chmod +x "$CLI_SOURCE"
+          echo "ASSET_STUDIO_CLI_PATH=$CLI_SOURCE" >> "$GITHUB_ENV"
+
+      - name: Download AssetStudio bundle sample
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/assetstudio"
+          BUNDLE_NAME="${ASSET_STUDIO_BUNDLE_NAME:-bundle.dat}"
+          curl -L "$ASSET_STUDIO_BUNDLE_URL" -o "$RUNNER_TEMP/assetstudio/$BUNDLE_NAME"
+          echo "ASSET_STUDIO_BUNDLE_PATH=$RUNNER_TEMP/assetstudio/$BUNDLE_NAME" >> "$GITHUB_ENV"
+
+      - name: Run real AssetStudio integration test
+        run: cargo test --test assetstudio_real -- --nocapture

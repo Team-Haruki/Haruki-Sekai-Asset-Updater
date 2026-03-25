@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  haruki-updater:
+    image: haruki-sekai-asset-updater:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: haruki-sekai-asset-updater
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    volumes:
+      - ./haruki-asset-configs.yaml:/app/haruki-asset-configs.yaml:ro
+      - ./Data:/app/Data
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+      - HARUKI_CONFIG_PATH=/app/haruki-asset-configs.yaml
+      - HARUKI_ASSET_STUDIO_CLI_PATH=/app/assetstudio/AssetStudioCLI
+      - HARUKI_SHARED_AES_KEY_HEX=${HARUKI_SHARED_AES_KEY_HEX}
+      - HARUKI_SHARED_AES_IV_HEX=${HARUKI_SHARED_AES_IV_HEX}
+      - HARUKI_EN_AES_KEY_HEX=${HARUKI_EN_AES_KEY_HEX}
+      - HARUKI_EN_AES_IV_HEX=${HARUKI_EN_AES_IV_HEX}
+      - RUST_LOG=${RUST_LOG:-info}
+    restart: unless-stopped
+    networks:
+      - haruki-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  haruki-network:
+    driver: bridge

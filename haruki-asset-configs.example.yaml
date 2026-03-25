@@ -1,352 +1,163 @@
-# Haruki Sekai Asset Updater Configuration File
-# Generated based on config.go structure
+config_version: 2
 
-# Proxy configuration (optional)
-proxy: ""
-
-# Concurrent settings
-concurrents:
-  concurrent_download: 10
-  concurrent_upload: 5
-  concurrent_acb: 16
-  concurrent_usm: 4
-
-# Music chart hashes collection configuration for somebody
-sekai_music_chart_hash_collection:
-  enabled: false
-  repository_dir: "./sekai-chart-hash"
-  username: "none"
-  email: "none"
-  password: "yourpassword"
-
-# Backend API server configuration
-backend:
+server:
   host: "0.0.0.0"
-  port: 12345
-  ssl: false
-  ssl_cert: ""
-  ssl_key: ""
-  log_level: "INFO"
-  main_log_file: "./logs/main.log"
-  access_log: "[${time}] ${status} - ${method} ${path} ${latency}\n"
-  access_log_path: "./logs/access.log"
+  port: 8080
+  proxy: ""
+  auth:
+    enabled: true
+    user_agent_prefix: "HarukiInternal/"
+    bearer_token: "change-me"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
 
-  # Authorization settings
-  enable_authorization: true
-  accept_user_agent_prefix: ""
-  accept_authorization_token: ""
+logging:
+  level: "INFO"
+  format: "pretty"
+  file: ""
+  access:
+    enabled: true
+    format: "[${time}] ${status} - ${method} ${path} ${latency}\n"
+    file: "./logs/access.log"
 
-# External tools configuration
-tool:
+execution:
+  timeout_seconds: 300
+  allow_cancel: true
+  retry:
+    attempts: 4
+    initial_backoff_ms: 1000
+    max_backoff_ms: 4000
+
+tools:
   ffmpeg_path: "ffmpeg"
   asset_studio_cli_path: ""
 
-# CP Asset profiles (optional)
-# profiles:
-#   jp:
-#     profile_key: "profile_value"
+concurrency:
+  download: 4
+  upload: 4
+  acb: 8
+  usm: 4
+  hca: 16
 
-# Server configurations for each region
-servers:
-  # Japanese server (jp)
+storage:
+  providers: []
+
+git_sync:
+  chart_hashes:
+    enabled: false
+    repository_dir: "./sekai-chart-hash"
+    username: "none"
+    email: "none"
+    password: "change-me"
+
+regions:
   jp:
     enabled: false
-    export_by_category: false
-    asset_info_url_template: ""
-    cp_asset_profile: ""
-    asset_url_template: ""
-    required_cookies: true
-    aes_key_hex: ""
-    aes_iv_hex: ""
-    unity_version: "2022.3.21f1"
-    asset_save_dir: "./Data/jp-assets"
-    downloaded_asset_record_file: "./Data/jp-assets/downloaded_assets.json"
-    start_app_regexes:
-      - "bonds_honor"
-      - "honor"
-      - "thumbnail"
-      - "character"
-      - "music"
-      - "rank_live"
-      - "stamp"
-      - "home/banner"
-      - "mysekai"
-    ondemand_regexes:
-      - "event"
-      - "gacha"
-      - "music"
-      - "mysekai"
-    skip_regexes: []
-    download_priority_list:
-      - "^character/member.*"
-      - "^event/.*"
-      - "^gacha/.*"
-      - "^virtual_live/select/banner/.*"
-      - "^home/banner/.*"
-      - "^music/.*"
-      - "^honor/.*"
-      - "^rank_live/honor/.*"
-      - "^bonds_honor/.*"
-      - "^sound/.*"
-      - "^character/character_select"
-      - "^stamp/.*"
-      - "^thumbnail/.*"
-      - "^scenario/.*"
-      - "^virtual_live/mc/scenario/.*"
-      - "^live/2dmode/.*"
-      - ".*"
-    export_usm_files: true
-    decode_usm_files: true
-    export_acb_files: true
-    decode_acb_files: true
-    decode_hca_files: true
-    convert_photo_to_webp: false
-    remove_png: false
-    convert_video_to_mp4: true
-    direct_usm_to_mp4_with_ffmpeg: false
-    remove_m2v: true
-    convert_audio_to_mp3: true
-    convert_wav_to_flac: false
-    remove_wav: true
-    upload_to_cloud: false
-    remove_local_after_upload: false
+    provider:
+      kind: colorful_palette
+      asset_info_url_template: ""
+      asset_bundle_url_template: ""
+      profile: "production"
+      profile_hashes: {}
+      required_cookies: true
+    crypto:
+      aes_key_hex: ""
+      aes_iv_hex: ""
+    runtime:
+      unity_version: "2022.3.21f1"
+    paths:
+      asset_save_dir: "./Data/jp-assets"
+      downloaded_asset_record_file: "./Data/jp-assets/downloaded_assets.json"
+    filters:
+      start_app:
+        - "bonds_honor"
+        - "honor"
+        - "thumbnail"
+        - "character"
+        - "music"
+      on_demand:
+        - "event"
+        - "gacha"
+        - "music"
+      skip: []
+      priority:
+        - "^character/member.*"
+        - "^event/.*"
+        - "^gacha/.*"
+        - ".*"
+    export:
+      by_category: false
+      usm:
+        export: true
+        decode: true
+      acb:
+        export: true
+        decode: true
+      hca:
+        decode: true
+      images:
+        convert_to_webp: false
+        remove_png: false
+      video:
+        convert_to_mp4: true
+        direct_usm_to_mp4_with_ffmpeg: true
+        remove_m2v: true
+      audio:
+        convert_to_mp3: true
+        convert_to_flac: false
+        remove_wav: true
+    upload:
+      enabled: false
+      remove_local_after_upload: false
 
-  # English server (en)
-  en:
-    enabled: false
-    export_by_category: false
-    asset_info_url_template: ""
-    asset_url_template: ""
-    required_cookies: false
-    aes_key_hex: ""
-    aes_iv_hex: ""
-    unity_version: "2022.3.52f1"
-    asset_save_dir: "./Data/en-assets"
-    downloaded_asset_record_file: "./Data/en-assets/downloaded_assets.json"
-    start_app_regexes:
-      - "bonds_honor"
-      - "honor"
-      - "rank_live"
-      - "music"
-    ondemand_regexes:
-      - "mysekai"
-    skip_regexes: []
-    download_priority_list:
-      - "^character/member.*"
-      - "^event/.*"
-      - "^gacha/.*"
-      - "^virtual_live/select/banner/.*"
-      - "^home/banner/.*"
-      - "^music/.*"
-      - "^honor/.*"
-      - "^rank_live/honor/.*"
-      - "^bonds_honor/.*"
-      - "^sound/.*"
-      - "^character/character_select"
-      - "^stamp/.*"
-      - "^thumbnail/.*"
-      - "^scenario/.*"
-      - "^virtual_live/mc/scenario/.*"
-      - "^live/2dmode/.*"
-      - ".*"
-    export_usm_files: true
-    decode_usm_files: true
-    export_acb_files: true
-    decode_acb_files: true
-    decode_hca_files: true
-    convert_photo_to_webp: false
-    remove_png: false
-    convert_video_to_mp4: true
-    direct_usm_to_mp4_with_ffmpeg: false
-    remove_m2v: true
-    convert_audio_to_mp3: true
-    convert_wav_to_flac: false
-    remove_wav: true
-    upload_to_cloud: false
-    remove_local_after_upload: false
-
-  # Traditional Chinese server (tw)
-  tw:
-    enabled: false
-    export_by_category: false
-    nuverse_asset_version_url: "https://lf16-mkovscdn-sg.bytedgame.com/obj/rt-game-alisg/gdl_app_5245/Oversea/{app_version}/Release/online/ios/version"
-    nuverse_override_app_version: "5.2.0"
-    asset_info_url_template: "https://lf16-mkovscdn-sg.bytedgame.com/obj/sf-game-alisg/gdl_app_5245/AssetBundle/{app_version}/Release/online/ios{asset_version}/AssetBundleInfoNew.json"
-    asset_url_template: "https://lf16-mkovscdn-sg.bytedgame.com/obj/sf-game-alisg/gdl_app_5245/AssetBundle/{app_version}/Release/online/{bundle_path}"
-    required_cookies: false
-    aes_key_hex: ""
-    aes_iv_hex: ""
-    unity_version: "2022.3.21f1"
-    asset_save_dir: "./Data/tw-assets"
-    downloaded_asset_record_file: "./Data/tw-assets/downloaded_assets.json"
-    start_app_regexes:
-      - "bonds_honor"
-      - "honor"
-      - "rank_live"
-      - "music"
-      - "thumbnail"
-      - "mysekai"
-    ondemand_regexes:
-      - "mysekai"
-    skip_regexes: []
-    download_priority_list:
-      - "^character/member.*"
-      - "^event/.*"
-      - "^gacha/.*"
-      - "^virtual_live/select/banner/.*"
-      - "^home/banner/.*"
-      - "^music/.*"
-      - "^honor/.*"
-      - "^rank_live/honor/.*"
-      - "^bonds_honor/.*"
-      - "^sound/.*"
-      - "^character/character_select"
-      - "^stamp/.*"
-      - "^thumbnail/.*"
-      - "^scenario/.*"
-      - "^virtual_live/mc/scenario/.*"
-      - "^live/2dmode/.*"
-      - ".*"
-    export_usm_files: true
-    decode_usm_files: true
-    export_acb_files: true
-    decode_acb_files: true
-    decode_hca_files: true
-    convert_photo_to_webp: false
-    remove_png: false
-    convert_video_to_mp4: true
-    direct_usm_to_mp4_with_ffmpeg: false
-    remove_m2v: true
-    convert_audio_to_mp3: true
-    convert_wav_to_flac: false
-    remove_wav: true
-    upload_to_cloud: false
-    remove_local_after_upload: false
-
-  # Korean server (kr)
-  kr:
-    enabled: false
-    export_by_category: false
-    nuverse_asset_version_url: "https://lf16-mkkr.bytedgame.com/obj/rt-game-alisg/gdl_app_292248/Oversea/{app_version}/Release/kr_online/ios/version"
-    nuverse_override_app_version: "5.2.0"
-    asset_info_url_template: "https://lf16-mkkr.bytedgame.com/obj/sf-game-alisg/gdl_app_292248/AssetBundle/{app_version}/Release/kr_online/ios{asset_version}/AssetBundleInfoNew.json"
-    asset_url_template: "https://lf16-mkkr.bytedgame.com/obj/sf-game-alisg/gdl_app_292248/AssetBundle/{app_version}/Release/kr_online/{bundle_path}"
-    required_cookies: false
-    aes_key_hex: ""
-    aes_iv_hex: ""
-    unity_version: "2022.3.21f1"
-    asset_save_dir: "./Data/kr-assets"
-    downloaded_asset_record_file: "./Data/kr-assets/downloaded_assets.json"
-    start_app_regexes:
-      - "bonds_honor"
-      - "honor"
-      - "rank_live"
-      - "music"
-    ondemand_regexes:
-      - "mysekai"
-    skip_regexes: []
-    download_priority_list:
-      - "^character/member.*"
-      - "^event/.*"
-      - "^gacha/.*"
-      - "^virtual_live/select/banner/.*"
-      - "^home/banner/.*"
-      - "^music/.*"
-      - "^honor/.*"
-      - "^rank_live/honor/.*"
-      - "^bonds_honor/.*"
-      - "^sound/.*"
-      - "^character/character_select"
-      - "^stamp/.*"
-      - "^thumbnail/.*"
-      - "^scenario/.*"
-      - "^virtual_live/mc/scenario/.*"
-      - "^live/2dmode/.*"
-      - ".*"
-    export_usm_files: true
-    decode_usm_files: true
-    export_acb_files: true
-    decode_acb_files: true
-    decode_hca_files: true
-    convert_photo_to_webp: false
-    remove_png: false
-    convert_video_to_mp4: true
-    direct_usm_to_mp4_with_ffmpeg: false
-    remove_m2v: true
-    convert_audio_to_mp3: true
-    convert_wav_to_flac: false
-    remove_wav: true
-    upload_to_cloud: false
-    remove_local_after_upload: false
-
-  # Chinese server (cn)
   cn:
     enabled: false
-    export_by_category: false
-    nuverse_asset_version_url: "https://lf3-mkcncdn-tos.dailygn.com/obj/rt-game-lf/gdl_app_5236/Mainland/{app_version}/Release/cn_online/ios/version"
-    nuverse_override_app_version: "5.2.0"
-    asset_info_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/ios{asset_version}/AssetBundleInfoNew.json"
-    asset_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/{bundle_path}"
-    required_cookies: false
-    aes_key_hex: ""
-    aes_iv_hex: ""
-    unity_version: "2022.3.21f1"
-    asset_save_dir: "./Data/cn-assets"
-    downloaded_asset_record_file: "./Data/cn-assets/downloaded_assets.json"
-    start_app_regexes: # fill [] to disable download any startapp assets
-      # - ".*" # download all startapp assets
-      # - "bonds_honor"
-      # - "honor"
-      # - "rank_live"
-      # - "^music/short"
-      # - "mysekai/sound/se/fixture/toaster"
-      # - "^character/member.*"
-    ondemand_regexes:   # fill [] to disable download any ondemand assets
-      - "music/long"
-      # - "^movie/gacha"
-    skip_regexes: []
-    download_priority_list:
-      - "^character/member.*"
-      - "^event/.*"
-      - "^gacha/.*"
-      - "^virtual_live/select/banner/.*"
-      - "^home/banner/.*"
-      - "^music/.*"
-      - "^honor/.*"
-      - "^rank_live/honor/.*"
-      - "^bonds_honor/.*"
-      - "^sound/.*"
-      - "^character/character_select"
-      - "^stamp/.*"
-      - "^thumbnail/.*"
-      - "^scenario/.*"
-      - "^virtual_live/mc/scenario/.*"
-      - "^live/2dmode/.*"
-      - ".*"
-    export_usm_files: true
-    decode_usm_files: true
-    export_acb_files: true
-    decode_acb_files: true
-    decode_hca_files: true
-    convert_photo_to_webp: false
-    remove_png: false
-    convert_video_to_mp4: true
-    direct_usm_to_mp4_with_ffmpeg: false
-    remove_m2v: true
-    convert_audio_to_mp3: true
-    convert_wav_to_flac: false
-    remove_wav: true
-    upload_to_cloud: false
-    remove_local_after_upload: false
-
-# Remote storage configurations (optional)
-# remote_storages:
-#   - type: "s3"
-#     endpoint: your-s3-server
-#     path_style: true
-#     region: us-east-1
-#     ssl: true
-#     access_key: s3-key
-#     secret_key: s3-token
-#     bucket: sekai-{server}-assets
-#     acl_public: false
+    provider:
+      kind: nuverse
+      asset_version_url: "https://lf3-mkcncdn-tos.dailygn.com/obj/rt-game-lf/gdl_app_5236/Mainland/{app_version}/Release/cn_online/ios/version"
+      app_version: "5.2.0"
+      asset_info_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/ios{asset_version}/AssetBundleInfoNew.json"
+      asset_bundle_url_template: "https://lf3-mkcncdn-tos.dailygn.com/obj/sf-game-lf/gdl_app_5236/AssetBundle/{app_version}/Release/cn_online/{bundle_path}"
+      required_cookies: false
+    crypto:
+      aes_key_hex: ""
+      aes_iv_hex: ""
+    runtime:
+      unity_version: "2022.3.21f1"
+    paths:
+      asset_save_dir: "./Data/cn-assets"
+      downloaded_asset_record_file: "./Data/cn-assets/downloaded_assets.json"
+    filters:
+      start_app: []
+      on_demand:
+        - "music/long"
+      skip: []
+      priority:
+        - "^music/.*"
+        - ".*"
+    export:
+      by_category: false
+      usm:
+        export: true
+        decode: true
+      acb:
+        export: true
+        decode: true
+      hca:
+        decode: true
+      images:
+        convert_to_webp: false
+        remove_png: false
+      video:
+        convert_to_mp4: true
+        direct_usm_to_mp4_with_ffmpeg: false
+        remove_m2v: true
+      audio:
+        convert_to_mp3: true
+        convert_to_flac: false
+        remove_wav: true
+    upload:
+      enabled: false
+      remove_local_after_upload: false
