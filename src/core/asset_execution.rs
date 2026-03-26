@@ -510,12 +510,14 @@ impl AssetExecutionContext {
                 asset_info_url_template,
                 ..
             } => {
+                // For nuverse, always fetch the version from asset_version_url.
+                // The incoming request.asset_version is intentionally ignored here
+                // to match Go reference behavior.
                 let version_url = asset_version_url.replace("{app_version}", app_version);
-                let resolved_version = self.request.asset_version.clone().unwrap_or(
+                let resolved_version =
                     String::from_utf8_lossy(&self.get_with_retry(&version_url).await?)
                         .trim()
-                        .to_string(),
-                );
+                        .to_string();
                 self.resolved_asset_version = Some(resolved_version.clone());
                 Ok(asset_info_url_template
                     .replace("{app_version}", app_version)
