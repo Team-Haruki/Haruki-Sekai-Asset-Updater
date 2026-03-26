@@ -41,7 +41,8 @@ impl<'de> Deserialize<'de> for AssetCategory {
     where
         D: serde::Deserializer<'de>,
     {
-        let raw = String::deserialize(deserializer)?;
+        // Treat nil/null as Other("") — matches Go's zero-value coercion.
+        let raw = Option::<String>::deserialize(deserializer)?.unwrap_or_default();
         Ok(match raw.as_str() {
             "StartApp" | "startApp" => Self::StartApp,
             "OnDemand" | "onDemand" => Self::OnDemand,
@@ -50,15 +51,29 @@ impl<'de> Deserialize<'de> for AssetCategory {
     }
 }
 
+/// Deserializes a msgpack/JSON null or missing value as an empty String.
+/// Go silently coerces nil → zero value for non-pointer types; this helper
+/// mirrors that behavior for String fields.
+fn de_null_as_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetBundleDetail {
-    #[serde(rename = "bundleName")]
+    #[serde(rename = "bundleName", deserialize_with = "de_null_as_empty_string")]
     pub bundle_name: String,
-    #[serde(rename = "cacheFileName")]
+    #[serde(rename = "cacheFileName", deserialize_with = "de_null_as_empty_string")]
     pub cache_file_name: String,
-    #[serde(rename = "cacheDirectoryName")]
+    #[serde(
+        rename = "cacheDirectoryName",
+        deserialize_with = "de_null_as_empty_string"
+    )]
     pub cache_directory_name: String,
-    #[serde(rename = "hash")]
+    // nuverse regions use `crc` instead of `hash`; the server may send nil here.
+    #[serde(rename = "hash", deserialize_with = "de_null_as_empty_string")]
     pub hash: String,
     #[serde(rename = "category")]
     pub category: AssetCategory,

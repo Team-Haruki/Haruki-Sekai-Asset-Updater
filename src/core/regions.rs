@@ -93,38 +93,26 @@ pub fn build_url_preview(region: &RegionConfig, request: &AssetUpdateRequest) ->
                 notes
                     .push("region requires runtime cookies before downloads can start".to_string());
             }
-
-            if request.asset_version.is_none() {
-                notes.push(
-                    "asset_version is resolved at runtime from the provider lookup URL".to_string(),
-                );
-            }
+            // For nuverse, asset_version is ALWAYS fetched from asset_version_url at runtime;
+            // any asset_version provided in the request is ignored.
+            notes.push(
+                "asset_version is always resolved at runtime from the provider lookup URL"
+                    .to_string(),
+            );
 
             UrlPreview {
                 provider_kind: "nuverse".to_string(),
                 asset_info_url: Some(
                     asset_info_url_template
                         .replace("{app_version}", app_version)
-                        .replace(
-                            "{asset_version}",
-                            request
-                                .asset_version
-                                .as_deref()
-                                .unwrap_or("<resolved-asset-version>"),
-                        ),
+                        .replace("{asset_version}", "<resolved-at-runtime>"),
                 ),
                 asset_version_lookup_url: Some(
                     asset_version_url.replace("{app_version}", app_version),
                 ),
                 asset_bundle_url_template: asset_bundle_url_template
                     .replace("{app_version}", app_version)
-                    .replace(
-                        "{asset_version}",
-                        request
-                            .asset_version
-                            .as_deref()
-                            .unwrap_or("<resolved-asset-version>"),
-                    ),
+                    .replace("{asset_version}", "<resolved-at-runtime>"),
                 notes,
             }
         }
