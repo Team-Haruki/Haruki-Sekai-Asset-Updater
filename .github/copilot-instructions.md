@@ -103,9 +103,46 @@
 - 在 async 请求路径里尽量避免同步阻塞文件系统操作。
 - 新测试优先写稳定的轮询/等待逻辑，不要依赖很脆弱的固定 sleep。
 
-## 8. 提交前必须满足
+## 8. Git commit 规范
 
-如果 Copilot 给出“完成版”代码，默认应满足：
+所有 commit **必须** 遵循以下格式：
+
+```
+[Type] Short description starting with capital letter
+```
+
+| Type      | 用途                           |
+|-----------|-------------------------------|
+| `[Feat]`  | 新功能或新能力                  |
+| `[Fix]`   | Bug 修复                       |
+| `[Chore]` | 维护、重构、依赖或构建变更       |
+| `[Docs]`  | 仅文档变更                     |
+
+规则：
+
+- 描述以**大写字母**开头。
+- 使用祈使语气（`Add ...` 而不是 `Added ...`）。
+- 末尾不加句号。
+- 标题行不超过 ~70 字符。
+- 代理生成的 commit **必须** 在 commit body 中添加 `Co-Authored-By` 署名，标明自己的身份。
+
+示例：
+
+```
+[Feat] Add batch save for download asset
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+```
+[Fix] Nuverse parse issue
+
+Co-Authored-By: GitHub Copilot <noreply@github.com>
+```
+
+## 9. 提交前必须满足
+
+如果 Copilot 给出”完成版”代码，默认应满足：
 
 ```bash
 cargo fmt
@@ -115,7 +152,7 @@ cargo test
 
 如果做不到，应明确指出是哪里还没过，而不是假设可用。
 
-## 9. 文档更新要求
+## 10. 文档更新要求
 
 以下情况要同步更新文档：
 
@@ -129,5 +166,6 @@ cargo test
 
 - `README.md`
 - `.env.example`
+- `CLAUDE.md`
 - `AGENTS.md`
 - 本文件

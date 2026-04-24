@@ -92,8 +92,49 @@ cargo test
   确认 `tests/cli.rs` 通过。
 - HTTP/任务流：
   确认 `tests/api.rs` 通过。
+- 日志：
+  确认 `tests/logging.rs` 通过。
+- AssetStudio 集成（CI 可选）：
+  确认 `tests/assetstudio_real.rs` 通过。
 
-## 7. 对代理的特殊要求
+## 7. Git commit 规范
+
+所有 commit **必须** 遵循以下格式：
+
+```
+[Type] Short description starting with capital letter
+```
+
+| Type      | 用途                           |
+|-----------|-------------------------------|
+| `[Feat]`  | 新功能或新能力                  |
+| `[Fix]`   | Bug 修复                       |
+| `[Chore]` | 维护、重构、依赖或构建变更       |
+| `[Docs]`  | 仅文档变更                     |
+
+规则：
+
+- 描述以**大写字母**开头。
+- 使用祈使语气（`Add ...` 而不是 `Added ...`）。
+- 末尾不加句号。
+- 标题行不超过 ~70 字符。
+- 代理生成的 commit **必须** 在 commit body 中添加 `Co-Authored-By` 署名，标明自己的身份。
+
+示例：
+
+```
+[Feat] Add batch save for download asset
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+```
+[Fix] Nuverse parse issue
+
+Co-Authored-By: GitHub Copilot <noreply@github.com>
+```
+
+## 8. 对代理的特殊要求
 
 - 不要重新引入 Go 代码、Go 工具链或 Go 配置。
 - 不要把一次性调试输出、手工 smoke 配置、临时导出目录提交进仓库。
@@ -104,9 +145,9 @@ cargo test
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
 
-## 8. 推荐工作流
+## 9. 推荐工作流
 
-1. 先阅读 `README.md` 和本文件。
+1. 先阅读 `README.md`、`CLAUDE.md` 和本文件。
 2. 只在 Rust 结构内工作。
 3. 修改后先跑 `cargo fmt`。
 4. 再跑 `cargo clippy`。
