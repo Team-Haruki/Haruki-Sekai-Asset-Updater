@@ -12,6 +12,10 @@ on:
       - "Cargo.lock"
       - "docs/migration/**"
       - "haruki-asset-configs.example.yaml"
+      - "README.md"
+      - "CLAUDE.md"
+      - "AGENTS.md"
+      - ".github/copilot-instructions.md"
   pull_request:
     paths:
       - ".github/workflows/rust-ci.yml"
@@ -21,6 +25,10 @@ on:
       - "Cargo.lock"
       - "docs/migration/**"
       - "haruki-asset-configs.example.yaml"
+      - "README.md"
+      - "CLAUDE.md"
+      - "AGENTS.md"
+      - ".github/copilot-instructions.md"
   workflow_dispatch:
     inputs:
       run_assetstudio:
@@ -29,9 +37,15 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  rust-tests:
-    name: Rust Tests
+  rust-checks:
+    name: Rust Checks
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -42,18 +56,26 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
       - name: Run Rust test suite
         run: cargo test
 
   assetstudio-integration:
     name: AssetStudio Integration
-    needs: rust-tests
+    needs: rust-checks
     runs-on: ubuntu-latest
     if: ${{ vars.ENABLE_RUST_ASSETSTUDIO_CI == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_assetstudio) }}
     defaults:
