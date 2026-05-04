@@ -9,7 +9,7 @@ license = "MIT"
 aes = "0.8.4"
 axum = { version = "0.8.8", features = ["macros", "json"] }
 aws-config = "1.8.15"
-aws-sdk-s3 = "1.127.0"
+aws-sdk-s3 = { version = "1.127.0", default-features = false, features = ["default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
 cbc = "0.1.2"
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
 clap = { version = "4.6.0", features = ["derive"] }
