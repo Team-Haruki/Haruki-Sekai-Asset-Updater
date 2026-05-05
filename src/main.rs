@@ -11,48 +11,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _logging_guards = init_logging(&config)?;
 
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
-    write_startup_hint(&config, &bind_addr)?;
-    let state = AppState::new(config.clone());
-    let router = build_router(state);
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-
     info!(
         bind_addr = %bind_addr,
+        config_version = config.config_version,
         enabled_regions = ?config.enabled_regions(),
         "starting haruki-sekai-asset-updater"
     );
+
+    let state = AppState::new(config.clone());
+    let router = build_router(state);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let local_addr = listener
+        .local_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| bind_addr.clone());
+
+    info!(addr = %local_addr, "listening at http://{local_addr}");
 
     axum::serve(listener, router.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    Ok(())
-}
-
-fn write_startup_hint(config: &AppConfig, bind_addr: &str) -> Result<(), std::io::Error> {
-    let file_path = config
-        .logging
-        .file
-        .as_deref()
-        .map(str::trim)
-        .filter(|path| !path.is_empty());
-
-    if let Some(file_path) = file_path {
-        let path = std::path::Path::new(file_path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        use std::io::Write;
-        writeln!(
-            file,
-            "starting haruki-sekai-asset-updater bind_addr={bind_addr}"
-        )?;
-    }
-
+    info!("haruki-sekai-asset-updater shutdown complete");
     Ok(())
 }
 
@@ -80,4 +60,6 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
+
+    info!("shutdown signal received");
 }

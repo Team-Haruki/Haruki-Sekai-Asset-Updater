@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{sleep, timeout, Duration};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::core::asset_execution::{AssetExecutionContext, ExecutionProgressUpdate};
@@ -15,6 +16,30 @@ use crate::core::models::{
 };
 use crate::core::pipeline::build_execution_plan;
 use crate::core::regions::{build_url_preview, select_region};
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct JobListEntry {
+    pub id: Uuid,
+    pub region: String,
+    pub status: JobStatus,
+    pub dry_run: bool,
+    pub asset_version: Option<String>,
+    pub asset_hash: Option<String>,
+    pub message: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct JobListSummary {
+    pub total: usize,
+    pub queued: Vec<Uuid>,
+    pub running: Vec<Uuid>,
+    pub completed: Vec<Uuid>,
+    pub failed: Vec<Uuid>,
+    pub cancelled: Vec<Uuid>,
+    pub jobs: Vec<JobListEntry>,
+}
 
 #[derive(Clone)]
 pub struct JobManager {
@@ -47,6 +72,15 @@ impl JobManager {
             flags.insert(snapshot.id, Arc::new(AtomicBool::new(false)));
         }
 
+        info!(
+            job_id = %snapshot.id,
+            region = %snapshot.region,
+            asset_version = ?snapshot.asset_version,
+            asset_hash = ?snapshot.asset_hash,
+            dry_run = snapshot.dry_run,
+            "job accepted and queued"
+        );
+
         self.spawn_planning(snapshot.id, request);
         Ok(snapshot)
     }
@@ -54,6 +88,41 @@ impl JobManager {
     pub async fn get(&self, id: Uuid) -> Option<JobSnapshot> {
         let jobs = self.jobs.read().await;
         jobs.get(&id).cloned()
+    }
+
+    pub async fn list(&self) -> JobListSummary {
+        let jobs = self.jobs.read().await;
+        let mut entries: Vec<JobListEntry> = jobs
+            .values()
+            .map(|job| JobListEntry {
+                id: job.id,
+                region: job.region.clone(),
+                status: job.status.clone(),
+                dry_run: job.dry_run,
+                asset_version: job.asset_version.clone(),
+                asset_hash: job.asset_hash.clone(),
+                message: job.message.clone(),
+                created_at: job.created_at,
+                updated_at: job.updated_at,
+            })
+            .collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
+
+        let mut summary = JobListSummary::default();
+        for entry in &entries {
+            match entry.status {
+                JobStatus::Queued => summary.queued.push(entry.id),
+                JobStatus::Planning | JobStatus::WaitingForPipeline | JobStatus::Running => {
+                    summary.running.push(entry.id)
+                }
+                JobStatus::Completed => summary.completed.push(entry.id),
+                JobStatus::Failed => summary.failed.push(entry.id),
+                JobStatus::Cancelled => summary.cancelled.push(entry.id),
+            }
+        }
+        summary.total = entries.len();
+        summary.jobs = entries;
+        summary
     }
 
     pub async fn cancel(&self, id: Uuid) -> Option<Result<JobSnapshot, String>> {
@@ -84,6 +153,7 @@ impl JobManager {
                     "cancellation requested".to_string(),
                 );
                 job.updated_at = chrono::Utc::now();
+                warn!(job_id = %id, "cancellation requested");
                 Some(Ok(job.clone()))
             }
         }
@@ -150,6 +220,7 @@ impl JobManager {
                                         JobPhase::Completed,
                                         "dry-run plan completed".to_string(),
                                     );
+                                    info!(job_id = %id, region = %job.region, "dry-run plan completed");
                                 } else {
                                     job.status = JobStatus::Running;
                                     job.message = "job planned; starting execution".to_string();
@@ -158,6 +229,7 @@ impl JobManager {
                                         JobPhase::PlanningDownloads,
                                         "job planned; starting execution".to_string(),
                                     );
+                                    info!(job_id = %id, region = %job.region, "job planned; starting execution");
                                 }
                                 job.updated_at = chrono::Utc::now();
                                 false
@@ -228,6 +300,7 @@ impl JobManager {
                                                 "job completed".to_string(),
                                             );
                                             job.updated_at = chrono::Utc::now();
+                                            info!(job_id = %id, region = %job.region, "job completed");
                                             false
                                         }
                                     } else {
@@ -257,6 +330,7 @@ impl JobManager {
             };
 
             if let Some(message) = planning_message {
+                error!(job_id = %id, error = %message, "job failed");
                 let mut job_map = jobs.write().await;
                 if let Some(job) = job_map.get_mut(&id) {
                     job.status = JobStatus::Failed;
@@ -271,6 +345,7 @@ impl JobManager {
 }
 
 async fn finish_failed(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid, message: String) {
+    error!(job_id = %id, error = %message, "job failed");
     let mut job_map = jobs.write().await;
     if let Some(job) = job_map.get_mut(&id) {
         job.status = JobStatus::Failed;
@@ -286,6 +361,7 @@ async fn finish_cancelled(
     id: Uuid,
     message: String,
 ) {
+    warn!(job_id = %id, reason = %message, "job cancelled");
     let mut job_map = jobs.write().await;
     if let Some(job) = job_map.get_mut(&id) {
         job.status = JobStatus::Cancelled;

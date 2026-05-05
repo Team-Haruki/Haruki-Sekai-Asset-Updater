@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::core::config::AppConfig;
 use crate::core::errors::RegionError;
 use crate::core::models::{AssetUpdateRequest, JobSnapshot};
-use crate::service::jobs::JobManager;
+use crate::service::jobs::{JobListSummary, JobManager};
 use crate::service::logging::access_log_middleware;
 
 #[derive(Clone)]
@@ -37,6 +37,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v2/assets/update", post(submit_update))
+        .route("/v2/jobs", get(list_jobs))
         .route("/v2/jobs/{job_id}", get(get_job))
         .route("/v2/jobs/{job_id}/cancel", post(cancel_job))
         .layer(from_fn_with_state(state.clone(), access_log_middleware))
@@ -101,6 +102,15 @@ async fn get_job(
         .await
         .ok_or_else(|| ApiError::NotFound(format!("job `{job_id}` not found")))?;
     Ok(Json(JobResponse { job }))
+}
+
+async fn list_jobs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<JobListSummary>, ApiError> {
+    authorize(&state.config, &headers)?;
+    let summary = state.jobs.list().await;
+    Ok(Json(summary))
 }
 
 async fn cancel_job(
