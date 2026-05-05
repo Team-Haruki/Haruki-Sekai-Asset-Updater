@@ -207,10 +207,9 @@ async fn submit_update_accepts_and_job_can_be_queried() {
 
 #[tokio::test]
 async fn submit_update_non_dry_run_executes_pipeline() {
-    use aes::cipher::block_padding::Pkcs7;
-    use aes::cipher::{BlockEncryptMut, KeyIvInit};
     use axum::routing::get;
     use axum::Router;
+    use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
     use haruki_sekai_asset_updater::core::asset_execution::{
         AssetBundleDetail, AssetBundleInfo, AssetCategory,
     };
@@ -229,7 +228,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
         padded.resize(original_len + padding, 0);
         Aes128CbcEnc::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_mut::<Pkcs7>(&mut padded, original_len)
+            .encrypt_padded::<Pkcs7>(&mut padded, original_len)
             .unwrap()
             .to_vec()
     }

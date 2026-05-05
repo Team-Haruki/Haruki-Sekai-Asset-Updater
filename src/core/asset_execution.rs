@@ -4,8 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes::cipher::block_padding::Pkcs7;
-use aes::cipher::{BlockDecryptMut, KeyIvInit};
+use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
 use chrono::FixedOffset;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CONNECTION, COOKIE,
@@ -769,15 +768,15 @@ pub fn decrypt_asset_bundle_info(
     let decrypted = match key.len() {
         16 => Aes128CbcDec::new_from_slices(&key, &iv)
             .map_err(|err| AssetExecutionError::AssetInfoDecode(err.to_string()))?
-            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .decrypt_padded::<Pkcs7>(&mut buf)
             .map_err(|err| AssetExecutionError::AssetInfoDecode(err.to_string()))?,
         24 => Aes192CbcDec::new_from_slices(&key, &iv)
             .map_err(|err| AssetExecutionError::AssetInfoDecode(err.to_string()))?
-            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .decrypt_padded::<Pkcs7>(&mut buf)
             .map_err(|err| AssetExecutionError::AssetInfoDecode(err.to_string()))?,
         32 => Aes256CbcDec::new_from_slices(&key, &iv)
             .map_err(|err| AssetExecutionError::AssetInfoDecode(err.to_string()))?
-            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .decrypt_padded::<Pkcs7>(&mut buf)
             .map_err(|err| AssetExecutionError::AssetInfoDecode(err.to_string()))?,
         _ => {
             return Err(AssetExecutionError::AssetInfoDecode(format!(
@@ -859,13 +858,12 @@ fn time_arg_jst() -> String {
 
 #[cfg(test)]
 mod tests {
-    use aes::cipher::block_padding::Pkcs7;
-    use aes::cipher::{BlockEncryptMut, KeyIvInit};
     use axum::body::Body;
     use axum::http::header::{COOKIE, SET_COOKIE};
     use axum::http::HeaderMap;
     use axum::routing::{get, post};
     use axum::Router;
+    use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -924,7 +922,7 @@ mod tests {
         padded.resize(original_len + padding, 0);
         let encrypted = Aes128CbcEnc::new_from_slices(&key, &iv)
             .unwrap()
-            .encrypt_padded_mut::<Pkcs7>(&mut padded, original_len)
+            .encrypt_padded::<Pkcs7>(&mut padded, original_len)
             .unwrap()
             .to_vec();
         encrypted
