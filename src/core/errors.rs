@@ -104,8 +104,8 @@ pub enum GitSyncError {
     Disabled,
     #[error("git chart-hash sync requires repository_dir")]
     MissingRepositoryDir,
-    #[error("git operation failed: {0}")]
-    Git(#[from] git2::Error),
+    #[error("git {action} failed: {message}")]
+    GitCommand { action: String, message: String },
     #[error("io error at {path}: {source}")]
     Io {
         path: PathBuf,

@@ -19,7 +19,6 @@ cbc = { version = "0.2.0", features = ["alloc"] }
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 cridecoder = "0.1.1"
-git2 = "0.20.4"
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
 mime_guess = "2.0.5"

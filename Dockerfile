@@ -26,7 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     libicu76 \
-    libxml2 && \
+    libxml2 \
+    git \
+    gnupg \
+    openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

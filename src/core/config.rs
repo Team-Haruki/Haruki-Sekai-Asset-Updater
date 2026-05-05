@@ -370,6 +370,15 @@ pub struct GitSyncConfig {
     pub chart_hashes: ChartHashConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GitSigningFormat {
+    #[default]
+    #[serde(alias = "openpgp")]
+    Gpg,
+    Ssh,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ChartHashConfig {
@@ -378,6 +387,10 @@ pub struct ChartHashConfig {
     pub username: Option<String>,
     pub email: Option<String>,
     pub password: Option<String>,
+    pub sign_commits: bool,
+    pub signing_format: GitSigningFormat,
+    pub signing_key: Option<String>,
+    pub signing_program: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
