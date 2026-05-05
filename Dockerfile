@@ -18,7 +18,7 @@ RUN cd AssetStudio/AssetStudioCLI && \
     -p:PublishSingleFile=true \
     -p:IncludeNativeLibrariesForSelfExtract=true
 
-FROM mwader/static-ffmpeg:7.1.1 AS ffmpeg-builder
+FROM mwader/static-ffmpeg:8.1.1 AS ffmpeg-builder
 
 FROM debian:trixie-slim
 
