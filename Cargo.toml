@@ -33,7 +33,7 @@ tokio = { version = "1.50.0", features = ["fs", "macros", "process", "rt-multi-t
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
-uuid = { version = "1.22.0", features = ["serde", "v4"] }
+uuid = { version = "1.23.1", features = ["serde", "v4"] }
 yaml_serde = "0.10.4"
 
 [dev-dependencies]
