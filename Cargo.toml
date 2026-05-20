@@ -29,7 +29,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 sonic-rs = "0.5.8"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1.50.0", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.52.3", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
