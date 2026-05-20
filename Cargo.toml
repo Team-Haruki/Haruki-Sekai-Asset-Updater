@@ -39,3 +39,6 @@ yaml_serde = "0.10.4"
 [dev-dependencies]
 sha2 = "0.11.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+[profile.release]
+lto = "thin"
