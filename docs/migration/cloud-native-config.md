@@ -125,8 +125,9 @@ execution:
 inspection; successful files are removed when cleanup is enabled.
 When `export_dir` is set for HTTP jobs, exports are staged there instead of
 writing directly to `paths.asset_save_dir`. `{job_id}` is expanded per job; if
-it is omitted from the template, the job id is appended automatically. Staged
-exports are cleaned after a successful upload job when
+it is omitted from the template, the job id is appended automatically. In this
+mode `paths.asset_save_dir` is optional for live HTTP jobs. Staged exports are
+cleaned after a successful upload job when
 `cleanup_exports_on_success` is enabled. Failed or non-upload jobs keep their
 staged exports for inspection.
 

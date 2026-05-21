@@ -764,11 +764,6 @@ impl AssetExecutionContext {
         task: &DownloadTask,
         workspace_id: Option<&str>,
     ) -> Result<(), AssetExecutionError> {
-        let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
-            AssetExecutionError::MissingAssetSaveDir {
-                region: self.region_name.clone(),
-            }
-        })?;
         let bundle_url = self.render_bundle_url(task)?;
         let body = self.get_with_retry(&bundle_url).await?;
         let deobfuscated = deobfuscate(&body);
@@ -803,8 +798,11 @@ impl AssetExecutionContext {
             app_config,
             &self.region_name,
             workspace_id,
-            Path::new(&asset_save_dir),
-        );
+            self.region.paths.asset_save_dir.as_deref().map(Path::new),
+        )
+        .ok_or_else(|| AssetExecutionError::MissingAssetSaveDir {
+            region: self.region_name.clone(),
+        })?;
         let export_result = extract_unity_asset_bundle(
             app_config,
             &self.region_name,
@@ -928,10 +926,10 @@ fn bundle_export_output_dir(
     app_config: &AppConfig,
     region_name: &str,
     workspace_id: Option<&str>,
-    asset_save_dir: &Path,
-) -> PathBuf {
+    asset_save_dir: Option<&Path>,
+) -> Option<PathBuf> {
     staged_export_root(app_config, region_name, workspace_id)
-        .unwrap_or_else(|| asset_save_dir.to_path_buf())
+        .or_else(|| asset_save_dir.map(Path::to_path_buf))
 }
 
 fn staged_export_root(
@@ -1277,14 +1275,24 @@ mod tests {
                 &config,
                 "jp",
                 Some("job-1"),
-                std::path::Path::new("/persistent/jp")
+                Some(std::path::Path::new("/persistent/jp"))
             ),
-            std::path::Path::new("/tmp/haruki-exports/jp/job-1")
+            Some(std::path::Path::new("/tmp/haruki-exports/jp/job-1").to_path_buf())
         );
         assert_eq!(
-            bundle_export_output_dir(&config, "jp", None, std::path::Path::new("/persistent/jp")),
-            std::path::Path::new("/persistent/jp")
+            bundle_export_output_dir(&config, "jp", Some("job-1"), None),
+            Some(std::path::Path::new("/tmp/haruki-exports/jp/job-1").to_path_buf())
         );
+        assert_eq!(
+            bundle_export_output_dir(
+                &config,
+                "jp",
+                None,
+                Some(std::path::Path::new("/persistent/jp"))
+            ),
+            Some(std::path::Path::new("/persistent/jp").to_path_buf())
+        );
+        assert_eq!(bundle_export_output_dir(&config, "jp", None, None), None);
     }
 
     #[test]
@@ -1475,6 +1483,145 @@ mod tests {
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
         let summary = executor.execute(&config, None, None, None).await.unwrap();
+        assert_eq!(summary.completed_downloads, 1);
+
+        let record = load_download_record(&record_file).unwrap();
+        assert_eq!(record.get("start/a").map(String::as_str), Some("hash-a"));
+    }
+
+    #[tokio::test]
+    async fn non_dry_run_can_use_staged_export_without_asset_save_dir() {
+        let temp = tempdir().unwrap();
+        let record_file = temp.path().join("downloaded_assets.json");
+        let work_dir = temp.path().join("work");
+        let export_dir = temp
+            .path()
+            .join("exports")
+            .join("{region}")
+            .join("{job_id}");
+
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([(
+                "start/a".to_string(),
+                AssetBundleDetail {
+                    bundle_name: "start/a".to_string(),
+                    cache_file_name: "a".to_string(),
+                    cache_directory_name: "d".to_string(),
+                    hash: "hash-a".to_string(),
+                    category: AssetCategory::StartApp,
+                    crc: 123,
+                    file_size: 1,
+                    dependencies: Vec::new(),
+                    paths: Vec::new(),
+                    is_builtin: false,
+                    is_relocate: None,
+                    md5_hash: None,
+                    download_path: None,
+                },
+            )]),
+        };
+        let encrypted = encrypt_asset_info(&info);
+
+        let app = Router::new()
+            .route(
+                "/info/production/abc/1/hash",
+                get({
+                    let encrypted = encrypted.clone();
+                    move || async move {
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                            encrypted.clone(),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/bundle/start/a",
+                get(|| async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                        Body::from(vec![0x20, 0x00, 0x00, 0x00, b'B', b'U', b'N']),
+                    )
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut profile_hashes = BTreeMap::new();
+        profile_hashes.insert("production".to_string(), "abc".to_string());
+        let region = RegionConfig {
+            enabled: true,
+            provider: RegionProviderConfig::ColorfulPalette {
+                asset_info_url_template: format!(
+                    "http://{addr}/info/{{env}}/{{hash}}/{{asset_version}}/{{asset_hash}}"
+                ),
+                asset_bundle_url_template: format!("http://{addr}/bundle/{{bundle_path}}"),
+                profile: "production".to_string(),
+                profile_hashes,
+                required_cookies: false,
+                cookie_bootstrap_url: None,
+            },
+            crypto: crate::core::config::CryptoConfig {
+                aes_key_hex: Some(TEST_AES_KEY_HEX.to_string()),
+                aes_iv_hex: Some(TEST_AES_IV_HEX.to_string()),
+            },
+            runtime: RegionRuntimeConfig {
+                unity_version: "2022.3.21f1".to_string(),
+            },
+            paths: RegionPathsConfig {
+                asset_save_dir: None,
+                downloaded_asset_record_file: Some(record_file.to_string_lossy().into_owned()),
+                downloaded_asset_record_storage: None,
+            },
+            filters: crate::core::config::RegionFiltersConfig {
+                start_app: vec!["^start/".to_string()],
+                on_demand: Vec::new(),
+                skip: Vec::new(),
+                priority: vec!["^start/".to_string()],
+            },
+            ..RegionConfig::default()
+        };
+
+        let mut regions = BTreeMap::new();
+        regions.insert("jp".to_string(), region.clone());
+        let config = AppConfig {
+            regions,
+            execution: crate::core::config::ExecutionConfig {
+                workspace: RuntimeWorkspaceConfig {
+                    work_dir: Some(work_dir.to_string_lossy().into_owned()),
+                    cleanup_on_success: true,
+                    export_dir: Some(export_dir.to_string_lossy().into_owned()),
+                    cleanup_exports_on_success: true,
+                },
+                ..crate::core::config::ExecutionConfig::default()
+            },
+            tools: crate::core::config::ToolsConfig {
+                ffmpeg_path: "ffmpeg".to_string(),
+                asset_studio_cli_path: None,
+            },
+            git_sync: GitSyncConfig {
+                chart_hashes: ChartHashConfig::default(),
+            },
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+        };
+
+        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let summary = executor
+            .execute(&config, None, None, Some("job-1".to_string()))
+            .await
+            .unwrap();
         assert_eq!(summary.completed_downloads, 1);
 
         let record = load_download_record(&record_file).unwrap();

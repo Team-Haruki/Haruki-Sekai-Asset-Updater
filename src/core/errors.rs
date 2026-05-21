@@ -259,7 +259,7 @@ pub enum AssetExecutionError {
     HttpClient(String),
     #[error("HTTP request to {url} returned status {status}")]
     HttpStatus { url: String, status: u16 },
-    #[error("region `{region}` is missing asset_save_dir")]
+    #[error("region `{region}` is missing asset_save_dir and no staged export_dir is available")]
     MissingAssetSaveDir { region: String },
     #[error(
         "region `{region}` is missing download record storage or downloaded_asset_record_file"

@@ -112,6 +112,8 @@ regions:
     runtime:
       unity_version: "2022.3.21f1"
     paths:
+      # Optional for HTTP jobs when execution.workspace.export_dir is configured;
+      # otherwise used as the local export destination.
       asset_save_dir: "./Data/jp-assets"
       downloaded_asset_record_file: "./Data/jp-assets/downloaded_assets.json"
       # Prefer this in cloud-native deployments. The path is relative to the
