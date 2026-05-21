@@ -52,6 +52,7 @@ fn real_assetstudio_cli_exports_expected_file_when_configured() {
                     .to_string_lossy()
                     .into_owned(),
             ),
+            downloaded_asset_record_storage: None,
         },
         export: RegionExportConfig {
             by_category,
@@ -74,6 +75,7 @@ fn real_assetstudio_cli_exports_expected_file_when_configured() {
         upload: RegionUploadConfig {
             enabled: false,
             remove_local_after_upload: false,
+            providers: Vec::new(),
         },
         ..RegionConfig::default()
     };

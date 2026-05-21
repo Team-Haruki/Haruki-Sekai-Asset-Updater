@@ -41,6 +41,7 @@ fn test_config() -> AppConfig {
                 downloaded_asset_record_file: Some(
                     "./Data/jp-assets/downloaded_assets.json".to_string(),
                 ),
+                downloaded_asset_record_storage: None,
             },
             ..RegionConfig::default()
         },
@@ -321,6 +322,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
             paths: RegionPathsConfig {
                 asset_save_dir: Some(save_dir.to_string_lossy().into_owned()),
                 downloaded_asset_record_file: Some(record_file.to_string_lossy().into_owned()),
+                downloaded_asset_record_storage: None,
             },
             filters: haruki_sekai_asset_updater::core::config::RegionFiltersConfig {
                 start_app: vec!["^start/".to_string()],

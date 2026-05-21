@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
 use chrono::FixedOffset;
+use opendal::Operator;
 use reqwest::header::{
     HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, CONNECTION, COOKIE,
     SET_COOKIE, USER_AGENT,
@@ -16,13 +17,17 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
-use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
+use crate::core::download_records::{
+    load_download_record, load_download_record_from_storage, save_download_record,
+    save_download_record_to_storage, DownloadRecord,
+};
 use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::extract_unity_asset_bundle;
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
 use crate::core::regions::{compile_patterns, first_match_index, matches_any};
 use crate::core::retry::retry_async;
+use crate::core::storage::{build_storage_operator_target, resolve_storage_template};
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
@@ -113,6 +118,45 @@ struct DownloadTask {
     priority: usize,
 }
 
+#[derive(Clone)]
+enum DownloadRecordStore {
+    Local {
+        path: String,
+    },
+    Storage {
+        provider: String,
+        path: String,
+        operator: Operator,
+    },
+}
+
+impl DownloadRecordStore {
+    async fn load(&self) -> Result<DownloadRecord, crate::core::errors::DownloadRecordError> {
+        match self {
+            Self::Local { path } => load_download_record(path),
+            Self::Storage {
+                provider,
+                path,
+                operator,
+            } => load_download_record_from_storage(provider, operator, path).await,
+        }
+    }
+
+    async fn save(
+        &self,
+        record: &DownloadRecord,
+    ) -> Result<(), crate::core::errors::DownloadRecordError> {
+        match self {
+            Self::Local { path } => save_download_record(path, record),
+            Self::Storage {
+                provider,
+                path,
+                operator,
+            } => save_download_record_to_storage(provider, operator, path, record).await,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AssetExecutionContext {
     client: reqwest::Client,
@@ -199,15 +243,8 @@ impl AssetExecutionContext {
         cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<ExecutionSummary, AssetExecutionError> {
         self.ensure_not_cancelled(&cancel_flag)?;
-        let record_path = self
-            .region
-            .paths
-            .downloaded_asset_record_file
-            .clone()
-            .ok_or_else(|| AssetExecutionError::MissingAssetSaveDir {
-                region: self.region_name.clone(),
-            })?;
-        let mut downloaded_assets = load_download_record(&record_path)?;
+        let record_store = self.download_record_store(app_config)?;
+        let mut downloaded_assets = record_store.load().await?;
 
         Self::send_progress(
             &progress,
@@ -312,7 +349,7 @@ impl AssetExecutionContext {
                             batch = pending_save_count,
                             "batch-flushing download record"
                         );
-                        match save_download_record(&record_path, &downloaded_assets) {
+                        match record_store.save(&downloaded_assets).await {
                             Ok(()) => Self::send_progress(
                                 &progress,
                                 ExecutionProgressUpdate::RecordSaved {
@@ -358,7 +395,7 @@ impl AssetExecutionContext {
             },
         );
         self.ensure_not_cancelled(&cancel_flag)?;
-        save_download_record(&record_path, &downloaded_assets)?;
+        record_store.save(&downloaded_assets).await?;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::RecordSaved {
@@ -410,6 +447,48 @@ impl AssetExecutionContext {
         } else {
             Ok(())
         }
+    }
+
+    fn download_record_store(
+        &self,
+        app_config: &AppConfig,
+    ) -> Result<DownloadRecordStore, AssetExecutionError> {
+        if let Some(storage) = &self.region.paths.downloaded_asset_record_storage {
+            let provider = storage.provider.trim();
+            if provider.is_empty() {
+                return Err(AssetExecutionError::InvalidDownloadRecordStorage {
+                    region: self.region_name.clone(),
+                    message: "provider is empty".to_string(),
+                });
+            }
+
+            let path = normalize_download_record_storage_path(&storage.path, &self.region_name)
+                .ok_or_else(|| AssetExecutionError::InvalidDownloadRecordStorage {
+                    region: self.region_name.clone(),
+                    message: "path is empty".to_string(),
+                })?;
+            let target =
+                build_storage_operator_target(&app_config.storage, provider, &self.region_name)?;
+
+            return Ok(DownloadRecordStore::Storage {
+                provider: target.provider,
+                path,
+                operator: target.operator,
+            });
+        }
+
+        self.region
+            .paths
+            .downloaded_asset_record_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(|path| DownloadRecordStore::Local {
+                path: path.to_string(),
+            })
+            .ok_or_else(|| AssetExecutionError::MissingDownloadRecordPath {
+                region: self.region_name.clone(),
+            })
     }
 
     fn send_progress(
@@ -685,9 +764,7 @@ impl AssetExecutionContext {
         let body = self.get_with_retry(&bundle_url).await?;
         let deobfuscated = deobfuscate(&body);
 
-        let temp_file = std::env::temp_dir()
-            .join(&self.region_name)
-            .join(&task.bundle_path);
+        let temp_file = bundle_temp_file_path(app_config, &self.region_name, &task.bundle_path);
         if let Some(parent) = temp_file.parent() {
             std::fs::create_dir_all(parent).map_err(|source| {
                 AssetExecutionError::CreateTempDir {
@@ -718,9 +795,30 @@ impl AssetExecutionContext {
             category,
         )
         .await;
-        let _ = std::fs::remove_file(&temp_file);
+        if export_result.is_ok() && app_config.execution.workspace.cleanup_on_success {
+            let _ = std::fs::remove_file(&temp_file);
+        }
         export_result.map(|_| ()).map_err(Into::into)
     }
+}
+
+fn normalize_download_record_storage_path(raw_path: &str, region_name: &str) -> Option<String> {
+    let resolved = resolve_storage_template(raw_path, region_name);
+    let normalized = resolved.trim().trim_matches('/').replace('\\', "/");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn bundle_temp_file_path(app_config: &AppConfig, region_name: &str, bundle_path: &str) -> PathBuf {
+    let root = app_config
+        .execution
+        .workspace
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|work_dir| !work_dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    root.join(region_name).join(bundle_path)
 }
 
 pub async fn fetch_live_asset_bundle_info(
@@ -870,15 +968,16 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::core::config::{
-        AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionPathsConfig,
-        RegionProviderConfig, RegionRuntimeConfig,
+        AppConfig, ChartHashConfig, DownloadRecordStorageConfig, GitSyncConfig, RegionConfig,
+        RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig, RuntimeWorkspaceConfig,
+        StorageConfig, StorageProviderConfig,
     };
     use crate::core::download_records::load_download_record;
     use crate::core::models::AssetUpdateRequest;
 
     use super::{
-        decrypt_asset_bundle_info, deobfuscate, should_download_bundle, AssetBundleDetail,
-        AssetBundleInfo, AssetCategory, AssetExecutionContext,
+        bundle_temp_file_path, decrypt_asset_bundle_info, deobfuscate, should_download_bundle,
+        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -901,6 +1000,7 @@ mod tests {
                 downloaded_asset_record_file: Some(
                     "./Data/jp-assets/downloaded_assets.json".to_string(),
                 ),
+                downloaded_asset_record_storage: None,
             },
             filters: crate::core::config::RegionFiltersConfig {
                 start_app: vec!["^start/".to_string()],
@@ -926,6 +1026,88 @@ mod tests {
             .unwrap()
             .to_vec();
         encrypted
+    }
+
+    #[tokio::test]
+    async fn download_record_store_uses_opendal_provider_when_configured() {
+        let temp = tempdir().unwrap();
+        let state_root = temp.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
+        let mut region = test_region(RegionProviderConfig::default());
+        region.paths.downloaded_asset_record_file = None;
+        region.paths.downloaded_asset_record_storage = Some(DownloadRecordStorageConfig {
+            provider: "state".to_string(),
+            path: "records/{region}/downloaded_assets.json".to_string(),
+        });
+
+        let config = AppConfig {
+            storage: StorageConfig {
+                providers: vec![StorageProviderConfig {
+                    name: Some("state".to_string()),
+                    scheme: "fs".to_string(),
+                    root: Some(state_root.to_string_lossy().into_owned()),
+                    ..StorageProviderConfig::default()
+                }],
+            },
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: None,
+            asset_hash: None,
+            dry_run: false,
+        };
+
+        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let store = executor.download_record_store(&config).unwrap();
+        let mut record = BTreeMap::new();
+        record.insert("start/a".to_string(), "hash-a".to_string());
+
+        store.save(&record).await.unwrap();
+        let loaded = store.load().await.unwrap();
+
+        assert_eq!(loaded, record);
+        assert!(state_root
+            .join("records")
+            .join("jp")
+            .join("downloaded_assets.json")
+            .exists());
+    }
+
+    #[test]
+    fn bundle_temp_file_path_uses_configured_workspace_and_ignores_blank() {
+        let config = AppConfig {
+            execution: crate::core::config::ExecutionConfig {
+                workspace: RuntimeWorkspaceConfig {
+                    work_dir: Some("/tmp/haruki-work".to_string()),
+                    cleanup_on_success: false,
+                },
+                ..crate::core::config::ExecutionConfig::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            bundle_temp_file_path(&config, "jp", "music/a"),
+            std::path::Path::new("/tmp/haruki-work")
+                .join("jp")
+                .join("music/a")
+        );
+
+        let blank_config = AppConfig {
+            execution: crate::core::config::ExecutionConfig {
+                workspace: RuntimeWorkspaceConfig {
+                    work_dir: Some(" ".to_string()),
+                    cleanup_on_success: true,
+                },
+                ..crate::core::config::ExecutionConfig::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert!(
+            bundle_temp_file_path(&blank_config, "jp", "music/a").starts_with(std::env::temp_dir())
+        );
     }
 
     #[test]
@@ -1083,6 +1265,7 @@ mod tests {
             paths: RegionPathsConfig {
                 asset_save_dir: Some(save_dir.to_string_lossy().into_owned()),
                 downloaded_asset_record_file: Some(record_file.to_string_lossy().into_owned()),
+                downloaded_asset_record_storage: None,
             },
             filters: crate::core::config::RegionFiltersConfig {
                 start_app: vec!["^start/".to_string()],
@@ -1234,6 +1417,7 @@ mod tests {
             paths: RegionPathsConfig {
                 asset_save_dir: Some(save_dir.to_string_lossy().into_owned()),
                 downloaded_asset_record_file: Some(record_file.to_string_lossy().into_owned()),
+                downloaded_asset_record_storage: None,
             },
             filters: crate::core::config::RegionFiltersConfig {
                 start_app: Vec::new(),
@@ -1369,6 +1553,7 @@ mod tests {
             paths: RegionPathsConfig {
                 asset_save_dir: Some(save_dir.to_string_lossy().into_owned()),
                 downloaded_asset_record_file: Some(record_file.to_string_lossy().into_owned()),
+                downloaded_asset_record_storage: None,
             },
             filters: crate::core::config::RegionFiltersConfig {
                 start_app: vec!["^start/".to_string()],

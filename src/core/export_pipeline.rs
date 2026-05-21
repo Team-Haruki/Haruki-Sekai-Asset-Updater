@@ -14,7 +14,7 @@ use crate::core::media::{
     convert_m2v_to_mp4, convert_usm_to_mp4, convert_wav_to_flac, convert_wav_to_mp3, FrameRate,
 };
 use crate::core::retry::retry_async;
-use crate::core::storage::upload_to_all_storages;
+use crate::core::storage::{upload_to_all_storages, StorageUploadOptions};
 
 #[derive(Debug, Clone, Copy)]
 struct AssetStudioCliCapabilities {
@@ -184,9 +184,12 @@ pub async fn post_process_exported_files(
             region_name,
             upload_root,
             &files,
-            region.upload.remove_local_after_upload,
-            app_config.concurrency.upload,
-            &app_config.execution.retry,
+            StorageUploadOptions {
+                selected_providers: &region.upload.providers,
+                remove_local: region.upload.remove_local_after_upload,
+                concurrency: app_config.concurrency.upload,
+                retry: &app_config.execution.retry,
+            },
         )
         .await?;
         summary.uploaded_files = files;
@@ -843,6 +846,7 @@ mod tests {
                 downloaded_asset_record_file: Some(
                     "./Data/jp-assets/downloaded_assets.json".to_string(),
                 ),
+                downloaded_asset_record_storage: None,
             },
             export: RegionExportConfig {
                 audio: crate::core::config::AudioExportConfig {
@@ -860,6 +864,7 @@ mod tests {
             upload: RegionUploadConfig {
                 enabled: false,
                 remove_local_after_upload: false,
+                providers: Vec::new(),
             },
             ..RegionConfig::default()
         };

@@ -25,22 +25,30 @@ struct ResolvedStorageProvider {
 }
 
 #[derive(Clone)]
-struct StorageOperatorTarget {
-    provider: String,
-    operator: Operator,
+pub struct StorageOperatorTarget {
+    pub provider: String,
+    pub operator: Operator,
+}
+
+pub struct StorageUploadOptions<'a> {
+    pub selected_providers: &'a [String],
+    pub remove_local: bool,
+    pub concurrency: usize,
+    pub retry: &'a RetryConfig,
 }
 
 pub fn plan_storage_targets(
     storage: &StorageConfig,
     region_name: &str,
+    selected_providers: &[String],
 ) -> Result<Vec<StorageTargetPlan>, StorageError> {
-    storage
-        .providers
-        .iter()
+    selected_provider_configs(storage, selected_providers)?
+        .into_iter()
         .map(|provider| {
             let resolved = resolve_storage_provider(provider, region_name)?;
 
             Ok(StorageTargetPlan {
+                provider: resolved.provider,
                 provider_kind: resolved.scheme,
                 endpoint: resolved.endpoint,
                 bucket: resolved.bucket,
@@ -58,21 +66,18 @@ pub async fn upload_to_all_storages(
     region_name: &str,
     extracted_save_path: &Path,
     files: &[PathBuf],
-    remove_local: bool,
-    concurrency: usize,
-    retry: &RetryConfig,
+    options: StorageUploadOptions<'_>,
 ) -> Result<(), StorageError> {
-    if storage.providers.is_empty() || files.is_empty() {
+    if files.is_empty() || (storage.providers.is_empty() && options.selected_providers.is_empty()) {
         return Ok(());
     }
 
-    let targets = storage
-        .providers
-        .iter()
+    let targets = selected_provider_configs(storage, options.selected_providers)?
+        .into_iter()
         .map(|provider| build_operator_target(provider, region_name))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
+    let semaphore = Arc::new(Semaphore::new(options.concurrency.max(1)));
     let mut tasks = JoinSet::new();
 
     for target in targets {
@@ -81,7 +86,7 @@ pub async fn upload_to_all_storages(
             let extracted_save_path = extracted_save_path.to_path_buf();
             let semaphore = semaphore.clone();
             let target = target.clone();
-            let retry = retry.clone();
+            let retry = options.retry.clone();
             tasks.spawn(async move {
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
                 upload_single_file(&target, &extracted_save_path, &file, &retry).await
@@ -93,7 +98,7 @@ pub async fn upload_to_all_storages(
         result??;
     }
 
-    if remove_local {
+    if options.remove_local {
         for file in files {
             tokio::fs::remove_file(file)
                 .await
@@ -111,7 +116,7 @@ pub fn resolve_bucket_template(bucket: &str, region_name: &str) -> String {
     resolve_storage_template(bucket, region_name)
 }
 
-fn resolve_storage_template(value: &str, region_name: &str) -> String {
+pub fn resolve_storage_template(value: &str, region_name: &str) -> String {
     value
         .replace("{server}", region_name)
         .replace("{region}", region_name)
@@ -227,6 +232,81 @@ fn build_operator_target(
         provider: resolved.provider,
         operator,
     })
+}
+
+pub fn build_storage_operator_target(
+    storage: &StorageConfig,
+    provider_name: &str,
+    region_name: &str,
+) -> Result<StorageOperatorTarget, StorageError> {
+    let provider = find_storage_provider_config(storage, provider_name)?;
+    build_operator_target(provider, region_name)
+}
+
+fn selected_provider_configs<'a>(
+    storage: &'a StorageConfig,
+    selected_providers: &[String],
+) -> Result<Vec<&'a StorageProviderConfig>, StorageError> {
+    if selected_providers.is_empty() {
+        return Ok(storage.providers.iter().collect());
+    }
+
+    selected_providers
+        .iter()
+        .map(|provider_name| find_storage_provider_config(storage, provider_name))
+        .collect()
+}
+
+fn find_storage_provider_config<'a>(
+    storage: &'a StorageConfig,
+    provider_name: &str,
+) -> Result<&'a StorageProviderConfig, StorageError> {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        return Err(StorageError::InvalidProviderConfig {
+            provider: "<selection>".to_string(),
+            message: "selected provider name is empty".to_string(),
+        });
+    }
+
+    let explicit_matches = storage
+        .providers
+        .iter()
+        .filter(|provider| {
+            provider
+                .name
+                .as_deref()
+                .is_some_and(|name| name.trim() == provider_name)
+        })
+        .collect::<Vec<_>>();
+
+    let matches = if explicit_matches.is_empty() {
+        storage
+            .providers
+            .iter()
+            .filter(|provider| {
+                provider
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| name.trim().is_empty())
+                    && provider.scheme.trim().eq_ignore_ascii_case(provider_name)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        explicit_matches
+    };
+
+    match matches.as_slice() {
+        [provider] => Ok(*provider),
+        [] => Err(StorageError::InvalidProviderConfig {
+            provider: provider_name.to_string(),
+            message: "selected provider was not found".to_string(),
+        }),
+        _ => Err(StorageError::InvalidProviderConfig {
+            provider: provider_name.to_string(),
+            message: "selected provider matched multiple storage providers; set unique provider.name values".to_string(),
+        }),
+    }
 }
 
 fn resolve_storage_provider(
@@ -383,8 +463,9 @@ mod tests {
     use crate::core::config::{RetryConfig, StorageConfig, StorageProviderConfig};
 
     use super::{
-        construct_endpoint_url, construct_remote_path, construct_storage_key, normalize_prefix,
-        plan_storage_targets, resolve_bucket_template, upload_to_all_storages,
+        build_storage_operator_target, construct_endpoint_url, construct_remote_path,
+        construct_storage_key, normalize_prefix, plan_storage_targets, resolve_bucket_template,
+        upload_to_all_storages, StorageUploadOptions,
     };
 
     #[test]
@@ -439,7 +520,8 @@ mod tests {
             }],
         };
 
-        let targets = plan_storage_targets(&storage, "jp").unwrap();
+        let targets = plan_storage_targets(&storage, "jp", &[]).unwrap();
+        assert_eq!(targets[0].provider, "s3");
         assert_eq!(targets[0].bucket, "sekai-jp-assets");
         assert_eq!(targets[0].prefix.as_deref(), Some("upload/smoke"));
         assert_eq!(
@@ -466,7 +548,8 @@ mod tests {
             }],
         };
 
-        let targets = plan_storage_targets(&storage, "jp").unwrap();
+        let targets = plan_storage_targets(&storage, "jp", &[]).unwrap();
+        assert_eq!(targets[0].provider, "assets");
         assert_eq!(targets[0].provider_kind, "s3");
         assert_eq!(targets[0].bucket, "sekai-jp-assets");
         assert_eq!(targets[0].prefix.as_deref(), Some("assets/jp"));
@@ -476,6 +559,50 @@ mod tests {
         );
         assert!(targets[0].public_read);
         assert!(!targets[0].path_style);
+    }
+
+    #[test]
+    fn storage_targets_can_filter_selected_named_providers() {
+        let storage = StorageConfig {
+            providers: vec![
+                StorageProviderConfig {
+                    name: Some("primary".to_string()),
+                    scheme: "fs".to_string(),
+                    root: Some("tmp/primary".to_string()),
+                    ..StorageProviderConfig::default()
+                },
+                StorageProviderConfig {
+                    name: Some("backup".to_string()),
+                    scheme: "fs".to_string(),
+                    root: Some("tmp/backup".to_string()),
+                    ..StorageProviderConfig::default()
+                },
+            ],
+        };
+
+        let targets = plan_storage_targets(&storage, "jp", &["backup".to_string()]).unwrap();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].provider, "backup");
+        assert_eq!(targets[0].prefix.as_deref(), Some("tmp/backup"));
+    }
+
+    #[test]
+    fn selected_storage_provider_reports_missing_provider() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("primary".to_string()),
+                scheme: "fs".to_string(),
+                root: Some("tmp/primary".to_string()),
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        let err = match build_storage_operator_target(&storage, "backup", "jp") {
+            Ok(_) => panic!("missing provider unexpectedly resolved"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("selected provider was not found"));
     }
 
     #[tokio::test]
@@ -499,12 +626,15 @@ mod tests {
             "jp",
             source_root.path(),
             std::slice::from_ref(&nested),
-            false,
-            1,
-            &RetryConfig {
-                attempts: 1,
-                initial_backoff_ms: 1,
-                max_backoff_ms: 1,
+            StorageUploadOptions {
+                selected_providers: &[],
+                remove_local: false,
+                concurrency: 1,
+                retry: &RetryConfig {
+                    attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
             },
         )
         .await
@@ -514,5 +644,88 @@ mod tests {
             fs::read(target_root.path().join("music").join("file.txt")).unwrap(),
             b"hello"
         );
+    }
+
+    #[tokio::test]
+    async fn upload_to_fs_storage_respects_selected_providers() {
+        let source_root = tempdir().unwrap();
+        let primary_root = tempdir().unwrap();
+        let backup_root = tempdir().unwrap();
+        let nested = source_root.path().join("music").join("file.txt");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        fs::write(&nested, b"hello").unwrap();
+
+        let storage = StorageConfig {
+            providers: vec![
+                StorageProviderConfig {
+                    name: Some("primary".to_string()),
+                    scheme: "fs".to_string(),
+                    root: Some(primary_root.path().to_string_lossy().into_owned()),
+                    ..StorageProviderConfig::default()
+                },
+                StorageProviderConfig {
+                    name: Some("backup".to_string()),
+                    scheme: "fs".to_string(),
+                    root: Some(backup_root.path().to_string_lossy().into_owned()),
+                    ..StorageProviderConfig::default()
+                },
+            ],
+        };
+
+        upload_to_all_storages(
+            &storage,
+            "jp",
+            source_root.path(),
+            std::slice::from_ref(&nested),
+            StorageUploadOptions {
+                selected_providers: &["backup".to_string()],
+                remove_local: false,
+                concurrency: 1,
+                retry: &RetryConfig {
+                    attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!primary_root.path().join("music").join("file.txt").exists());
+        assert_eq!(
+            fs::read(backup_root.path().join("music").join("file.txt")).unwrap(),
+            b"hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_reports_missing_selected_provider() {
+        let source_root = tempdir().unwrap();
+        let file = source_root.path().join("file.txt");
+        fs::write(&file, b"hello").unwrap();
+        let storage = StorageConfig {
+            providers: Vec::new(),
+        };
+
+        let err = upload_to_all_storages(
+            &storage,
+            "jp",
+            source_root.path(),
+            std::slice::from_ref(&file),
+            StorageUploadOptions {
+                selected_providers: &["backup".to_string()],
+                remove_local: false,
+                concurrency: 1,
+                retry: &RetryConfig {
+                    attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("selected provider was not found"));
     }
 }

@@ -26,6 +26,11 @@ execution:
   timeout_seconds: 300
   allow_cancel: true
   batch_save_size: 50
+  workspace:
+    # Empty means the system temp directory. Set this to a mounted scratch
+    # volume in containers, for example /var/run/haruki/work.
+    work_dir: ""
+    cleanup_on_success: true
   retry:
     attempts: 4
     initial_backoff_ms: 1000
@@ -44,6 +49,7 @@ concurrency:
 
 storage:
   # OpenDAL-style providers. Keep this empty to disable upload globally.
+  # Providers can be reused for asset upload and downloaded_assets.json state.
   #
   # Example S3/R2/MinIO-compatible provider:
   # providers:
@@ -64,6 +70,13 @@ storage:
   #   - name: local
   #     scheme: fs
   #     root: "./tmp/uploaded-assets"
+  #     options: {}
+  #
+  # Local filesystem provider for downloaded_assets.json state:
+  # providers:
+  #   - name: local-state
+  #     scheme: fs
+  #     root: "./tmp/state"
   #     options: {}
   providers: []
 
@@ -97,6 +110,11 @@ regions:
     paths:
       asset_save_dir: "./Data/jp-assets"
       downloaded_asset_record_file: "./Data/jp-assets/downloaded_assets.json"
+      # Prefer this in cloud-native deployments. The path is relative to the
+      # selected OpenDAL provider root and supports {region}/{server}.
+      # downloaded_asset_record_storage:
+      #   provider: local-state
+      #   path: "records/{region}/downloaded_assets.json"
     filters:
       start_app:
         - "bonds_honor"
@@ -145,6 +163,9 @@ regions:
     upload:
       enabled: false
       remove_local_after_upload: false
+      # Empty means all configured storage.providers. Set names here to upload
+      # only to selected providers, for example ["assets"].
+      providers: []
 
   cn:
     enabled: false
@@ -163,6 +184,9 @@ regions:
     paths:
       asset_save_dir: "./Data/cn-assets"
       downloaded_asset_record_file: "./Data/cn-assets/downloaded_assets.json"
+      # downloaded_asset_record_storage:
+      #   provider: local-state
+      #   path: "records/{region}/downloaded_assets.json"
     filters:
       start_app: []
       on_demand:
@@ -202,3 +226,4 @@ regions:
     upload:
       enabled: false
       remove_local_after_upload: false
+      providers: []

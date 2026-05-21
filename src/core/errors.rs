@@ -40,33 +40,51 @@ pub enum RegionError {
 pub enum DownloadRecordError {
     #[error("failed to read download record {path}: {source}")]
     Read {
-        path: PathBuf,
+        path: String,
         #[source]
         source: std::io::Error,
     },
     #[error("failed to parse download record {path}: {source}")]
     Parse {
-        path: PathBuf,
+        path: String,
         #[source]
         source: sonic_rs::Error,
     },
     #[error("failed to create parent directory for {path}: {source}")]
     CreateParent {
-        path: PathBuf,
+        path: String,
         #[source]
         source: std::io::Error,
     },
     #[error("failed to write download record {path}: {source}")]
     Write {
-        path: PathBuf,
+        path: String,
         #[source]
         source: std::io::Error,
     },
     #[error("failed to serialize download record for {path}: {source}")]
     Serialize {
-        path: PathBuf,
+        path: String,
         #[source]
         source: sonic_rs::Error,
+    },
+    #[error(
+        "storage read failed for download record provider `{provider}` path `{path}`: {source}"
+    )]
+    StorageRead {
+        provider: String,
+        path: String,
+        #[source]
+        source: opendal::Error,
+    },
+    #[error(
+        "storage write failed for download record provider `{provider}` path `{path}`: {source}"
+    )]
+    StorageWrite {
+        provider: String,
+        path: String,
+        #[source]
+        source: opendal::Error,
     },
 }
 
@@ -210,6 +228,8 @@ pub enum AssetExecutionError {
     #[error(transparent)]
     ExportPipeline(#[from] ExportPipelineError),
     #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error(transparent)]
     GitSync(#[from] GitSyncError),
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
@@ -219,6 +239,12 @@ pub enum AssetExecutionError {
     HttpStatus { url: String, status: u16 },
     #[error("region `{region}` is missing asset_save_dir")]
     MissingAssetSaveDir { region: String },
+    #[error(
+        "region `{region}` is missing download record storage or downloaded_asset_record_file"
+    )]
+    MissingDownloadRecordPath { region: String },
+    #[error("region `{region}` has invalid download record storage: {message}")]
+    InvalidDownloadRecordStorage { region: String, message: String },
     #[error("colorful_palette region `{region}` requires asset_version and asset_hash")]
     MissingAssetVersionOrHash { region: String },
     #[error("colorful_palette region `{region}` is missing profile hash for `{profile}`")]

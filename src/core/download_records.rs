@@ -1,20 +1,20 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use opendal::Operator;
+
 use crate::core::errors::DownloadRecordError;
 
 pub type DownloadRecord = BTreeMap<String, String>;
 
 pub fn load_download_record(path: impl AsRef<Path>) -> Result<DownloadRecord, DownloadRecordError> {
     let path = path.as_ref();
+    let path_label = path.display().to_string();
     match std::fs::read(path) {
-        Ok(bytes) => sonic_rs::from_slice(&bytes).map_err(|source| DownloadRecordError::Parse {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Ok(bytes) => parse_download_record(&path_label, &bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(source) => Err(DownloadRecordError::Read {
-            path: path.to_path_buf(),
+            path: path_label,
             source,
         }),
     }
@@ -25,21 +25,74 @@ pub fn save_download_record(
     record: &DownloadRecord,
 ) -> Result<(), DownloadRecordError> {
     let path = path.as_ref();
+    let path_label = path.display().to_string();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| DownloadRecordError::CreateParent {
-            path: path.to_path_buf(),
+            path: path_label.clone(),
             source,
         })?;
     }
-    let data =
-        sonic_rs::to_vec_pretty(record).map_err(|source| DownloadRecordError::Serialize {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let data = serialize_download_record(&path_label, record)?;
     std::fs::write(path, data).map_err(|source| DownloadRecordError::Write {
-        path: path.to_path_buf(),
+        path: path_label,
         source,
     })
+}
+
+pub fn parse_download_record(
+    path_label: &str,
+    bytes: &[u8],
+) -> Result<DownloadRecord, DownloadRecordError> {
+    sonic_rs::from_slice(bytes).map_err(|source| DownloadRecordError::Parse {
+        path: path_label.to_string(),
+        source,
+    })
+}
+
+pub fn serialize_download_record(
+    path_label: &str,
+    record: &DownloadRecord,
+) -> Result<Vec<u8>, DownloadRecordError> {
+    sonic_rs::to_vec_pretty(record).map_err(|source| DownloadRecordError::Serialize {
+        path: path_label.to_string(),
+        source,
+    })
+}
+
+pub async fn load_download_record_from_storage(
+    provider: &str,
+    operator: &Operator,
+    path: &str,
+) -> Result<DownloadRecord, DownloadRecordError> {
+    match operator.read(path).await {
+        Ok(bytes) => parse_download_record(path, &bytes.to_vec()),
+        Err(source) if source.kind() == opendal::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(source) => Err(DownloadRecordError::StorageRead {
+            provider: provider.to_string(),
+            path: path.to_string(),
+            source,
+        }),
+    }
+}
+
+pub async fn save_download_record_to_storage(
+    provider: &str,
+    operator: &Operator,
+    path: &str,
+    record: &DownloadRecord,
+) -> Result<(), DownloadRecordError> {
+    let data = serialize_download_record(path, record)?;
+    operator
+        .write_with(path, data)
+        .content_type("application/json")
+        .await
+        .map_err(|source| DownloadRecordError::StorageWrite {
+            provider: provider.to_string(),
+            path: path.to_string(),
+            source,
+        })?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -47,7 +100,13 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{load_download_record, save_download_record};
+    use opendal::Operator;
+    use tempfile::tempdir;
+
+    use super::{
+        load_download_record, load_download_record_from_storage, save_download_record,
+        save_download_record_to_storage,
+    };
 
     fn unique_temp_dir() -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -79,5 +138,41 @@ mod tests {
 
         assert_eq!(loaded, record);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn storage_round_trip_persists_json_map() {
+        opendal::init_default_registry();
+        let dir = tempdir().unwrap();
+        let operator = Operator::via_iter(
+            "fs",
+            BTreeMap::from([(
+                "root".to_string(),
+                dir.path().to_string_lossy().into_owned(),
+            )]),
+        )
+        .unwrap();
+        let mut record = BTreeMap::new();
+        record.insert("music/test".to_string(), "deadbeef".to_string());
+
+        let missing = load_download_record_from_storage("local", &operator, "missing.json")
+            .await
+            .unwrap();
+        assert!(missing.is_empty());
+
+        save_download_record_to_storage(
+            "local",
+            &operator,
+            "state/downloaded_assets.json",
+            &record,
+        )
+        .await
+        .unwrap();
+        let loaded =
+            load_download_record_from_storage("local", &operator, "state/downloaded_assets.json")
+                .await
+                .unwrap();
+
+        assert_eq!(loaded, record);
     }
 }

@@ -106,6 +106,7 @@ impl Default for JobProgressSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageTargetPlan {
+    pub provider: String,
     pub provider_kind: String,
     pub endpoint: String,
     pub bucket: String,
@@ -123,12 +124,19 @@ pub struct ChartHashSyncPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadRecordStoragePlan {
+    pub provider: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionPlan {
     pub region: String,
     pub dry_run: bool,
     pub codec_backend: String,
     pub url_preview: UrlPreview,
     pub download_record_file: String,
+    pub download_record_storage: Option<DownloadRecordStoragePlan>,
     pub upload_targets: Vec<StorageTargetPlan>,
     pub chart_hash_sync: Option<ChartHashSyncPlan>,
     pub pending_steps: Vec<String>,

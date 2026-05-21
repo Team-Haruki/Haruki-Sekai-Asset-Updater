@@ -1,9 +1,9 @@
 use crate::core::codec::CODEC_BACKEND;
 use crate::core::config::AppConfig;
 use crate::core::errors::PlanningError;
-use crate::core::models::{AssetUpdateRequest, ExecutionPlan};
+use crate::core::models::{AssetUpdateRequest, DownloadRecordStoragePlan, ExecutionPlan};
 use crate::core::regions::{build_url_preview, select_region};
-use crate::core::storage::plan_storage_targets;
+use crate::core::storage::{plan_storage_targets, resolve_storage_template};
 
 pub fn build_execution_plan(
     config: &AppConfig,
@@ -11,16 +11,33 @@ pub fn build_execution_plan(
 ) -> Result<ExecutionPlan, PlanningError> {
     let region = select_region(config, &request.region)?;
     let url_preview = build_url_preview(region, request);
-    let download_record_file = region
-        .paths
-        .downloaded_asset_record_file
-        .clone()
+    let download_record_storage =
+        region
+            .paths
+            .downloaded_asset_record_storage
+            .as_ref()
+            .map(|storage| DownloadRecordStoragePlan {
+                provider: storage.provider.clone(),
+                path: resolve_storage_template(&storage.path, &request.region),
+            });
+    let download_record_file = download_record_storage
+        .as_ref()
+        .map(|storage| format!("opendal://{}/{}", storage.provider, storage.path))
+        .or_else(|| {
+            region
+                .paths
+                .downloaded_asset_record_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_string)
+        })
         .ok_or_else(|| PlanningError::MissingDownloadRecordPath {
             region: request.region.clone(),
         })?;
 
     let upload_targets = if region.upload.enabled {
-        plan_storage_targets(&config.storage, &request.region)?
+        plan_storage_targets(&config.storage, &request.region, &region.upload.providers)?
     } else {
         Vec::new()
     };
@@ -62,6 +79,7 @@ pub fn build_execution_plan(
         codec_backend: CODEC_BACKEND.to_string(),
         url_preview,
         download_record_file,
+        download_record_storage,
         upload_targets,
         chart_hash_sync,
         pending_steps,
@@ -104,10 +122,12 @@ mod tests {
                     downloaded_asset_record_file: Some(
                         "./Data/jp-assets/downloaded_assets.json".to_string(),
                     ),
+                    downloaded_asset_record_storage: None,
                 },
                 upload: RegionUploadConfig {
                     enabled: true,
                     remove_local_after_upload: false,
+                    providers: vec!["assets".to_string()],
                 },
                 ..RegionConfig::default()
             },
@@ -116,6 +136,7 @@ mod tests {
         let config = AppConfig {
             storage: StorageConfig {
                 providers: vec![StorageProviderConfig {
+                    name: Some("assets".to_string()),
                     endpoint: "assets.example.com".to_string(),
                     bucket: "sekai-{server}-assets".to_string(),
                     ..StorageProviderConfig::default()
@@ -145,6 +166,7 @@ mod tests {
             "./Data/jp-assets/downloaded_assets.json"
         );
         assert_eq!(plan.upload_targets.len(), 1);
+        assert_eq!(plan.upload_targets[0].provider, "assets");
         assert!(plan.chart_hash_sync.is_some());
         assert!(!plan.pending_steps.is_empty());
     }

@@ -427,6 +427,7 @@ pub struct ExecutionConfig {
     /// is only written once at the end).  Mirrors Go's `batchSaveSize`.
     pub batch_save_size: usize,
     pub retry: RetryConfig,
+    pub workspace: RuntimeWorkspaceConfig,
 }
 
 impl Default for ExecutionConfig {
@@ -436,6 +437,23 @@ impl Default for ExecutionConfig {
             allow_cancel: true,
             batch_save_size: 50,
             retry: RetryConfig::default(),
+            workspace: RuntimeWorkspaceConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeWorkspaceConfig {
+    pub work_dir: Option<String>,
+    pub cleanup_on_success: bool,
+}
+
+impl Default for RuntimeWorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            work_dir: None,
+            cleanup_on_success: true,
         }
     }
 }
@@ -673,6 +691,14 @@ impl Default for RegionRuntimeConfig {
 pub struct RegionPathsConfig {
     pub asset_save_dir: Option<String>,
     pub downloaded_asset_record_file: Option<String>,
+    pub downloaded_asset_record_storage: Option<DownloadRecordStorageConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DownloadRecordStorageConfig {
+    pub provider: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -809,6 +835,7 @@ impl Default for AudioExportConfig {
 pub struct RegionUploadConfig {
     pub enabled: bool,
     pub remove_local_after_upload: bool,
+    pub providers: Vec<String>,
 }
 
 #[cfg(test)]
@@ -841,6 +868,9 @@ server:
 logging:
   level: DEBUG
 execution:
+  workspace:
+    work_dir: ./tmp/work
+    cleanup_on_success: false
   retry:
     attempts: 3
     initial_backoff_ms: 250
@@ -855,6 +885,14 @@ regions:
       profile: production
       profile_hashes:
         production: abc123
+    paths:
+      downloaded_asset_record_storage:
+        provider: state
+        path: state/{region}/downloaded_assets.json
+    upload:
+      providers:
+        - assets
+        - backup
 "#;
 
         let config: AppConfig = yaml_serde::from_str(yaml).unwrap();
@@ -863,6 +901,23 @@ regions:
         assert_eq!(config.server.port, 18080);
         assert_eq!(config.logging.level, "DEBUG");
         assert_eq!(config.execution.retry.attempts, 3);
+        assert_eq!(
+            config.execution.workspace.work_dir.as_deref(),
+            Some("./tmp/work")
+        );
+        assert!(!config.execution.workspace.cleanup_on_success);
+        assert_eq!(
+            config.regions["jp"]
+                .paths
+                .downloaded_asset_record_storage
+                .as_ref()
+                .map(|storage| storage.provider.as_str()),
+            Some("state")
+        );
+        assert_eq!(
+            config.regions["jp"].upload.providers,
+            vec!["assets".to_string(), "backup".to_string()]
+        );
         assert_eq!(config.enabled_regions(), vec!["jp".to_string()]);
     }
 
@@ -953,7 +1008,9 @@ regions:
     fn load_from_path_applies_haruki_double_underscore_overrides() {
         std::env::set_var("HARUKI__SERVER__PORT", "19090");
         std::env::set_var("HARUKI__CONCURRENCY__UPLOAD", "9");
+        std::env::set_var("HARUKI__EXECUTION__WORKSPACE__CLEANUP_ON_SUCCESS", "false");
         std::env::set_var("HARUKI__REGIONS__JP__UPLOAD__ENABLED", "true");
+        std::env::set_var("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0", "local-assets");
         std::env::set_var("HARUKI__STORAGE__PROVIDERS__0__NAME", "local-assets");
         std::env::set_var("HARUKI__STORAGE__PROVIDERS__0__SCHEME", "fs");
         std::env::set_var("HARUKI__STORAGE__PROVIDERS__0__ROOT", "./tmp/{region}");
@@ -986,7 +1043,12 @@ regions:
         let config = AppConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.server.port, 19090);
         assert_eq!(config.concurrency.upload, 9);
+        assert!(!config.execution.workspace.cleanup_on_success);
         assert!(config.regions["jp"].upload.enabled);
+        assert_eq!(
+            config.regions["jp"].upload.providers,
+            vec!["local-assets".to_string()]
+        );
         assert_eq!(
             config.storage.providers[0].name.as_deref(),
             Some("local-assets")
@@ -1003,7 +1065,9 @@ regions:
 
         std::env::remove_var("HARUKI__SERVER__PORT");
         std::env::remove_var("HARUKI__CONCURRENCY__UPLOAD");
+        std::env::remove_var("HARUKI__EXECUTION__WORKSPACE__CLEANUP_ON_SUCCESS");
         std::env::remove_var("HARUKI__REGIONS__JP__UPLOAD__ENABLED");
+        std::env::remove_var("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0");
         std::env::remove_var("HARUKI__STORAGE__PROVIDERS__0__NAME");
         std::env::remove_var("HARUKI__STORAGE__PROVIDERS__0__SCHEME");
         std::env::remove_var("HARUKI__STORAGE__PROVIDERS__0__ROOT");
