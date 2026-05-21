@@ -88,7 +88,10 @@ docker compose up --build
 
 ## Environment Variables
 
-- `HARUKI_CONFIG_PATH` -- override config file path
+- `HARUKI_CONFIG_PATH` -- override local config file path
+- `HARUKI_CONFIG_URI` -- load config from OpenDAL storage, for example `opendal://config/haruki-asset-configs.yaml`
+- `HARUKI_CONFIG_OPENDAL_SCHEME` / `HARUKI_CONFIG_OPENDAL_ROOT` -- bootstrap OpenDAL config storage
+- `HARUKI_CONFIG_OPENDAL_OPTION_*` -- bootstrap OpenDAL config storage options such as bucket, endpoint, access keys
 - `HARUKI_ASSET_STUDIO_CLI_PATH` -- path to AssetStudioModCLI binary
 - `HARUKI_SHARED_AES_KEY_HEX` / `HARUKI_SHARED_AES_IV_HEX` -- shared AES keys (JP/TW/KR/CN)
 - `HARUKI_EN_AES_KEY_HEX` / `HARUKI_EN_AES_IV_HEX` -- EN-specific AES keys

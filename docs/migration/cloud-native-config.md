@@ -3,6 +3,36 @@
 This project now treats OpenDAL providers as the shared storage boundary for
 runtime state and exported assets.
 
+## Config file source
+
+Local files are still supported through `HARUKI_CONFIG_PATH` and the existing
+default search path. For cloud-native deployments, set `HARUKI_CONFIG_URI` to
+load the main YAML file through OpenDAL before normal config parsing begins:
+
+```bash
+HARUKI_CONFIG_URI=opendal://config/haruki-asset-configs.yaml
+HARUKI_CONFIG_OPENDAL_SCHEME=s3
+HARUKI_CONFIG_OPENDAL_OPTION_BUCKET=sekai-configs
+HARUKI_CONFIG_OPENDAL_OPTION_ENDPOINT=https://s3.example.com
+HARUKI_CONFIG_OPENDAL_OPTION_REGION=auto
+HARUKI_CONFIG_OPENDAL_OPTION_ACCESS_KEY_ID=...
+HARUKI_CONFIG_OPENDAL_OPTION_SECRET_ACCESS_KEY=...
+```
+
+`HARUKI_CONFIG_URI` has the shape `opendal://<label>/<path>`. The label is used
+for diagnostics; the actual OpenDAL backend comes from the bootstrap env vars.
+For local smoke tests, the same flow can use the filesystem service:
+
+```bash
+HARUKI_CONFIG_URI=opendal://config/haruki-asset-configs.yaml
+HARUKI_CONFIG_OPENDAL_SCHEME=fs
+HARUKI_CONFIG_OPENDAL_ROOT=/etc/haruki
+```
+
+When `HARUKI_CONFIG_URI` is set, it takes precedence over `HARUKI_CONFIG_PATH`.
+After the YAML is read, `${env:...}` expansion and `HARUKI__...` overrides are
+applied exactly as they are for local files.
+
 ## Environment overrides
 
 Any YAML value can be overridden with `HARUKI__` plus a double-underscore path.

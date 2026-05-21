@@ -6,15 +6,37 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("failed to read config file {path}: {source}")]
     Read {
-        path: PathBuf,
+        path: String,
         #[source]
         source: std::io::Error,
     },
     #[error("failed to parse config file {path}: {source}")]
     Parse {
-        path: PathBuf,
+        path: String,
         #[source]
         source: yaml_serde::Error,
+    },
+    #[error("invalid config uri `{uri}`: {reason}")]
+    InvalidConfigUri { uri: String, reason: String },
+    #[error("invalid config bootstrap environment variable `{name}`: {reason}")]
+    InvalidConfigBootstrap { name: String, reason: String },
+    #[error("failed to initialize config storage provider `{provider}`: {source}")]
+    ConfigStorageProvider {
+        provider: String,
+        #[source]
+        source: opendal::Error,
+    },
+    #[error("failed to read config from `{uri}`: {source}")]
+    ConfigStorageRead {
+        uri: String,
+        #[source]
+        source: opendal::Error,
+    },
+    #[error("config file {path} is not valid UTF-8: {source}")]
+    InvalidUtf8 {
+        path: String,
+        #[source]
+        source: std::string::FromUtf8Error,
     },
     #[error("config_version must be 2, got {0}")]
     UnsupportedVersion(u32),

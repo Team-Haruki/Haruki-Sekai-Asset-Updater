@@ -9,6 +9,18 @@ use yaml_serde::{Mapping, Value};
 
 use crate::core::errors::ConfigError;
 
+const CONFIG_URI_ENV: &str = "HARUKI_CONFIG_URI";
+const CONFIG_OPENDAL_SCHEME_ENV: &str = "HARUKI_CONFIG_OPENDAL_SCHEME";
+const CONFIG_OPENDAL_ROOT_ENV: &str = "HARUKI_CONFIG_OPENDAL_ROOT";
+const CONFIG_OPENDAL_OPTION_PREFIX: &str = "HARUKI_CONFIG_OPENDAL_OPTION_";
+const CONFIG_OPENDAL_URI_PREFIX: &str = "opendal://";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigStorageUri {
+    provider: String,
+    path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -40,7 +52,15 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load_default() -> Result<Self, ConfigError> {
+    pub async fn load_default() -> Result<Self, ConfigError> {
+        if let Some(uri) = env::var(CONFIG_URI_ENV)
+            .ok()
+            .map(|uri| uri.trim().to_string())
+            .filter(|uri| !uri.is_empty())
+        {
+            return Self::load_from_opendal_uri(&uri).await;
+        }
+
         let candidates = candidate_paths();
         for candidate in &candidates {
             if candidate.exists() {
@@ -60,20 +80,47 @@ impl AppConfig {
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref().to_path_buf();
         let raw = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
-            path: path.clone(),
+            path: path.display().to_string(),
             source,
         })?;
-        let mut value: Value = yaml_serde::from_str(&raw).map_err(|source| ConfigError::Parse {
+        Self::load_from_str(path.display().to_string(), &raw)
+    }
+
+    pub async fn load_from_opendal_uri(uri: &str) -> Result<Self, ConfigError> {
+        let storage_uri = parse_config_storage_uri(uri)?;
+        let (scheme, options) = config_storage_provider_options()?;
+
+        opendal::init_default_registry();
+        let operator = opendal::Operator::via_iter(&scheme, options).map_err(|source| {
+            ConfigError::ConfigStorageProvider {
+                provider: storage_uri.provider.clone(),
+                source,
+            }
+        })?;
+        let bytes = operator.read(&storage_uri.path).await.map_err(|source| {
+            ConfigError::ConfigStorageRead {
+                uri: uri.to_string(),
+                source,
+            }
+        })?;
+        let raw = String::from_utf8(bytes.to_vec()).map_err(|source| ConfigError::InvalidUtf8 {
+            path: uri.to_string(),
+            source,
+        })?;
+
+        Self::load_from_str(uri.to_string(), &raw)
+    }
+
+    fn load_from_str(path: String, raw: &str) -> Result<Self, ConfigError> {
+        let mut value: Value = yaml_serde::from_str(raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
             source,
         })?;
         expand_env_references(&mut value)?;
         apply_env_overrides(&mut value)?;
 
-        let config: Self = yaml_serde::from_value(value).map_err(|source| ConfigError::Parse {
-            path: path.clone(),
-            source,
-        })?;
+        let config: Self =
+            yaml_serde::from_value(value).map_err(|source| ConfigError::Parse { path, source })?;
         config.validate()?;
         Ok(config)
     }
@@ -109,6 +156,85 @@ fn candidate_paths() -> Vec<PathBuf> {
     candidates.push(PathBuf::from("../haruki-asset-configs.yaml"));
     candidates.push(PathBuf::from("../../haruki-asset-configs.yaml"));
     candidates
+}
+
+fn parse_config_storage_uri(uri: &str) -> Result<ConfigStorageUri, ConfigError> {
+    let Some(raw) = uri.strip_prefix(CONFIG_OPENDAL_URI_PREFIX) else {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason:
+                "only opendal:// config URIs are supported; use HARUKI_CONFIG_PATH for local files"
+                    .to_string(),
+        });
+    };
+
+    let raw = raw.trim_start_matches('/');
+    let Some((provider, path)) = raw.split_once('/') else {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason: "expected opendal://<provider>/<path>".to_string(),
+        });
+    };
+    let provider = provider.trim();
+    let path = path.trim().trim_matches('/').replace('\\', "/");
+
+    if provider.is_empty() {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason: "provider is empty".to_string(),
+        });
+    }
+    if path.is_empty() {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason: "path is empty".to_string(),
+        });
+    }
+
+    Ok(ConfigStorageUri {
+        provider: provider.to_string(),
+        path,
+    })
+}
+
+fn config_storage_provider_options() -> Result<(String, BTreeMap<String, String>), ConfigError> {
+    let scheme = env::var(CONFIG_OPENDAL_SCHEME_ENV)
+        .ok()
+        .map(|scheme| scheme.trim().to_ascii_lowercase())
+        .filter(|scheme| !scheme.is_empty())
+        .ok_or_else(|| ConfigError::MissingEnvironmentVariable {
+            field: CONFIG_URI_ENV.to_string(),
+            name: CONFIG_OPENDAL_SCHEME_ENV.to_string(),
+        })?;
+
+    let mut options = BTreeMap::new();
+    if let Some(root) = env::var(CONFIG_OPENDAL_ROOT_ENV)
+        .ok()
+        .map(|root| root.trim().to_string())
+        .filter(|root| !root.is_empty())
+    {
+        options.insert("root".to_string(), root);
+    }
+
+    for (name, value) in env::vars().filter(|(name, value)| {
+        name.starts_with(CONFIG_OPENDAL_OPTION_PREFIX)
+            && name.len() > CONFIG_OPENDAL_OPTION_PREFIX.len()
+            && !value.trim().is_empty()
+    }) {
+        let key = name
+            .strip_prefix(CONFIG_OPENDAL_OPTION_PREFIX)
+            .expect("prefix was checked")
+            .to_ascii_lowercase();
+        if key.is_empty() {
+            return Err(ConfigError::InvalidConfigBootstrap {
+                name,
+                reason: "OpenDAL option key is empty".to_string(),
+            });
+        }
+        options.insert(key, value);
+    }
+
+    Ok((scheme, options))
 }
 
 fn expand_env_references(value: &mut Value) -> Result<(), ConfigError> {
@@ -843,7 +969,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    use tempfile::NamedTempFile;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[test]
     fn rejects_non_v2_config_version() {
@@ -919,6 +1045,52 @@ regions:
             vec!["assets".to_string(), "backup".to_string()]
         );
         assert_eq!(config.enabled_regions(), vec!["jp".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn load_default_reads_config_from_opendal_uri() {
+        std::env::set_var(CONFIG_URI_ENV, "opendal://config/configs/haruki.yaml");
+        std::env::set_var(CONFIG_OPENDAL_SCHEME_ENV, "fs");
+
+        let dir = tempdir().unwrap();
+        let configs_dir = dir.path().join("configs");
+        std::fs::create_dir_all(&configs_dir).unwrap();
+        std::fs::write(
+            configs_dir.join("haruki.yaml"),
+            r#"
+config_version: 2
+regions:
+  cloud:
+    enabled: true
+    provider:
+      kind: colorful_palette
+      asset_info_url_template: "https://example.com/{env}/{asset_version}/{asset_hash}"
+      asset_bundle_url_template: "https://example.com/assets/{bundle_path}"
+      profile: production
+      profile_hashes:
+        production: abc123
+"#,
+        )
+        .unwrap();
+        std::env::set_var(
+            CONFIG_OPENDAL_ROOT_ENV,
+            dir.path().to_string_lossy().into_owned(),
+        );
+
+        let config = AppConfig::load_default().await.unwrap();
+
+        assert!(config.regions.contains_key("cloud"));
+        assert!(config.enabled_regions().contains(&"cloud".to_string()));
+
+        std::env::remove_var(CONFIG_URI_ENV);
+        std::env::remove_var(CONFIG_OPENDAL_SCHEME_ENV);
+        std::env::remove_var(CONFIG_OPENDAL_ROOT_ENV);
+    }
+
+    #[test]
+    fn config_storage_uri_requires_opendal_scheme() {
+        let err = parse_config_storage_uri("s3://bucket/config.yaml").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidConfigUri { .. }));
     }
 
     #[test]

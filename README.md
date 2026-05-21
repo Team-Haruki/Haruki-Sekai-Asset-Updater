@@ -27,6 +27,11 @@
 
 ## Config
 
+- The service can load config from a local file or from OpenDAL-backed storage.
+  `HARUKI_CONFIG_URI=opendal://config/haruki-asset-configs.yaml` takes
+  precedence over local file discovery. Bootstrap the config storage with
+  `HARUKI_CONFIG_OPENDAL_SCHEME`, optional `HARUKI_CONFIG_OPENDAL_ROOT`, and
+  `HARUKI_CONFIG_OPENDAL_OPTION_*` environment variables.
 - String config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
 - Any config path can be overridden with double-underscore env vars after YAML is loaded.
   Examples:
