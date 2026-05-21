@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Haruki Sekai Asset Updater is a Rust HTTP service that extracts and exports game assets from Project Sekai. It downloads asset bundles, deobfuscates them (AES-CBC), runs codec/export pipelines, uploads results to S3-compatible storage, and optionally syncs chart hashes via git. This is **not** a Go project -- the Go edition was removed.
+Haruki Sekai Asset Updater is a Rust HTTP service that extracts and exports game assets from Project Sekai. It downloads asset bundles, deobfuscates them (AES-CBC), runs codec/export pipelines, uploads results through OpenDAL-backed storage, and optionally syncs chart hashes via git. This is **not** a Go project -- the Go edition was removed.
 
 ## Build & Development Commands
 
@@ -46,13 +46,13 @@ docker compose up --build
 **Two-layer module structure (flat, no `mod.rs` files):**
 
 - `src/core.rs` / `src/core/` -- business logic:
-  - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
+  - `config.rs` -- YAML config loading with `${env:VAR_NAME}` string expansion and `HARUKI__...` env overrides
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
   - `asset_execution.rs` -- runs the plan (download, decrypt, export, upload)
-  - `export_pipeline.rs` -- post-processing: AssetStudioModCLI invocation, PNG-to-WebP (pure Rust), media conversion
+  - `export_pipeline.rs` -- post-processing: configurable AssetStudioModCLI invocation, PNG-to-WebP (pure Rust), media conversion
   - `codec.rs` -- wraps the `cridecoder` crate for USM/ACB decoding
   - `media.rs` -- ffmpeg-based conversions (USM/M2V to MP4, WAV to FLAC/MP3)
-  - `storage.rs` -- S3-compatible upload via `aws-sdk-s3`
+  - `storage.rs` -- OpenDAL-backed upload for S3-compatible and filesystem providers
   - `git_sync.rs` -- chart hash sync via `git2-rs`
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection
   - `retry.rs` -- generic async retry helper
@@ -76,7 +76,7 @@ docker compose up --build
 - **Image conversion:** pure Rust WebP encoder (`image` crate), no external WebP toolchain
 - **External tool deps:** `AssetStudioModCLI` (.NET) and `ffmpeg` are runtime dependencies
 - **Config files:** only `haruki-asset-configs.yaml` (active) and `haruki-asset-configs.example.yaml` (template)
-- **Sensitive config** uses `${env:VAR_NAME}` syntax, never hardcoded secrets
+- **Sensitive config** uses `${env:VAR_NAME}` syntax or `HARUKI__...` overrides, never hardcoded secrets
 - **Test samples** live in `tests/files/` (`0703.usm`, `se_0126_01.acb`)
 
 ## HTTP Endpoints

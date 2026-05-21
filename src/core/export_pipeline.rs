@@ -8,7 +8,7 @@ use serde::Serialize;
 use tokio::process::Command;
 
 use crate::core::codec;
-use crate::core::config::{AppConfig, RegionConfig};
+use crate::core::config::{AppConfig, AssetStudioExportConfig, RegionConfig};
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
     convert_m2v_to_mp4, convert_usm_to_mp4, convert_wav_to_flac, convert_wav_to_mp3, FrameRate,
@@ -488,7 +488,7 @@ fn build_assetstudio_export_args(
         "-m".to_string(),
         "export".to_string(),
         "-t".to_string(),
-        "monoBehaviour,textAsset,tex2d,tex2dArray,audio".to_string(),
+        assetstudio_export_types(region).join(","),
         "-g".to_string(),
         get_export_group(export_path).to_string(),
         "-f".to_string(),
@@ -530,6 +530,24 @@ fn build_assetstudio_export_args(
     }
 
     args
+}
+
+fn assetstudio_export_types(region: &RegionConfig) -> Vec<String> {
+    let configured = region
+        .export
+        .asset_studio
+        .export_types
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    if configured.is_empty() {
+        AssetStudioExportConfig::default().export_types
+    } else {
+        configured
+    }
 }
 
 fn detect_assetstudio_cli_capabilities(asset_studio_cli_path: &str) -> AssetStudioCliCapabilities {
@@ -1159,5 +1177,30 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "--sekai-keep-single-container-filename"));
+    }
+
+    #[test]
+    fn assetstudio_args_use_configured_export_types() {
+        let (_config, mut region) = processing_config();
+        region.export.asset_studio.export_types =
+            vec!["textAsset".to_string(), "sprite".to_string()];
+
+        let args = build_assetstudio_export_args(
+            Path::new("/tmp/input.bundle"),
+            Path::new("/tmp/out"),
+            "event_story/foo",
+            "assets/sekai/assetbundle/resources",
+            &region,
+            AssetStudioCliCapabilities {
+                filter_exclude_mode: true,
+                filter_blacklist_mode: false,
+                sekai_keep_single_container_filename: true,
+            },
+        );
+
+        let export_type_arg = args
+            .windows(2)
+            .find_map(|window| (window[0] == "-t").then_some(window[1].as_str()));
+        assert_eq!(export_type_arg, Some("textAsset,sprite"));
     }
 }

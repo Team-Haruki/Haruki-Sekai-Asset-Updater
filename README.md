@@ -15,7 +15,7 @@
 - Exposes `POST /v2/jobs/{id}/cancel`
 - Uses the published [`cridecoder`](https://crates.io/crates/cridecoder) crate as the codec backend
 - Includes `usmexport`, `usmmeta`, `assetinfo_dump`, and `s3ls` helper CLIs
-- Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and `git2-rs` chart sync
+- Supports bundle download, deobfuscation, export post-processing, OpenDAL-backed upload, and `git2-rs` chart sync
 - Uses a pure Rust WebP encoder for PNG to WebP conversion
 
 ## Layout
@@ -25,23 +25,25 @@
 - `tests/`: integration tests
 - `docs/migration/`: preserved migration and parity notes
 
-## Secret Config
+## Config
 
-- Sensitive config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
-- The loader resolves this syntax for:
-  `server.auth.bearer_token`,
-  `tools.asset_studio_cli_path`,
-  `storage.providers[].access_key`,
-  `storage.providers[].secret_key`,
-  `git_sync.chart_hashes.password`,
-  `regions.*.crypto.aes_key_hex`,
-  `regions.*.crypto.aes_iv_hex`.
+- String config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
+- Any config path can be overridden with double-underscore env vars after YAML is loaded.
+  Examples:
+  `HARUKI__SERVER__PORT=8081`,
+  `HARUKI__REGIONS__JP__ENABLED=true`,
+  `HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET=sekai-jp-assets`.
+- AssetStudio export types are configurable per region via
+  `regions.<region>.export.asset_studio.export_types`.
+- Storage providers use OpenDAL-style `scheme`, `root`, and `options` fields. Legacy S3-compatible fields remain accepted for existing v2 configs.
 - Tracked config templates expect values such as:
   `HARUKI_ASSET_STUDIO_CLI_PATH`,
   `HARUKI_SHARED_AES_KEY_HEX`,
   `HARUKI_SHARED_AES_IV_HEX`,
   `HARUKI_EN_AES_KEY_HEX`,
-  `HARUKI_EN_AES_IV_HEX`.
+  `HARUKI_EN_AES_IV_HEX`,
+  `HARUKI_STORAGE_ACCESS_KEY_ID`,
+  `HARUKI_STORAGE_SECRET_ACCESS_KEY`.
 
 ## Run locally
 

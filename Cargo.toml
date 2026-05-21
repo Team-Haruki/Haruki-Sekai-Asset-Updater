@@ -8,13 +8,6 @@ license = "MIT"
 [dependencies]
 aes = "0.9.0"
 axum = { version = "0.8.9", features = ["macros", "json"] }
-aws-config = "1.8.16"
-aws-sdk-s3 = { version = "1.131.0", default-features = false, features = [
-    "default-https-client",
-    "http-1x",
-    "rt-tokio",
-    "sigv4a",
-] }
 cbc = { version = "0.2.0", features = ["alloc"] }
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
@@ -22,6 +15,12 @@ cridecoder = "0.1.1"
 hex = "0.4.3"
 image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
 mime_guess = "2.0.5"
+opendal = { version = "0.56.0", default-features = false, features = [
+    "executors-tokio",
+    "reqwest-rustls-tls",
+    "services-fs",
+    "services-s3",
+] }
 regex = "1.12.3"
 reqwest = { version = "0.13.2", default-features = false, features = ["brotli", "deflate", "gzip", "http2", "json", "rustls"] }
 rmp-serde = "1.3.1"

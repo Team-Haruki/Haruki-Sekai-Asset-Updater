@@ -43,6 +43,28 @@ concurrency:
   hca: 16
 
 storage:
+  # OpenDAL-style providers. Keep this empty to disable upload globally.
+  #
+  # Example S3/R2/MinIO-compatible provider:
+  # providers:
+  #   - name: assets
+  #     scheme: s3
+  #     root: "assets/{region}"
+  #     public_base_url: "https://cdn.example.com/assets/{region}"
+  #     options:
+  #       bucket: "sekai-{region}-assets"
+  #       endpoint: "https://s3.example.com"
+  #       region: "auto"
+  #       access_key_id: "${env:HARUKI_STORAGE_ACCESS_KEY_ID}"
+  #       secret_access_key: "${env:HARUKI_STORAGE_SECRET_ACCESS_KEY}"
+  #       default_acl: "public-read"
+  #
+  # Local filesystem provider for smoke tests:
+  # providers:
+  #   - name: local
+  #     scheme: fs
+  #     root: "./tmp/uploaded-assets"
+  #     options: {}
   providers: []
 
 git_sync:
@@ -94,6 +116,13 @@ regions:
         - ".*"
     export:
       by_category: false
+      asset_studio:
+        export_types:
+          - monoBehaviour
+          - textAsset
+          - tex2d
+          - tex2dArray
+          - audio
       usm:
         export: true
         decode: true
@@ -144,6 +173,13 @@ regions:
         - ".*"
     export:
       by_category: false
+      asset_studio:
+        export_types:
+          - monoBehaviour
+          - textAsset
+          - tex2d
+          - tex2dArray
+          - audio
       usm:
         export: true
         decode: true

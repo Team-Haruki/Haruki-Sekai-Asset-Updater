@@ -24,6 +24,8 @@ pub enum ConfigError {
     InvalidRegionName(String),
     #[error("missing required environment variable `{name}` referenced by `{field}`")]
     MissingEnvironmentVariable { field: String, name: String },
+    #[error("invalid environment override `{name}`: {reason}")]
+    InvalidEnvironmentOverride { name: String, reason: String },
 }
 
 #[derive(Debug, Error)]
@@ -132,6 +134,8 @@ pub enum StorageError {
     MissingEndpoint { provider: String },
     #[error("storage provider `{provider}` is missing a bucket")]
     MissingBucket { provider: String },
+    #[error("storage provider `{provider}` has invalid configuration: {message}")]
+    InvalidProviderConfig { provider: String, message: String },
     #[error("upload root {0} is not relative to the extracted save path")]
     InvalidRelativePath(String),
     #[error("io error at {path}: {source}")]
@@ -140,12 +144,18 @@ pub enum StorageError {
         #[source]
         source: std::io::Error,
     },
-    #[error("s3 upload failed for provider `{provider}` file `{path}`: {source}")]
+    #[error("storage provider `{provider}` initialization failed: {source}")]
+    Provider {
+        provider: String,
+        #[source]
+        source: opendal::Error,
+    },
+    #[error("storage upload failed for provider `{provider}` file `{path}`: {source}")]
     Upload {
         provider: String,
         path: PathBuf,
         #[source]
-        source: aws_sdk_s3::Error,
+        source: opendal::Error,
     },
     #[error("task join failed: {0}")]
     Join(#[from] tokio::task::JoinError),

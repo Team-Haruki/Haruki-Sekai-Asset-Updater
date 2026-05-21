@@ -1,11 +1,8 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::Builder;
-use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::ObjectCannedAcl;
-use aws_sdk_s3::Client;
+use opendal::Operator;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -13,6 +10,25 @@ use crate::core::config::{RetryConfig, StorageConfig, StorageProviderConfig};
 use crate::core::errors::StorageError;
 use crate::core::models::StorageTargetPlan;
 use crate::core::retry::retry_async;
+
+#[derive(Debug, Clone)]
+struct ResolvedStorageProvider {
+    provider: String,
+    scheme: String,
+    endpoint: String,
+    bucket: String,
+    root: Option<String>,
+    base_url: String,
+    public_read: bool,
+    path_style: bool,
+    options: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+struct StorageOperatorTarget {
+    provider: String,
+    operator: Operator,
+}
 
 pub fn plan_storage_targets(
     storage: &StorageConfig,
@@ -22,25 +38,16 @@ pub fn plan_storage_targets(
         .providers
         .iter()
         .map(|provider| {
-            if provider.endpoint.trim().is_empty() {
-                return Err(StorageError::MissingEndpoint {
-                    provider: provider.kind.clone(),
-                });
-            }
-            if provider.bucket.trim().is_empty() {
-                return Err(StorageError::MissingBucket {
-                    provider: provider.kind.clone(),
-                });
-            }
+            let resolved = resolve_storage_provider(provider, region_name)?;
 
             Ok(StorageTargetPlan {
-                provider_kind: provider.kind.clone(),
-                endpoint: provider.endpoint.clone(),
-                bucket: resolve_bucket_template(&provider.bucket, region_name),
-                prefix: normalize_prefix(provider.prefix.as_deref()),
-                base_url: construct_endpoint_url(&provider.endpoint, provider.tls),
-                public_read: provider.public_read,
-                path_style: provider.path_style,
+                provider_kind: resolved.scheme,
+                endpoint: resolved.endpoint,
+                bucket: resolved.bucket,
+                prefix: resolved.root,
+                base_url: resolved.base_url,
+                public_read: resolved.public_read,
+                path_style: resolved.path_style,
             })
         })
         .collect()
@@ -59,21 +66,25 @@ pub async fn upload_to_all_storages(
         return Ok(());
     }
 
+    let targets = storage
+        .providers
+        .iter()
+        .map(|provider| build_operator_target(provider, region_name))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let semaphore = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut tasks = JoinSet::new();
 
-    for provider in storage.providers.clone() {
+    for target in targets {
         for file in files {
             let file = file.clone();
             let extracted_save_path = extracted_save_path.to_path_buf();
             let semaphore = semaphore.clone();
-            let region_name = region_name.to_string();
-            let provider = provider.clone();
+            let target = target.clone();
             let retry = retry.clone();
             tasks.spawn(async move {
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
-                upload_single_file(&provider, &region_name, &extracted_save_path, &file, &retry)
-                    .await
+                upload_single_file(&target, &extracted_save_path, &file, &retry).await
             });
         }
     }
@@ -97,7 +108,11 @@ pub async fn upload_to_all_storages(
 }
 
 pub fn resolve_bucket_template(bucket: &str, region_name: &str) -> String {
-    bucket
+    resolve_storage_template(bucket, region_name)
+}
+
+fn resolve_storage_template(value: &str, region_name: &str) -> String {
+    value
         .replace("{server}", region_name)
         .replace("{region}", region_name)
 }
@@ -105,6 +120,15 @@ pub fn resolve_bucket_template(bucket: &str, region_name: &str) -> String {
 pub fn construct_endpoint_url(endpoint: &str, tls: bool) -> String {
     let scheme = if tls { "https" } else { "http" };
     format!("{scheme}://{endpoint}")
+}
+
+fn construct_provider_endpoint(endpoint: &str, tls: bool) -> String {
+    let endpoint = endpoint.trim().trim_end_matches('/');
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        construct_endpoint_url(endpoint, tls)
+    }
 }
 
 pub fn construct_remote_path(
@@ -139,88 +163,41 @@ pub fn construct_storage_key(
 }
 
 async fn upload_single_file(
-    provider: &StorageProviderConfig,
-    region_name: &str,
+    target: &StorageOperatorTarget,
     extracted_save_path: &Path,
     file_path: &Path,
     retry: &RetryConfig,
 ) -> Result<(), StorageError> {
-    if provider.endpoint.trim().is_empty() {
-        return Err(StorageError::MissingEndpoint {
-            provider: provider.kind.clone(),
-        });
-    }
-    if provider.bucket.trim().is_empty() {
-        return Err(StorageError::MissingBucket {
-            provider: provider.kind.clone(),
-        });
-    }
-
-    let region = provider
-        .region
-        .clone()
-        .unwrap_or_else(|| "us-east-1".to_string());
-    let shared_config = aws_config::defaults(BehaviorVersion::latest())
-        .region(aws_config::Region::new(region))
-        .load()
-        .await;
-
-    let mut builder = Builder::from(&shared_config)
-        .endpoint_url(construct_endpoint_url(&provider.endpoint, provider.tls))
-        .force_path_style(provider.path_style);
-
-    if let (Some(access_key), Some(secret_key)) =
-        (provider.access_key.clone(), provider.secret_key.clone())
-    {
-        let credentials =
-            aws_sdk_s3::config::Credentials::new(access_key, secret_key, None, None, "haruki");
-        builder = builder.credentials_provider(credentials);
-    }
-
-    let client = Client::from_conf(builder.build());
-    let remote_path =
-        construct_storage_key(provider.prefix.as_deref(), extracted_save_path, file_path)?;
-    let bucket = resolve_bucket_template(&provider.bucket, region_name);
+    let remote_path = construct_remote_path(extracted_save_path, file_path)?;
     let content_type = mime_guess::from_path(file_path)
         .first_or_octet_stream()
         .to_string();
+    let content = tokio::fs::read(file_path)
+        .await
+        .map_err(|source| StorageError::Io {
+            path: file_path.to_path_buf(),
+            source,
+        })?;
+
     retry_async(
         retry,
-        "s3 upload",
+        "storage upload",
         |_| {
-            let client = client.clone();
-            let bucket = bucket.clone();
+            let operator = target.operator.clone();
             let remote_path = remote_path.clone();
             let content_type = content_type.clone();
+            let content = content.clone();
             let file_path = file_path.to_path_buf();
-            let provider_kind = provider.kind.clone();
-            let public_read = provider.public_read;
+            let provider = target.provider.clone();
             async move {
-                let body = ByteStream::from_path(file_path.clone())
-                    .await
-                    .map_err(|source| StorageError::Io {
-                        path: file_path.clone(),
-                        source: source.into(),
-                    })?;
-
-                let mut request = client
-                    .put_object()
-                    .bucket(bucket.clone())
-                    .key(remote_path.clone())
-                    .body(body)
-                    .content_type(content_type.clone());
-
-                if public_read {
-                    request = request.acl(ObjectCannedAcl::PublicRead);
-                }
-
-                request
-                    .send()
+                operator
+                    .write_with(&remote_path, content)
+                    .content_type(&content_type)
                     .await
                     .map_err(|source| StorageError::Upload {
-                        provider: provider_kind,
+                        provider,
                         path: file_path,
-                        source: source.into(),
+                        source,
                     })?;
 
                 Ok(())
@@ -233,19 +210,181 @@ async fn upload_single_file(
     Ok(())
 }
 
+fn build_operator_target(
+    provider: &StorageProviderConfig,
+    region_name: &str,
+) -> Result<StorageOperatorTarget, StorageError> {
+    opendal::init_default_registry();
+    let resolved = resolve_storage_provider(provider, region_name)?;
+    let operator = Operator::via_iter(&resolved.scheme, resolved.options).map_err(|source| {
+        StorageError::Provider {
+            provider: resolved.provider.clone(),
+            source,
+        }
+    })?;
+
+    Ok(StorageOperatorTarget {
+        provider: resolved.provider,
+        operator,
+    })
+}
+
+fn resolve_storage_provider(
+    provider: &StorageProviderConfig,
+    region_name: &str,
+) -> Result<ResolvedStorageProvider, StorageError> {
+    let scheme = provider.scheme.trim().to_ascii_lowercase();
+    let provider_label = provider
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| scheme.clone());
+
+    if scheme.is_empty() {
+        return Err(StorageError::InvalidProviderConfig {
+            provider: provider_label,
+            message: "scheme is empty".to_string(),
+        });
+    }
+
+    let mut options = provider
+        .options
+        .iter()
+        .map(|(key, value)| (key.clone(), resolve_storage_template(value, region_name)))
+        .collect::<BTreeMap<_, _>>();
+
+    if let Some(root) = provider
+        .root
+        .as_deref()
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+    {
+        options
+            .entry("root".to_string())
+            .or_insert_with(|| resolve_storage_template(root, region_name));
+    } else if let Some(prefix) = normalize_prefix(provider.prefix.as_deref()) {
+        options
+            .entry("root".to_string())
+            .or_insert_with(|| resolve_storage_template(&prefix, region_name));
+    }
+
+    if !provider.bucket.trim().is_empty() {
+        options
+            .entry("bucket".to_string())
+            .or_insert_with(|| resolve_bucket_template(&provider.bucket, region_name));
+    }
+
+    if !provider.endpoint.trim().is_empty() {
+        options
+            .entry("endpoint".to_string())
+            .or_insert_with(|| construct_provider_endpoint(&provider.endpoint, provider.tls));
+    }
+
+    if let Some(region) = provider
+        .region
+        .as_deref()
+        .filter(|region| !region.is_empty())
+    {
+        options
+            .entry("region".to_string())
+            .or_insert_with(|| region.to_string());
+    }
+
+    if let Some(access_key) = provider
+        .access_key
+        .as_deref()
+        .filter(|access_key| !access_key.is_empty())
+    {
+        options
+            .entry("access_key_id".to_string())
+            .or_insert_with(|| access_key.to_string());
+    }
+
+    if let Some(secret_key) = provider
+        .secret_key
+        .as_deref()
+        .filter(|secret_key| !secret_key.is_empty())
+    {
+        options
+            .entry("secret_access_key".to_string())
+            .or_insert_with(|| secret_key.to_string());
+    }
+
+    if provider.public_read {
+        options
+            .entry("default_acl".to_string())
+            .or_insert_with(|| "public-read".to_string());
+    }
+
+    if !provider.path_style {
+        options
+            .entry("enable_virtual_host_style".to_string())
+            .or_insert_with(|| "true".to_string());
+    }
+
+    let bucket = options.get("bucket").cloned().unwrap_or_default();
+    if scheme == "s3" && bucket.trim().is_empty() {
+        return Err(StorageError::MissingBucket {
+            provider: provider_label,
+        });
+    }
+
+    let endpoint = options.get("endpoint").cloned().unwrap_or_default();
+    let root = options
+        .get("root")
+        .map(|root| root.trim().trim_matches('/').replace('\\', "/"))
+        .filter(|root| !root.is_empty());
+    let public_read = options
+        .get("default_acl")
+        .map(|acl| acl.eq_ignore_ascii_case("public-read"))
+        .unwrap_or(false);
+    let path_style = !options
+        .get("enable_virtual_host_style")
+        .is_some_and(|value| matches_bool(value, true));
+    let base_url = provider
+        .public_base_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+        .map(|url| resolve_storage_template(url.trim().trim_end_matches('/'), region_name))
+        .unwrap_or_else(|| endpoint.clone());
+
+    Ok(ResolvedStorageProvider {
+        provider: provider_label,
+        scheme,
+        endpoint,
+        bucket,
+        root,
+        base_url,
+        public_read,
+        path_style,
+        options,
+    })
+}
+
+fn matches_bool(value: &str, expected: bool) -> bool {
+    matches!(
+        (value.trim().to_ascii_lowercase().as_str(), expected),
+        ("true" | "1" | "yes" | "on", true) | ("false" | "0" | "no" | "off", false)
+    )
+}
+
 fn is_retryable_storage_error(err: &StorageError) -> bool {
     matches!(err, StorageError::Upload { .. })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
     use std::path::Path;
 
-    use crate::core::config::{StorageConfig, StorageProviderConfig};
+    use tempfile::tempdir;
+
+    use crate::core::config::{RetryConfig, StorageConfig, StorageProviderConfig};
 
     use super::{
         construct_endpoint_url, construct_remote_path, construct_storage_key, normalize_prefix,
-        plan_storage_targets, resolve_bucket_template,
+        plan_storage_targets, resolve_bucket_template, upload_to_all_storages,
     };
 
     #[test]
@@ -306,6 +445,74 @@ mod tests {
         assert_eq!(
             targets[0].base_url,
             construct_endpoint_url("assets.example.com", true)
+        );
+    }
+
+    #[test]
+    fn storage_targets_support_opendal_options_schema() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("assets".to_string()),
+                scheme: "s3".to_string(),
+                root: Some("assets/{region}".to_string()),
+                public_base_url: Some("https://cdn.example.com/assets/{region}".to_string()),
+                options: BTreeMap::from([
+                    ("bucket".to_string(), "sekai-{region}-assets".to_string()),
+                    ("endpoint".to_string(), "https://s3.example.com".to_string()),
+                    ("default_acl".to_string(), "public-read".to_string()),
+                    ("enable_virtual_host_style".to_string(), "true".to_string()),
+                ]),
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        let targets = plan_storage_targets(&storage, "jp").unwrap();
+        assert_eq!(targets[0].provider_kind, "s3");
+        assert_eq!(targets[0].bucket, "sekai-jp-assets");
+        assert_eq!(targets[0].prefix.as_deref(), Some("assets/jp"));
+        assert_eq!(
+            targets[0].base_url,
+            "https://cdn.example.com/assets/jp".to_string()
+        );
+        assert!(targets[0].public_read);
+        assert!(!targets[0].path_style);
+    }
+
+    #[tokio::test]
+    async fn upload_to_fs_storage_writes_relative_files() {
+        let source_root = tempdir().unwrap();
+        let target_root = tempdir().unwrap();
+        let nested = source_root.path().join("music").join("file.txt");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        fs::write(&nested, b"hello").unwrap();
+
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                scheme: "fs".to_string(),
+                root: Some(target_root.path().to_string_lossy().into_owned()),
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        upload_to_all_storages(
+            &storage,
+            "jp",
+            source_root.path(),
+            std::slice::from_ref(&nested),
+            false,
+            1,
+            &RetryConfig {
+                attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_ms: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fs::read(target_root.path().join("music").join("file.txt")).unwrap(),
+            b"hello"
         );
     }
 }

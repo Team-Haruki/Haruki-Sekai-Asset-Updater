@@ -103,6 +103,7 @@ async fn binary_writes_main_and_access_logs_to_files() {
 
     let mut child = Command::new(binary)
         .env("HARUKI_CONFIG_PATH", &config_path)
+        .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

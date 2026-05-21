@@ -1,7 +1,5 @@
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::Builder;
-use aws_sdk_s3::Client;
 use clap::Parser;
+use opendal::{EntryMode, Operator};
 
 #[derive(Debug, Parser)]
 #[command(about = "List objects from an S3-compatible bucket prefix")]
@@ -30,38 +28,40 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let shared_config = aws_config::defaults(BehaviorVersion::latest())
-        .region(aws_config::Region::new(args.region.clone()))
-        .load()
-        .await;
-
-    let credentials =
-        aws_sdk_s3::config::Credentials::new(args.access_key, args.secret_key, None, None, "s3ls");
-
     let scheme = if args.tls { "https" } else { "http" };
-    let endpoint_url = format!("{scheme}://{}", args.endpoint);
-    let client = Client::from_conf(
-        Builder::from(&shared_config)
-            .endpoint_url(endpoint_url)
-            .force_path_style(args.path_style)
-            .credentials_provider(credentials)
-            .build(),
-    );
+    let endpoint = if args.endpoint.starts_with("http://") || args.endpoint.starts_with("https://")
+    {
+        args.endpoint.trim_end_matches('/').to_string()
+    } else {
+        format!("{scheme}://{}", args.endpoint.trim_end_matches('/'))
+    };
 
-    let response = client
-        .list_objects_v2()
-        .bucket(args.bucket)
-        .prefix(args.prefix)
-        .max_keys(args.max_keys)
-        .send()
+    let mut options = vec![
+        ("bucket".to_string(), args.bucket),
+        ("region".to_string(), args.region),
+        ("endpoint".to_string(), endpoint),
+        ("access_key_id".to_string(), args.access_key),
+        ("secret_access_key".to_string(), args.secret_key),
+    ];
+
+    if !args.path_style {
+        options.push(("enable_virtual_host_style".to_string(), "true".to_string()));
+    }
+
+    opendal::init_default_registry();
+    let operator = Operator::via_iter("s3", options)?;
+    let prefix = args.prefix.trim_start_matches('/').to_string();
+    let objects = operator
+        .list_with(&prefix)
+        .limit(args.max_keys.max(1) as usize)
         .await?;
 
-    let objects = response.contents();
     println!("count={}", objects.len());
     for object in objects {
-        let key = object.key().unwrap_or_default();
-        let size = object.size().unwrap_or_default();
-        println!("{size}\t{key}");
+        if object.metadata().mode() == EntryMode::DIR {
+            continue;
+        }
+        println!("{}\t{}", object.metadata().content_length(), object.path());
     }
 
     Ok(())

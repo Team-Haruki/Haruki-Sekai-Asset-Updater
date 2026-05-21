@@ -3,7 +3,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
+use yaml_serde::{Mapping, Value};
 
 use crate::core::errors::ConfigError;
 
@@ -61,11 +63,17 @@ impl AppConfig {
             path: path.clone(),
             source,
         })?;
-        let mut config: Self = yaml_serde::from_str(&raw).map_err(|source| ConfigError::Parse {
+        let mut value: Value = yaml_serde::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
             source,
         })?;
-        config.resolve_env_references()?;
+        expand_env_references(&mut value)?;
+        apply_env_overrides(&mut value)?;
+
+        let config: Self = yaml_serde::from_value(value).map_err(|source| ConfigError::Parse {
+            path: path.clone(),
+            source,
+        })?;
         config.validate()?;
         Ok(config)
     }
@@ -90,66 +98,6 @@ impl AppConfig {
             .filter_map(|(name, region)| region.enabled.then_some(name.clone()))
             .collect()
     }
-
-    fn resolve_env_references(&mut self) -> Result<(), ConfigError> {
-        resolve_secret_env(
-            "server.auth.bearer_token",
-            &mut self.server.auth.bearer_token,
-        )?;
-        resolve_secret_env(
-            "tools.asset_studio_cli_path",
-            &mut self.tools.asset_studio_cli_path,
-        )?;
-        resolve_secret_env(
-            "git_sync.chart_hashes.password",
-            &mut self.git_sync.chart_hashes.password,
-        )?;
-
-        for (idx, provider) in self.storage.providers.iter_mut().enumerate() {
-            resolve_secret_env(
-                &format!("storage.providers[{idx}].access_key"),
-                &mut provider.access_key,
-            )?;
-            resolve_secret_env(
-                &format!("storage.providers[{idx}].secret_key"),
-                &mut provider.secret_key,
-            )?;
-        }
-
-        for (region_name, region) in self.regions.iter_mut() {
-            resolve_secret_env(
-                &format!("regions.{region_name}.crypto.aes_key_hex"),
-                &mut region.crypto.aes_key_hex,
-            )?;
-            resolve_secret_env(
-                &format!("regions.{region_name}.crypto.aes_iv_hex"),
-                &mut region.crypto.aes_iv_hex,
-            )?;
-        }
-
-        Ok(())
-    }
-}
-
-fn resolve_secret_env(field: &str, value: &mut Option<String>) -> Result<(), ConfigError> {
-    let Some(raw) = value.as_deref().map(str::trim) else {
-        return Ok(());
-    };
-
-    let Some(name) = raw
-        .strip_prefix("${env:")
-        .and_then(|rest| rest.strip_suffix('}'))
-        .map(str::trim)
-    else {
-        return Ok(());
-    };
-
-    let resolved = env::var(name).map_err(|_| ConfigError::MissingEnvironmentVariable {
-        field: field.to_string(),
-        name: name.to_string(),
-    })?;
-    *value = Some(resolved);
-    Ok(())
 }
 
 fn candidate_paths() -> Vec<PathBuf> {
@@ -161,6 +109,221 @@ fn candidate_paths() -> Vec<PathBuf> {
     candidates.push(PathBuf::from("../haruki-asset-configs.yaml"));
     candidates.push(PathBuf::from("../../haruki-asset-configs.yaml"));
     candidates
+}
+
+fn expand_env_references(value: &mut Value) -> Result<(), ConfigError> {
+    match value {
+        Value::String(raw) => {
+            if let Some(expanded) = expand_env_references_in_string(raw)? {
+                *raw = expanded;
+            }
+        }
+        Value::Sequence(items) => {
+            for item in items {
+                expand_env_references(item)?;
+            }
+        }
+        Value::Mapping(map) => {
+            for (_, value) in map.iter_mut() {
+                expand_env_references(value)?;
+            }
+        }
+        Value::Tagged(tagged) => expand_env_references(&mut tagged.value)?,
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+
+    Ok(())
+}
+
+fn expand_env_references_in_string(raw: &str) -> Result<Option<String>, ConfigError> {
+    let Some(mut start) = raw.find("${env:") else {
+        return Ok(None);
+    };
+
+    let mut expanded = String::with_capacity(raw.len());
+    let mut cursor = 0;
+
+    while start < raw.len() {
+        expanded.push_str(&raw[cursor..start]);
+        let name_start = start + "${env:".len();
+        let Some(relative_end) = raw[name_start..].find('}') else {
+            expanded.push_str(&raw[start..]);
+            return Ok(Some(expanded));
+        };
+        let end = name_start + relative_end;
+        let name = raw[name_start..end].trim();
+        let value = env::var(name).map_err(|_| ConfigError::MissingEnvironmentVariable {
+            field: "config file".to_string(),
+            name: name.to_string(),
+        })?;
+        expanded.push_str(&value);
+        cursor = end + 1;
+
+        let Some(next) = raw[cursor..].find("${env:") else {
+            break;
+        };
+        start = cursor + next;
+    }
+
+    expanded.push_str(&raw[cursor..]);
+    Ok(Some(expanded))
+}
+
+fn apply_env_overrides(root: &mut Value) -> Result<(), ConfigError> {
+    let overrides = env::vars()
+        .filter(|(name, _)| name.starts_with("HARUKI__"))
+        .collect::<BTreeMap<_, _>>();
+
+    for (name, raw_value) in overrides {
+        let path = parse_env_override_path(&name)?;
+        let value = parse_env_override_value(&raw_value);
+        apply_env_override(root, &name, &path, value)?;
+    }
+
+    Ok(())
+}
+
+fn parse_env_override_path(name: &str) -> Result<Vec<String>, ConfigError> {
+    let raw_path =
+        name.strip_prefix("HARUKI__")
+            .ok_or_else(|| ConfigError::InvalidEnvironmentOverride {
+                name: name.to_string(),
+                reason: "override names must start with HARUKI__".to_string(),
+            })?;
+
+    if raw_path.is_empty() {
+        return Err(ConfigError::InvalidEnvironmentOverride {
+            name: name.to_string(),
+            reason: "override path is empty".to_string(),
+        });
+    }
+
+    raw_path
+        .split("__")
+        .map(|segment| {
+            if segment.is_empty() {
+                Err(ConfigError::InvalidEnvironmentOverride {
+                    name: name.to_string(),
+                    reason: "override path contains an empty segment".to_string(),
+                })
+            } else {
+                Ok(segment.to_ascii_lowercase())
+            }
+        })
+        .collect()
+}
+
+fn parse_env_override_value(raw: &str) -> Value {
+    if raw.is_empty() {
+        return Value::String(String::new());
+    }
+
+    yaml_serde::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+fn apply_env_override(
+    root: &mut Value,
+    name: &str,
+    path: &[String],
+    value: Value,
+) -> Result<(), ConfigError> {
+    if path.is_empty() {
+        return Err(ConfigError::InvalidEnvironmentOverride {
+            name: name.to_string(),
+            reason: "override path is empty".to_string(),
+        });
+    }
+
+    let mut current = root;
+    for (idx, segment) in path.iter().enumerate() {
+        let is_last = idx + 1 == path.len();
+        if is_last {
+            set_env_override_leaf(current, segment, value);
+            return Ok(());
+        }
+
+        current =
+            descend_env_override_path(current, segment, path.get(idx + 1).map(String::as_str));
+    }
+
+    Ok(())
+}
+
+fn set_env_override_leaf(current: &mut Value, segment: &str, value: Value) {
+    if let Ok(index) = segment.parse::<usize>() {
+        match current {
+            Value::Sequence(items) => {
+                if items.len() <= index {
+                    items.resize(index + 1, Value::Null);
+                }
+                items[index] = value;
+                return;
+            }
+            Value::Null => {
+                let mut items = Vec::new();
+                items.resize(index + 1, Value::Null);
+                items[index] = value;
+                *current = Value::Sequence(items);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if !matches!(current, Value::Mapping(_)) {
+        *current = Value::Mapping(Mapping::new());
+    }
+
+    if let Value::Mapping(map) = current {
+        map.insert(Value::String(segment.to_string()), value);
+    }
+}
+
+fn descend_env_override_path<'a>(
+    current: &'a mut Value,
+    segment: &str,
+    next_segment: Option<&str>,
+) -> &'a mut Value {
+    let default_child = || match next_segment.and_then(|next| next.parse::<usize>().ok()) {
+        Some(_) => Value::Sequence(Vec::new()),
+        None => Value::Mapping(Mapping::new()),
+    };
+
+    if let Ok(index) = segment.parse::<usize>() {
+        match current {
+            Value::Sequence(items) => {
+                if items.len() <= index {
+                    items.resize_with(index + 1, Value::default);
+                }
+                if matches!(items[index], Value::Null) {
+                    items[index] = default_child();
+                }
+                return &mut items[index];
+            }
+            Value::Null => {
+                let mut items = Vec::new();
+                items.resize_with(index + 1, Value::default);
+                items[index] = default_child();
+                *current = Value::Sequence(items);
+                if let Value::Sequence(items) = current {
+                    return &mut items[index];
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !matches!(current, Value::Mapping(_)) {
+        *current = Value::Mapping(Mapping::new());
+    }
+
+    if let Value::Mapping(map) = current {
+        return map
+            .entry(Value::String(segment.to_string()))
+            .or_insert_with(default_child);
+    }
+
+    unreachable!("current value was normalized into a mapping")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,7 +498,15 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageProviderConfig {
-    pub kind: String,
+    pub name: Option<String>,
+    #[serde(alias = "kind")]
+    pub scheme: String,
+    pub root: Option<String>,
+    pub public_base_url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_storage_options")]
+    pub options: BTreeMap<String, String>,
+    /// Legacy S3-compatible fields. Prefer `scheme`, `root`, and `options` for
+    /// new configs; these are retained to keep existing v2 YAML files working.
     pub endpoint: String,
     pub tls: bool,
     pub bucket: String,
@@ -350,7 +521,11 @@ pub struct StorageProviderConfig {
 impl Default for StorageProviderConfig {
     fn default() -> Self {
         Self {
-            kind: "s3".to_string(),
+            name: None,
+            scheme: "s3".to_string(),
+            root: None,
+            public_base_url: None,
+            options: BTreeMap::new(),
             endpoint: String::new(),
             tls: true,
             bucket: String::new(),
@@ -360,6 +535,34 @@ impl Default for StorageProviderConfig {
             public_read: false,
             access_key: None,
             secret_key: None,
+        }
+    }
+}
+
+fn deserialize_storage_options<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, Value>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(key, value)| {
+            storage_option_value_to_string(value)
+                .map(|value| (key, value))
+                .map_err(de::Error::custom)
+        })
+        .collect()
+}
+
+fn storage_option_value_to_string(value: Value) -> Result<String, String> {
+    match value {
+        Value::Null => Ok(String::new()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::String(value) => Ok(value),
+        Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => {
+            Err("storage provider options must be scalar values".to_string())
         }
     }
 }
@@ -485,12 +688,33 @@ pub struct RegionFiltersConfig {
 #[serde(default)]
 pub struct RegionExportConfig {
     pub by_category: bool,
+    pub asset_studio: AssetStudioExportConfig,
     pub usm: UsmExportConfig,
     pub acb: AcbExportConfig,
     pub hca: HcaExportConfig,
     pub images: ImageExportConfig,
     pub video: VideoExportConfig,
     pub audio: AudioExportConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssetStudioExportConfig {
+    pub export_types: Vec<String>,
+}
+
+impl Default for AssetStudioExportConfig {
+    fn default() -> Self {
+        Self {
+            export_types: vec![
+                "monoBehaviour".to_string(),
+                "textAsset".to_string(),
+                "tex2d".to_string(),
+                "tex2dArray".to_string(),
+                "audio".to_string(),
+            ],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -643,7 +867,7 @@ regions:
     }
 
     #[test]
-    fn load_from_path_resolves_secret_env_references_only_for_supported_fields() {
+    fn load_from_path_resolves_env_references_in_string_fields() {
         std::env::set_var(
             "HARUKI_TEST_AES_KEY_HEX",
             "00112233445566778899aabbccddeeff",
@@ -651,6 +875,7 @@ regions:
         std::env::set_var("HARUKI_TEST_AES_IV_HEX", "0102030405060708090a0b0c0d0e0f10");
         std::env::set_var("HARUKI_TEST_BEARER_TOKEN", "secret-token");
         std::env::set_var("HARUKI_TEST_ASSET_STUDIO_CLI_PATH", "/tmp/assetstudio");
+        std::env::set_var("HARUKI_TEST_STORAGE_BUCKET", "sekai-jp-assets");
 
         let mut file = NamedTempFile::new().unwrap();
         write!(
@@ -665,6 +890,12 @@ logging:
     format: "[${{time}}] ${{status}}"
 tools:
   asset_studio_cli_path: "${{env:HARUKI_TEST_ASSET_STUDIO_CLI_PATH}}"
+storage:
+  providers:
+    - scheme: s3
+      options:
+        bucket: "${{env:HARUKI_TEST_STORAGE_BUCKET}}"
+        disable_config_load: true
 regions:
   jp:
     enabled: true
@@ -699,12 +930,84 @@ regions:
             config.tools.asset_studio_cli_path.as_deref(),
             Some("/tmp/assetstudio")
         );
+        assert_eq!(
+            config.storage.providers[0].options.get("bucket"),
+            Some(&"sekai-jp-assets".to_string())
+        );
+        assert_eq!(
+            config.storage.providers[0]
+                .options
+                .get("disable_config_load"),
+            Some(&"true".to_string())
+        );
         assert_eq!(config.logging.access.format, "[${time}] ${status}");
 
         std::env::remove_var("HARUKI_TEST_AES_KEY_HEX");
         std::env::remove_var("HARUKI_TEST_AES_IV_HEX");
         std::env::remove_var("HARUKI_TEST_BEARER_TOKEN");
         std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_CLI_PATH");
+        std::env::remove_var("HARUKI_TEST_STORAGE_BUCKET");
+    }
+
+    #[test]
+    fn load_from_path_applies_haruki_double_underscore_overrides() {
+        std::env::set_var("HARUKI__SERVER__PORT", "19090");
+        std::env::set_var("HARUKI__CONCURRENCY__UPLOAD", "9");
+        std::env::set_var("HARUKI__REGIONS__JP__UPLOAD__ENABLED", "true");
+        std::env::set_var("HARUKI__STORAGE__PROVIDERS__0__NAME", "local-assets");
+        std::env::set_var("HARUKI__STORAGE__PROVIDERS__0__SCHEME", "fs");
+        std::env::set_var("HARUKI__STORAGE__PROVIDERS__0__ROOT", "./tmp/{region}");
+        std::env::set_var(
+            "HARUKI__STORAGE__PROVIDERS__0__OPTIONS__ATOMIC_WRITE_DIR",
+            "./tmp/.opendal",
+        );
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 2
+server:
+  port: 8080
+regions:
+  jp:
+    enabled: true
+    provider:
+      kind: colorful_palette
+      asset_info_url_template: "https://example.com/{{env}}/{{asset_version}}/{{asset_hash}}"
+      asset_bundle_url_template: "https://example.com/assets/{{bundle_path}}"
+      profile: production
+      profile_hashes:
+        production: abc123
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(file.path()).unwrap();
+        assert_eq!(config.server.port, 19090);
+        assert_eq!(config.concurrency.upload, 9);
+        assert!(config.regions["jp"].upload.enabled);
+        assert_eq!(
+            config.storage.providers[0].name.as_deref(),
+            Some("local-assets")
+        );
+        assert_eq!(config.storage.providers[0].scheme, "fs");
+        assert_eq!(
+            config.storage.providers[0].root.as_deref(),
+            Some("./tmp/{region}")
+        );
+        assert_eq!(
+            config.storage.providers[0].options.get("atomic_write_dir"),
+            Some(&"./tmp/.opendal".to_string())
+        );
+
+        std::env::remove_var("HARUKI__SERVER__PORT");
+        std::env::remove_var("HARUKI__CONCURRENCY__UPLOAD");
+        std::env::remove_var("HARUKI__REGIONS__JP__UPLOAD__ENABLED");
+        std::env::remove_var("HARUKI__STORAGE__PROVIDERS__0__NAME");
+        std::env::remove_var("HARUKI__STORAGE__PROVIDERS__0__SCHEME");
+        std::env::remove_var("HARUKI__STORAGE__PROVIDERS__0__ROOT");
+        std::env::remove_var("HARUKI__STORAGE__PROVIDERS__0__OPTIONS__ATOMIC_WRITE_DIR");
     }
 
     #[test]

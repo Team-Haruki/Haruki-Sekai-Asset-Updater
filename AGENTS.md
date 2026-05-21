@@ -52,13 +52,20 @@
 - `HARUKI_SHARED_AES_IV_HEX`
 - `HARUKI_EN_AES_KEY_HEX`
 - `HARUKI_EN_AES_IV_HEX`
+- `HARUKI_STORAGE_ACCESS_KEY_ID`
+- `HARUKI_STORAGE_SECRET_ACCESS_KEY`
 - `RUST_LOG`
+
+容器环境可以使用 `HARUKI__...` 双下划线路径覆盖任意配置项，例如
+`HARUKI__SERVER__PORT`、`HARUKI__REGIONS__JP__ENABLED`、
+`HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET`。
 
 ## 4. 依赖与实现约束
 
 - JSON 处理统一使用 `sonic-rs`，不要新增 `serde_json` 依赖。
 - YAML 处理统一使用 `yaml_serde`，不要新增 `serde_yaml` 依赖。
 - codec 后端统一依赖 crates.io 上的 `cridecoder`。
+- 云存储统一通过 OpenDAL 接入，不要重新引入 AWS SDK 直连上传实现。
 - 图片转换优先保持纯 Rust 路径，不要重新引入外部 WebP 工具链。
 - `AssetStudioModCLI` 与 `ffmpeg` 继续作为外部工具依赖。
 
