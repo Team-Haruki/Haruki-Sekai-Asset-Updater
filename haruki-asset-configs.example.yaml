@@ -31,6 +31,10 @@ execution:
     # volume in containers, for example /var/run/haruki/work.
     work_dir: ""
     cleanup_on_success: true
+    # Optional upload staging dir for exported files. {region}/{server} and
+    # {job_id} are expanded; without {job_id}, it is appended automatically.
+    export_dir: ""
+    cleanup_exports_on_success: true
   retry:
     attempts: 4
     initial_backoff_ms: 1000

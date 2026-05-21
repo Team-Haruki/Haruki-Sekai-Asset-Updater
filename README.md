@@ -10,6 +10,7 @@
 
 - Loads v2 YAML config
 - Exposes `GET /healthz`
+- Exposes `GET /readyz`
 - Exposes `POST /v2/assets/update`
 - Exposes `GET /v2/jobs/{id}`
 - Exposes `POST /v2/jobs/{id}/cancel`
@@ -85,6 +86,7 @@ docker compose up --build
 
 ```bash
 curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/readyz
 ```
 
 5. Submit a dry-run job:

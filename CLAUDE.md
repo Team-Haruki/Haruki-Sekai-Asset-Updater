@@ -82,6 +82,7 @@ docker compose up --build
 ## HTTP Endpoints
 
 - `GET /healthz`
+- `GET /readyz`
 - `POST /v2/assets/update`
 - `GET /v2/jobs/{id}`
 - `POST /v2/jobs/{id}/cancel`

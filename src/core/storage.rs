@@ -37,6 +37,17 @@ pub struct StorageUploadOptions<'a> {
     pub retry: &'a RetryConfig,
 }
 
+pub fn build_storage_operator_targets(
+    storage: &StorageConfig,
+    region_name: &str,
+    selected_providers: &[String],
+) -> Result<Vec<StorageOperatorTarget>, StorageError> {
+    selected_provider_configs(storage, selected_providers)?
+        .into_iter()
+        .map(|provider| build_operator_target(provider, region_name))
+        .collect()
+}
+
 pub fn plan_storage_targets(
     storage: &StorageConfig,
     region_name: &str,
@@ -72,10 +83,7 @@ pub async fn upload_to_all_storages(
         return Ok(());
     }
 
-    let targets = selected_provider_configs(storage, options.selected_providers)?
-        .into_iter()
-        .map(|provider| build_operator_target(provider, region_name))
-        .collect::<Result<Vec<_>, _>>()?;
+    let targets = build_storage_operator_targets(storage, region_name, options.selected_providers)?;
 
     let semaphore = Arc::new(Semaphore::new(options.concurrency.max(1)));
     let mut tasks = JoinSet::new();

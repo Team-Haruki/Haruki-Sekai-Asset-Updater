@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: haruki-config-bootstrap
+type: Opaque
+stringData:
+  config_access_key_id: replace-me
+  config_secret_access_key: replace-me
+  shared_aes_key_hex: replace-me
+  shared_aes_iv_hex: replace-me
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haruki-asset-updater
+  labels:
+    app.kubernetes.io/name: haruki-asset-updater
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: haruki-asset-updater
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: haruki-asset-updater
+    spec:
+      containers:
+        - name: updater
+          image: ghcr.io/team-haruki/haruki-sekai-asset-updater:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: HARUKI_CONFIG_URI
+              value: opendal://config/haruki-asset-configs.yaml
+            - name: HARUKI_CONFIG_OPENDAL_SCHEME
+              value: s3
+            - name: HARUKI_CONFIG_OPENDAL_OPTION_BUCKET
+              value: sekai-configs
+            - name: HARUKI_CONFIG_OPENDAL_OPTION_ENDPOINT
+              value: https://s3.example.com
+            - name: HARUKI_CONFIG_OPENDAL_OPTION_REGION
+              value: auto
+            - name: HARUKI_CONFIG_OPENDAL_OPTION_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: haruki-config-bootstrap
+                  key: config_access_key_id
+            - name: HARUKI_CONFIG_OPENDAL_OPTION_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: haruki-config-bootstrap
+                  key: config_secret_access_key
+            - name: HARUKI_SHARED_AES_KEY_HEX
+              valueFrom:
+                secretKeyRef:
+                  name: haruki-config-bootstrap
+                  key: shared_aes_key_hex
+            - name: HARUKI_SHARED_AES_IV_HEX
+              valueFrom:
+                secretKeyRef:
+                  name: haruki-config-bootstrap
+                  key: shared_aes_iv_hex
+            - name: HARUKI__EXECUTION__WORKSPACE__WORK_DIR
+              value: /var/run/haruki/work
+            - name: HARUKI__EXECUTION__WORKSPACE__EXPORT_DIR
+              value: /var/run/haruki/exports/{region}/{job_id}
+            - name: HARUKI__EXECUTION__WORKSPACE__CLEANUP_EXPORTS_ON_SUCCESS
+              value: "true"
+          volumeMounts:
+            - name: runtime-workspace
+              mountPath: /var/run/haruki
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: runtime-workspace
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: haruki-asset-updater
+  labels:
+    app.kubernetes.io/name: haruki-asset-updater
+spec:
+  selector:
+    app.kubernetes.io/name: haruki-asset-updater
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

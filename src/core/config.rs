@@ -573,6 +573,8 @@ impl Default for ExecutionConfig {
 pub struct RuntimeWorkspaceConfig {
     pub work_dir: Option<String>,
     pub cleanup_on_success: bool,
+    pub export_dir: Option<String>,
+    pub cleanup_exports_on_success: bool,
 }
 
 impl Default for RuntimeWorkspaceConfig {
@@ -580,6 +582,8 @@ impl Default for RuntimeWorkspaceConfig {
         Self {
             work_dir: None,
             cleanup_on_success: true,
+            export_dir: None,
+            cleanup_exports_on_success: true,
         }
     }
 }
@@ -997,6 +1001,8 @@ execution:
   workspace:
     work_dir: ./tmp/work
     cleanup_on_success: false
+    export_dir: ./tmp/exports/{region}/{job_id}
+    cleanup_exports_on_success: false
   retry:
     attempts: 3
     initial_backoff_ms: 250
@@ -1032,6 +1038,11 @@ regions:
             Some("./tmp/work")
         );
         assert!(!config.execution.workspace.cleanup_on_success);
+        assert_eq!(
+            config.execution.workspace.export_dir.as_deref(),
+            Some("./tmp/exports/{region}/{job_id}")
+        );
+        assert!(!config.execution.workspace.cleanup_exports_on_success);
         assert_eq!(
             config.regions["jp"]
                 .paths

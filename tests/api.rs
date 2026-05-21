@@ -119,6 +119,62 @@ async fn healthz_reports_enabled_regions() {
 }
 
 #[tokio::test]
+async fn readyz_reports_workspace_and_storage_readiness() {
+    let state = AppState::new(Arc::new(test_config()));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
+    assert_eq!(payload["status"].as_str(), Some("ready"));
+    assert!(payload["checks"]
+        .as_array()
+        .is_some_and(|checks| checks.len() >= 2));
+}
+
+#[tokio::test]
+async fn readyz_rejects_missing_selected_upload_provider() {
+    let mut config = test_config();
+    config.regions.get_mut("jp").unwrap().upload =
+        haruki_sekai_asset_updater::core::config::RegionUploadConfig {
+            enabled: true,
+            remove_local_after_upload: false,
+            providers: vec!["missing".to_string()],
+        };
+    let state = AppState::new(Arc::new(config));
+    let app = build_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: sonic_rs::Value = sonic_rs::from_slice(&body).unwrap();
+    assert_eq!(payload["status"].as_str(), Some("not_ready"));
+}
+
+#[tokio::test]
 async fn submit_update_requires_auth() {
     let state = AppState::new(Arc::new(test_config()));
     let app = build_router(state);

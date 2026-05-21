@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -13,6 +14,7 @@ use uuid::Uuid;
 use crate::core::config::AppConfig;
 use crate::core::errors::RegionError;
 use crate::core::models::{AssetUpdateRequest, JobSnapshot};
+use crate::core::storage::{build_storage_operator_target, build_storage_operator_targets};
 use crate::service::jobs::{JobListSummary, JobManager};
 use crate::service::logging::access_log_middleware;
 
@@ -36,6 +38,7 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/v2/assets/update", post(submit_update))
         .route("/v2/jobs", get(list_jobs))
         .route("/v2/jobs/{job_id}", get(get_job))
@@ -59,6 +62,165 @@ async fn healthz(State(state): State<AppState>) -> Json<HealthResponse> {
         config_version: state.config.config_version,
         enabled_regions: state.config.enabled_regions(),
     })
+}
+
+#[derive(Debug, Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    checks: Vec<ReadinessCheck>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReadinessCheck {
+    name: String,
+    status: &'static str,
+    message: String,
+}
+
+impl ReadinessCheck {
+    fn ok(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: "ok",
+            message: message.into(),
+        }
+    }
+
+    fn failed(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: "failed",
+            message: message.into(),
+        }
+    }
+}
+
+async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
+    let mut checks = vec![workspace_readiness_check(&state.config).await];
+    checks.extend(storage_readiness_checks(&state.config).await);
+
+    let ready = checks.iter().all(|check| check.status == "ok");
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(ReadinessResponse {
+            status: if ready { "ready" } else { "not_ready" },
+            checks,
+        }),
+    )
+}
+
+async fn workspace_readiness_check(config: &AppConfig) -> ReadinessCheck {
+    let root = workspace_probe_dir(config);
+    if let Err(err) = tokio::fs::create_dir_all(&root).await {
+        return ReadinessCheck::failed(
+            "workspace",
+            format!("failed to create workspace {}: {err}", root.display()),
+        );
+    }
+
+    let probe = root.join(format!(
+        ".readyz-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    if let Err(err) = tokio::fs::write(&probe, b"ready").await {
+        return ReadinessCheck::failed(
+            "workspace",
+            format!("failed to write workspace probe {}: {err}", probe.display()),
+        );
+    }
+    if let Err(err) = tokio::fs::remove_file(&probe).await {
+        return ReadinessCheck::failed(
+            "workspace",
+            format!(
+                "failed to remove workspace probe {}: {err}",
+                probe.display()
+            ),
+        );
+    }
+
+    ReadinessCheck::ok(
+        "workspace",
+        format!("workspace {} is writable", root.display()),
+    )
+}
+
+fn workspace_probe_dir(config: &AppConfig) -> PathBuf {
+    config
+        .execution
+        .workspace
+        .work_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+async fn storage_readiness_checks(config: &AppConfig) -> Vec<ReadinessCheck> {
+    let mut checks = Vec::new();
+
+    for (region_name, region) in config.regions.iter().filter(|(_, region)| region.enabled) {
+        if let Some(record_storage) = &region.paths.downloaded_asset_record_storage {
+            let name = format!("record-storage:{region_name}:{}", record_storage.provider);
+            match build_storage_operator_target(
+                &config.storage,
+                &record_storage.provider,
+                region_name,
+            ) {
+                Ok(target) => checks.push(check_storage_operator(name, target.operator).await),
+                Err(err) => checks.push(ReadinessCheck::failed(name, err.to_string())),
+            }
+        }
+
+        if region.upload.enabled {
+            match build_storage_operator_targets(
+                &config.storage,
+                region_name,
+                &region.upload.providers,
+            ) {
+                Ok(targets) if targets.is_empty() => checks.push(ReadinessCheck::failed(
+                    format!("upload-storage:{region_name}"),
+                    "upload is enabled but no storage providers are configured",
+                )),
+                Ok(targets) => {
+                    for target in targets {
+                        checks.push(
+                            check_storage_operator(
+                                format!("upload-storage:{region_name}:{}", target.provider),
+                                target.operator,
+                            )
+                            .await,
+                        );
+                    }
+                }
+                Err(err) => checks.push(ReadinessCheck::failed(
+                    format!("upload-storage:{region_name}"),
+                    err.to_string(),
+                )),
+            }
+        }
+    }
+
+    if checks.is_empty() {
+        checks.push(ReadinessCheck::ok(
+            "storage",
+            "no enabled region uses OpenDAL-backed record state or upload",
+        ));
+    }
+
+    checks
+}
+
+async fn check_storage_operator(name: String, operator: opendal::Operator) -> ReadinessCheck {
+    match operator.check().await {
+        Ok(()) => ReadinessCheck::ok(name, "OpenDAL operator check succeeded"),
+        Err(err) => ReadinessCheck::failed(name, err.to_string()),
+    }
 }
 
 #[derive(Debug, Serialize)]

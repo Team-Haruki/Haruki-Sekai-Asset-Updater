@@ -15,6 +15,35 @@ Example response:
 }
 ```
 
+## `GET /readyz`
+
+Returns readiness for runtime workspaces and OpenDAL providers referenced by
+enabled regions. Workspace probes verify the configured `execution.workspace`
+directory is writable. Record-state and upload providers are initialized and
+checked before readiness returns `200`.
+
+Example response:
+
+```json
+{
+  "status": "ready",
+  "checks": [
+    {
+      "name": "workspace",
+      "status": "ok",
+      "message": "workspace /tmp is writable"
+    },
+    {
+      "name": "storage",
+      "status": "ok",
+      "message": "no enabled region uses OpenDAL-backed record state or upload"
+    }
+  ]
+}
+```
+
+Failed checks return `503 Service Unavailable` and use `status: "not_ready"`.
+
 ## `POST /v2/assets/update`
 
 Submits a new asset update job.

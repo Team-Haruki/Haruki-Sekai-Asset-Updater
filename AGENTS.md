@@ -12,6 +12,7 @@
   - `tests/`
 - 对外 HTTP 接口目前使用 v2 路径：
   - `GET /healthz`
+  - `GET /readyz`
   - `POST /v2/assets/update`
   - `GET /v2/jobs/{id}`
   - `POST /v2/jobs/{id}/cancel`

@@ -241,6 +241,7 @@ impl AssetExecutionContext {
         app_config: &AppConfig,
         progress: Option<UnboundedSender<ExecutionProgressUpdate>>,
         cancel_flag: Option<Arc<AtomicBool>>,
+        workspace_id: Option<String>,
     ) -> Result<ExecutionSummary, AssetExecutionError> {
         self.ensure_not_cancelled(&cancel_flag)?;
         let record_store = self.download_record_store(app_config)?;
@@ -305,6 +306,7 @@ impl AssetExecutionContext {
             let app_config = app_config_cloned.clone();
             let progress = progress.clone();
             let cancel_flag = cancel_flag.clone();
+            let workspace_id = workspace_id.clone();
             joins.spawn(async move {
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
                 if cancel_flag
@@ -325,7 +327,9 @@ impl AssetExecutionContext {
                 );
                 let bundle_path = task.bundle_path.clone();
                 let bundle_hash = task.bundle_hash.clone();
-                let result = ctx.download_and_export_bundle(&app_config, &task).await;
+                let result = ctx
+                    .download_and_export_bundle(&app_config, &task, workspace_id.as_deref())
+                    .await;
                 (bundle_path, bundle_hash, result)
             });
         }
@@ -418,6 +422,10 @@ impl AssetExecutionContext {
             false,
         )?
         .is_some();
+        self.cleanup_bundle_workspace(app_config, workspace_id.as_deref(), failed == 0)
+            .await;
+        self.cleanup_staged_exports(app_config, workspace_id.as_deref(), failed == 0)
+            .await;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::ChartHashSyncFinished {
@@ -754,6 +762,7 @@ impl AssetExecutionContext {
         &self,
         app_config: &AppConfig,
         task: &DownloadTask,
+        workspace_id: Option<&str>,
     ) -> Result<(), AssetExecutionError> {
         let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
             AssetExecutionError::MissingAssetSaveDir {
@@ -764,7 +773,12 @@ impl AssetExecutionContext {
         let body = self.get_with_retry(&bundle_url).await?;
         let deobfuscated = deobfuscate(&body);
 
-        let temp_file = bundle_temp_file_path(app_config, &self.region_name, &task.bundle_path);
+        let temp_file = bundle_temp_file_path(
+            app_config,
+            &self.region_name,
+            workspace_id,
+            &task.bundle_path,
+        );
         if let Some(parent) = temp_file.parent() {
             std::fs::create_dir_all(parent).map_err(|source| {
                 AssetExecutionError::CreateTempDir {
@@ -785,13 +799,19 @@ impl AssetExecutionContext {
             AssetCategory::OnDemand => "OnDemand",
             AssetCategory::Other(_) => "OnDemand",
         };
+        let export_output_dir = bundle_export_output_dir(
+            app_config,
+            &self.region_name,
+            workspace_id,
+            Path::new(&asset_save_dir),
+        );
         let export_result = extract_unity_asset_bundle(
             app_config,
             &self.region_name,
             &self.region,
             &temp_file,
             &task.bundle_path,
-            Path::new(&asset_save_dir),
+            &export_output_dir,
             category,
         )
         .await;
@@ -799,6 +819,68 @@ impl AssetExecutionContext {
             let _ = std::fs::remove_file(&temp_file);
         }
         export_result.map(|_| ()).map_err(Into::into)
+    }
+
+    async fn cleanup_staged_exports(
+        &self,
+        app_config: &AppConfig,
+        workspace_id: Option<&str>,
+        completed_without_bundle_failures: bool,
+    ) {
+        if !completed_without_bundle_failures
+            || !self.region.upload.enabled
+            || !app_config.execution.workspace.cleanup_exports_on_success
+        {
+            return;
+        }
+
+        let Some(root) = staged_export_root(app_config, &self.region_name, workspace_id) else {
+            return;
+        };
+        match tokio::fs::remove_dir_all(&root).await {
+            Ok(()) => tracing::info!(
+                region = %self.region_name,
+                path = %root.display(),
+                "cleaned staged export workspace"
+            ),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                region = %self.region_name,
+                path = %root.display(),
+                error = %err,
+                "failed to clean staged export workspace"
+            ),
+        }
+    }
+
+    async fn cleanup_bundle_workspace(
+        &self,
+        app_config: &AppConfig,
+        workspace_id: Option<&str>,
+        completed_without_bundle_failures: bool,
+    ) {
+        if !completed_without_bundle_failures || !app_config.execution.workspace.cleanup_on_success
+        {
+            return;
+        }
+
+        let Some(root) = bundle_workspace_root(app_config, workspace_id) else {
+            return;
+        };
+        match tokio::fs::remove_dir_all(&root).await {
+            Ok(()) => tracing::info!(
+                region = %self.region_name,
+                path = %root.display(),
+                "cleaned bundle workspace"
+            ),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                region = %self.region_name,
+                path = %root.display(),
+                error = %err,
+                "failed to clean bundle workspace"
+            ),
+        }
     }
 }
 
@@ -808,8 +890,23 @@ fn normalize_download_record_storage_path(raw_path: &str, region_name: &str) -> 
     (!normalized.is_empty()).then_some(normalized)
 }
 
-fn bundle_temp_file_path(app_config: &AppConfig, region_name: &str, bundle_path: &str) -> PathBuf {
-    let root = app_config
+fn bundle_temp_file_path(
+    app_config: &AppConfig,
+    region_name: &str,
+    workspace_id: Option<&str>,
+    bundle_path: &str,
+) -> PathBuf {
+    if let Some(root) = bundle_workspace_root(app_config, workspace_id) {
+        root.join(region_name).join(bundle_path)
+    } else {
+        workspace_root(app_config)
+            .join(region_name)
+            .join(bundle_path)
+    }
+}
+
+fn workspace_root(app_config: &AppConfig) -> PathBuf {
+    app_config
         .execution
         .workspace
         .work_dir
@@ -817,8 +914,48 @@ fn bundle_temp_file_path(app_config: &AppConfig, region_name: &str, bundle_path:
         .map(str::trim)
         .filter(|work_dir| !work_dir.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    root.join(region_name).join(bundle_path)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn bundle_workspace_root(app_config: &AppConfig, workspace_id: Option<&str>) -> Option<PathBuf> {
+    let workspace_id = workspace_id
+        .map(str::trim)
+        .filter(|workspace_id| !workspace_id.is_empty())?;
+    Some(workspace_root(app_config).join("jobs").join(workspace_id))
+}
+
+fn bundle_export_output_dir(
+    app_config: &AppConfig,
+    region_name: &str,
+    workspace_id: Option<&str>,
+    asset_save_dir: &Path,
+) -> PathBuf {
+    staged_export_root(app_config, region_name, workspace_id)
+        .unwrap_or_else(|| asset_save_dir.to_path_buf())
+}
+
+fn staged_export_root(
+    app_config: &AppConfig,
+    region_name: &str,
+    workspace_id: Option<&str>,
+) -> Option<PathBuf> {
+    let workspace_id = workspace_id
+        .map(str::trim)
+        .filter(|workspace_id| !workspace_id.is_empty())?;
+    let template = app_config
+        .execution
+        .workspace
+        .export_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    let resolved = resolve_storage_template(template, region_name);
+
+    if resolved.contains("{job_id}") {
+        Some(PathBuf::from(resolved.replace("{job_id}", workspace_id)))
+    } else {
+        Some(PathBuf::from(resolved).join(workspace_id))
+    }
 }
 
 pub async fn fetch_live_asset_bundle_info(
@@ -976,8 +1113,9 @@ mod tests {
     use crate::core::models::AssetUpdateRequest;
 
     use super::{
-        bundle_temp_file_path, decrypt_asset_bundle_info, deobfuscate, should_download_bundle,
-        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
+        bundle_export_output_dir, bundle_temp_file_path, decrypt_asset_bundle_info, deobfuscate,
+        should_download_bundle, AssetBundleDetail, AssetBundleInfo, AssetCategory,
+        AssetExecutionContext,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -1081,6 +1219,8 @@ mod tests {
                 workspace: RuntimeWorkspaceConfig {
                     work_dir: Some("/tmp/haruki-work".to_string()),
                     cleanup_on_success: false,
+                    export_dir: None,
+                    cleanup_exports_on_success: true,
                 },
                 ..crate::core::config::ExecutionConfig::default()
             },
@@ -1088,8 +1228,16 @@ mod tests {
         };
 
         assert_eq!(
-            bundle_temp_file_path(&config, "jp", "music/a"),
+            bundle_temp_file_path(&config, "jp", None, "music/a"),
             std::path::Path::new("/tmp/haruki-work")
+                .join("jp")
+                .join("music/a")
+        );
+        assert_eq!(
+            bundle_temp_file_path(&config, "jp", Some("job-1"), "music/a"),
+            std::path::Path::new("/tmp/haruki-work")
+                .join("jobs")
+                .join("job-1")
                 .join("jp")
                 .join("music/a")
         );
@@ -1099,14 +1247,43 @@ mod tests {
                 workspace: RuntimeWorkspaceConfig {
                     work_dir: Some(" ".to_string()),
                     cleanup_on_success: true,
+                    export_dir: None,
+                    cleanup_exports_on_success: true,
                 },
                 ..crate::core::config::ExecutionConfig::default()
             },
             ..AppConfig::default()
         };
 
-        assert!(
-            bundle_temp_file_path(&blank_config, "jp", "music/a").starts_with(std::env::temp_dir())
+        assert!(bundle_temp_file_path(&blank_config, "jp", None, "music/a")
+            .starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn bundle_export_output_dir_supports_job_scoped_staging() {
+        let config = AppConfig {
+            execution: crate::core::config::ExecutionConfig {
+                workspace: RuntimeWorkspaceConfig {
+                    export_dir: Some("/tmp/haruki-exports/{region}/{job_id}".to_string()),
+                    ..RuntimeWorkspaceConfig::default()
+                },
+                ..crate::core::config::ExecutionConfig::default()
+            },
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            bundle_export_output_dir(
+                &config,
+                "jp",
+                Some("job-1"),
+                std::path::Path::new("/persistent/jp")
+            ),
+            std::path::Path::new("/tmp/haruki-exports/jp/job-1")
+        );
+        assert_eq!(
+            bundle_export_output_dir(&config, "jp", None, std::path::Path::new("/persistent/jp")),
+            std::path::Path::new("/persistent/jp")
         );
     }
 
@@ -1297,7 +1474,7 @@ mod tests {
         };
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
-        let summary = executor.execute(&config, None, None).await.unwrap();
+        let summary = executor.execute(&config, None, None, None).await.unwrap();
         assert_eq!(summary.completed_downloads, 1);
 
         let record = load_download_record(&record_file).unwrap();
@@ -1453,7 +1630,7 @@ mod tests {
         };
 
         let executor = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
-        let summary = executor.execute(&config, None, None).await.unwrap();
+        let summary = executor.execute(&config, None, None, None).await.unwrap();
         assert_eq!(summary.completed_downloads, 1);
         assert_eq!(version_hits.load(Ordering::SeqCst), 1);
         assert!(cookie_seen.load(Ordering::SeqCst));
@@ -1586,7 +1763,7 @@ mod tests {
         };
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
-        let summary = executor.execute(&config, None, None).await.unwrap();
+        let summary = executor.execute(&config, None, None, None).await.unwrap();
 
         assert_eq!(summary.completed_downloads, 1);
         assert_eq!(info_hits.load(Ordering::SeqCst), 3);

@@ -117,10 +117,33 @@ execution:
   workspace:
     work_dir: "/var/run/haruki/work"
     cleanup_on_success: true
+    export_dir: "/var/run/haruki/exports/{region}/{job_id}"
+    cleanup_exports_on_success: true
 ```
 
 `cleanup_on_success` defaults to `true`. Failed bundle files are kept for
 inspection; successful files are removed when cleanup is enabled.
+When `export_dir` is set for HTTP jobs, exports are staged there instead of
+writing directly to `paths.asset_save_dir`. `{job_id}` is expanded per job; if
+it is omitted from the template, the job id is appended automatically. Staged
+exports are cleaned after a successful upload job when
+`cleanup_exports_on_success` is enabled. Failed or non-upload jobs keep their
+staged exports for inspection.
+
+## Probes
+
+Use `GET /healthz` for liveness and `GET /readyz` for readiness. Readiness
+creates and removes a small workspace probe file and checks OpenDAL operators
+used by enabled regions for record state or upload. Provider credentials should
+allow that OpenDAL check for each selected root.
+
+## Kubernetes
+
+`deploy/kubernetes/haruki-asset-updater.yaml` provides a deployment skeleton
+with an `emptyDir` workspace, liveness/readiness probes, a bootstrap config
+secret, and a service. It expects the real YAML config and credentials to live
+outside the manifest, either in the OpenDAL config source or in a secret
+manager.
 
 ## Upload Provider Selection
 

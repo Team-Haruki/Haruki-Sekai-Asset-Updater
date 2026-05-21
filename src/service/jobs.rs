@@ -270,7 +270,12 @@ impl JobManager {
                         };
                         let execution_result = timeout(
                             Duration::from_secs(config.execution.timeout_seconds),
-                            executor.execute(&config, Some(progress_tx), cancel_flag.clone()),
+                            executor.execute(
+                                &config,
+                                Some(progress_tx),
+                                cancel_flag.clone(),
+                                Some(id.to_string()),
+                            ),
                         )
                         .await;
                         let _ = progress_task.await;

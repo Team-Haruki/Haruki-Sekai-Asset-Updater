@@ -14,7 +14,7 @@ Status legend:
 | Area | Go v1 | Rust v2 | Status | Notes |
 | --- | --- | --- | --- | --- |
 | Service startup | `main.go` + Fiber | `src/main.rs` + Axum | `implemented` | Rust starts, loads config, and serves HTTP. |
-| Health endpoint | none | `GET /healthz` | `intentional-diff` | Rust adds health checks; Go had none despite compose expecting one. |
+| Health endpoints | none | `GET /healthz`, `GET /readyz` | `intentional-diff` | Rust adds liveness and readiness checks; Go had none despite compose expecting one. |
 | Submit update endpoint | `POST /update_asset` | `POST /v2/assets/update` | `intentional-diff` | Rust uses v2 job-oriented API instead of fire-and-forget v1 route. |
 | Job status query | none | `GET /v2/jobs/{id}` | `intentional-diff` | Rust adds persisted in-memory job snapshots. |
 | Job cancel | none | `POST /v2/jobs/{id}/cancel` | `intentional-diff` | Rust adds soft cancellation. |
