@@ -48,6 +48,10 @@
 当前常用环境变量包括：
 
 - `HARUKI_CONFIG_PATH`
+- `HARUKI_CONFIG_URI`
+- `HARUKI_CONFIG_OPENDAL_SCHEME`
+- `HARUKI_CONFIG_OPENDAL_ROOT`
+- `HARUKI_CONFIG_OPENDAL_OPTION_*`
 - `HARUKI_ASSET_STUDIO_CLI_PATH`
 - `HARUKI_SHARED_AES_KEY_HEX`
 - `HARUKI_SHARED_AES_IV_HEX`
@@ -59,7 +63,19 @@
 
 容器环境可以使用 `HARUKI__...` 双下划线路径覆盖任意配置项，例如
 `HARUKI__SERVER__PORT`、`HARUKI__REGIONS__JP__ENABLED`、
-`HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET`。
+`HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET`、
+`HARUKI__EXECUTION__WORKSPACE__WORK_DIR`、
+`HARUKI__EXECUTION__WORKSPACE__EXPORT_DIR`。
+
+云原生部署相关约定：
+
+- 可以通过 `HARUKI_CONFIG_URI=opendal://...` 从 OpenDAL 后端加载主配置。
+- 下载记录优先使用 `paths.downloaded_asset_record_storage`；未配置时才使用
+  `paths.downloaded_asset_record_file`。
+- HTTP 任务如果配置了 `execution.workspace.export_dir`，导出会进入 job 级
+  staging 目录，此时 `paths.asset_save_dir` 对该 HTTP 更新链路是可选的。
+- `execution.workspace.work_dir` 和 `execution.workspace.export_dir` 应指向容器
+  运行时临时卷或可写目录，不要把这些临时目录内容提交进仓库。
 
 ## 4. 依赖与实现约束
 

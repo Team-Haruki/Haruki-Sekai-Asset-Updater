@@ -48,7 +48,7 @@ docker compose up --build
 - `src/core.rs` / `src/core/` -- business logic:
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` string expansion and `HARUKI__...` env overrides
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
-  - `asset_execution.rs` -- runs the plan (download, decrypt, export, upload)
+  - `asset_execution.rs` -- runs the plan (download, decrypt, job-scoped staging/export, upload)
   - `export_pipeline.rs` -- post-processing: configurable AssetStudioModCLI invocation, PNG-to-WebP (pure Rust), media conversion
   - `codec.rs` -- wraps the `cridecoder` crate for USM/ACB decoding
   - `media.rs` -- ffmpeg-based conversions (USM/M2V to MP4, WAV to FLAC/MP3)
@@ -56,7 +56,7 @@ docker compose up --build
   - `git_sync.rs` -- chart hash sync via `git2-rs`
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection
   - `retry.rs` -- generic async retry helper
-  - `download_records.rs` -- tracks previously downloaded assets
+  - `download_records.rs` -- tracks previously downloaded assets in local files or OpenDAL storage
   - `models.rs` / `errors.rs` -- shared types and error enums
 
 - `src/service.rs` / `src/service/` -- HTTP and infrastructure:
@@ -78,6 +78,8 @@ docker compose up --build
 - **Config files:** only `haruki-asset-configs.yaml` (active) and `haruki-asset-configs.example.yaml` (template)
 - **Sensitive config** uses `${env:VAR_NAME}` syntax or `HARUKI__...` overrides, never hardcoded secrets
 - **Test samples** live in `tests/files/` (`0703.usm`, `se_0126_01.acb`)
+- **Cloud storage boundary:** config bootstrap, downloaded asset records, readiness checks, and uploads should use OpenDAL-backed providers where configured
+- **Runtime workspace:** bundle temp files and AssetStudio exports may use local runtime storage because external tools require local paths; prefer `execution.workspace.work_dir` and `execution.workspace.export_dir` for container jobs
 
 ## HTTP Endpoints
 
@@ -93,7 +95,17 @@ docker compose up --build
 - `HARUKI_CONFIG_URI` -- load config from OpenDAL storage, for example `opendal://config/haruki-asset-configs.yaml`
 - `HARUKI_CONFIG_OPENDAL_SCHEME` / `HARUKI_CONFIG_OPENDAL_ROOT` -- bootstrap OpenDAL config storage
 - `HARUKI_CONFIG_OPENDAL_OPTION_*` -- bootstrap OpenDAL config storage options such as bucket, endpoint, access keys
+- `HARUKI__EXECUTION__WORKSPACE__WORK_DIR` -- override runtime bundle workspace, for example `/var/run/haruki/work`
+- `HARUKI__EXECUTION__WORKSPACE__EXPORT_DIR` -- override job-scoped export staging, for example `/var/run/haruki/exports/{region}/{job_id}`
+- `HARUKI__EXECUTION__WORKSPACE__CLEANUP_EXPORTS_ON_SUCCESS` -- clean staged exports after successful upload jobs
 - `HARUKI_ASSET_STUDIO_CLI_PATH` -- path to AssetStudioModCLI binary
 - `HARUKI_SHARED_AES_KEY_HEX` / `HARUKI_SHARED_AES_IV_HEX` -- shared AES keys (JP/TW/KR/CN)
 - `HARUKI_EN_AES_KEY_HEX` / `HARUKI_EN_AES_IV_HEX` -- EN-specific AES keys
 - `RUST_LOG` -- tracing log level filter
+
+## Cloud-Native Notes
+
+- `HARUKI_CONFIG_URI=opendal://...` loads the main YAML through the OpenDAL bootstrap environment before normal config parsing.
+- Prefer `paths.downloaded_asset_record_storage` for downloaded asset state; it takes precedence over `paths.downloaded_asset_record_file`.
+- For HTTP jobs, `execution.workspace.export_dir` stages exports per job. When that staging path is configured and a job id is available, `paths.asset_save_dir` is optional for the live update path.
+- `/readyz` checks the runtime workspace and configured OpenDAL record/upload providers. Keep probe credentials aligned with the selected provider roots.
