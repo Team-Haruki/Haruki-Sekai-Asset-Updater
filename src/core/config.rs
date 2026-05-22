@@ -481,16 +481,43 @@ pub struct RegionFiltersConfig {
     pub priority: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub const DEFAULT_ASSET_STUDIO_EXPORT_TYPES: &[&str] =
+    &["monoBehaviour", "textAsset", "tex2d", "tex2dArray", "audio"];
+
+fn default_asset_studio_export_types() -> Vec<String> {
+    DEFAULT_ASSET_STUDIO_EXPORT_TYPES
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegionExportConfig {
     pub by_category: bool,
+    #[serde(default = "default_asset_studio_export_types")]
+    pub asset_studio_types: Vec<String>,
     pub usm: UsmExportConfig,
     pub acb: AcbExportConfig,
     pub hca: HcaExportConfig,
     pub images: ImageExportConfig,
     pub video: VideoExportConfig,
     pub audio: AudioExportConfig,
+}
+
+impl Default for RegionExportConfig {
+    fn default() -> Self {
+        Self {
+            by_category: false,
+            asset_studio_types: default_asset_studio_export_types(),
+            usm: UsmExportConfig::default(),
+            acb: AcbExportConfig::default(),
+            hca: HcaExportConfig::default(),
+            images: ImageExportConfig::default(),
+            video: VideoExportConfig::default(),
+            audio: AudioExportConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +667,31 @@ regions:
         assert_eq!(config.logging.level, "DEBUG");
         assert_eq!(config.execution.retry.attempts, 3);
         assert_eq!(config.enabled_regions(), vec!["jp".to_string()]);
+        assert_eq!(
+            config.regions["jp"].export.asset_studio_types,
+            default_asset_studio_export_types()
+        );
+    }
+
+    #[test]
+    fn parses_configured_asset_studio_export_types() {
+        let yaml = r#"
+asset_studio_types:
+  - monoBehaviour
+  - textAsset
+  - font
+"#;
+
+        let export: RegionExportConfig = yaml_serde::from_str(yaml).unwrap();
+
+        assert_eq!(
+            export.asset_studio_types,
+            vec![
+                "monoBehaviour".to_string(),
+                "textAsset".to_string(),
+                "font".to_string()
+            ]
+        );
     }
 
     #[test]

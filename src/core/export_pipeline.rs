@@ -8,7 +8,7 @@ use serde::Serialize;
 use tokio::process::Command;
 
 use crate::core::codec;
-use crate::core::config::{AppConfig, RegionConfig};
+use crate::core::config::{AppConfig, RegionConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES};
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
     convert_m2v_to_mp4, convert_usm_to_mp4, convert_wav_to_flac, convert_wav_to_mp3, FrameRate,
@@ -488,7 +488,7 @@ fn build_assetstudio_export_args(
         "-m".to_string(),
         "export".to_string(),
         "-t".to_string(),
-        "monoBehaviour,textAsset,tex2d,tex2dArray,audio".to_string(),
+        asset_studio_export_types(region),
         "-g".to_string(),
         get_export_group(export_path).to_string(),
         "-f".to_string(),
@@ -530,6 +530,23 @@ fn build_assetstudio_export_args(
     }
 
     args
+}
+
+fn asset_studio_export_types(region: &RegionConfig) -> String {
+    let mut export_types = Vec::new();
+    for asset_type in &region.export.asset_studio_types {
+        let asset_type = asset_type.trim();
+        if asset_type.is_empty() || export_types.iter().any(|value| value == asset_type) {
+            continue;
+        }
+        export_types.push(asset_type.to_string());
+    }
+
+    if export_types.is_empty() {
+        DEFAULT_ASSET_STUDIO_EXPORT_TYPES.join(",")
+    } else {
+        export_types.join(",")
+    }
 }
 
 fn detect_assetstudio_cli_capabilities(asset_studio_cli_path: &str) -> AssetStudioCliCapabilities {
@@ -1114,6 +1131,61 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ExportPipelineError::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn assetstudio_args_use_configured_export_types() {
+        let (_config, mut region) = processing_config();
+        region.export.asset_studio_types = vec![
+            "monoBehaviour".to_string(),
+            "textAsset".to_string(),
+            "font".to_string(),
+            "font".to_string(),
+        ];
+        let args = build_assetstudio_export_args(
+            Path::new("/tmp/input.bundle"),
+            Path::new("/tmp/out"),
+            "event_story/foo",
+            "assets/sekai/assetbundle/resources",
+            &region,
+            AssetStudioCliCapabilities {
+                filter_exclude_mode: false,
+                filter_blacklist_mode: true,
+                sekai_keep_single_container_filename: false,
+            },
+        );
+        let type_arg = args
+            .iter()
+            .position(|arg| arg == "-t")
+            .and_then(|index| args.get(index + 1))
+            .unwrap();
+
+        assert_eq!(type_arg, "monoBehaviour,textAsset,font");
+    }
+
+    #[test]
+    fn assetstudio_args_fall_back_to_default_export_types() {
+        let (_config, mut region) = processing_config();
+        region.export.asset_studio_types = vec![" ".to_string()];
+        let args = build_assetstudio_export_args(
+            Path::new("/tmp/input.bundle"),
+            Path::new("/tmp/out"),
+            "event_story/foo",
+            "assets/sekai/assetbundle/resources",
+            &region,
+            AssetStudioCliCapabilities {
+                filter_exclude_mode: false,
+                filter_blacklist_mode: true,
+                sekai_keep_single_container_filename: false,
+            },
+        );
+        let type_arg = args
+            .iter()
+            .position(|arg| arg == "-t")
+            .and_then(|index| args.get(index + 1))
+            .unwrap();
+
+        assert_eq!(type_arg, "monoBehaviour,textAsset,tex2d,tex2dArray,audio");
     }
 
     #[test]
