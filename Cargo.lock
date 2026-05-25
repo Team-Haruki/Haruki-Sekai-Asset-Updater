@@ -1027,9 +1027,9 @@ dependencies = [
 
 [[package]]
 name = "cridecoder"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3c8ef84d98e3be08aff923e2b4be312c2b8aef9d3ea6cf77cd88a0b5249450a"
+checksum = "0966976a5c4ea5cc6251d37777427625a1d6e9a0018d21f388c0c970d84f9c3d"
 dependencies = [
  "byteorder",
  "encoding_rs",
@@ -3035,7 +3035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
