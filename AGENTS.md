@@ -97,43 +97,6 @@ cargo test
 - AssetStudio 集成（CI 可选）：
   确认 `tests/assetstudio_real.rs` 通过。
 
-## 7. Git commit 规范
-
-所有 commit **必须** 遵循以下格式：
-
-```
-[Type] Short description starting with capital letter
-```
-
-| Type      | 用途                           |
-|-----------|-------------------------------|
-| `[Feat]`  | 新功能或新能力                  |
-| `[Fix]`   | Bug 修复                       |
-| `[Chore]` | 维护、重构、依赖或构建变更       |
-| `[Docs]`  | 仅文档变更                     |
-
-规则：
-
-- 描述以**大写字母**开头。
-- 使用祈使语气（`Add ...` 而不是 `Added ...`）。
-- 末尾不加句号。
-- 标题行不超过 ~70 字符。
-- 代理生成的 commit **必须** 在 commit body 中添加 `Co-Authored-By` 署名，标明自己的身份。
-
-示例：
-
-```
-[Feat] Add batch save for download asset
-
-Co-Authored-By: Claude <noreply@anthropic.com>
-```
-
-```
-[Fix] Nuverse parse issue
-
-Co-Authored-By: GitHub Copilot <noreply@github.com>
-```
-
 ## 8. 对代理的特殊要求
 
 - 不要重新引入 Go 代码、Go 工具链或 Go 配置。
@@ -153,3 +116,57 @@ Co-Authored-By: GitHub Copilot <noreply@github.com>
 4. 再跑 `cargo clippy`。
 5. 最后跑 `cargo test`。
 6. 只在确认通过后再准备提交。
+
+## Git commits
+
+All commit subjects must follow:
+
+```text
+[Type] Short description starting with capital letter
+```
+
+Allowed types:
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+
+- Description starts with a capital letter.
+- Use imperative mood: `Add ...`, not `Added ...`.
+- No trailing period.
+- Keep the subject at or below roughly 70 characters.
+- **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
+  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Codex: `Co-authored-by: Codex <noreply@openai.com>`
+  - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+
+Examples from this repo's history:
+
+```text
+[Feat] Add configurable asset export types
+[Fix] Nuverse parse issue
+[Chore] Update dependencies
+[Feat] Replace git2 with git CLI and add commit signing (#16)
+```
+
+## GitHub Actions workflows
+
+Use the standardized workflow layout in `.github/workflows`:
+
+- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
+- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
+- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
+
+Workflow maintenance rules:
+
+- Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
+- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
+- Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
+- Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.

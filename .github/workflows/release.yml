@@ -4,133 +4,94 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: haruki-sekai-asset-updater
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            name: windows-x64
           - os: ubuntu-latest
-            name: linux-amd64
+            name: linux-x64
+            archive: tar.gz
           - os: macos-latest
             name: macos-arm64
-
+            archive: tar.gz
+          - os: windows-latest
+            name: windows-x64
+            archive: zip
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache Rust build artifacts
-      uses: Swatinem/rust-cache@v2
-      with:
-        workspaces: ". -> target"
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
 
-    - name: Get version
-      id: version
-      run: |
-        TAG="${GITHUB_REF##*/}"
-        if [ -z "$TAG" ] || [ "$TAG" = "refs/tags/" ]; then
-          TAG="v$(grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)"
-        fi
-        CRATE_VERSION="${TAG#v}"
-        echo "tag=$TAG" >> $GITHUB_OUTPUT
-        echo "crate_version=$CRATE_VERSION" >> $GITHUB_OUTPUT
-        echo "Tag: $TAG"
-        echo "Crate version: $CRATE_VERSION"
+      - name: Build release binary
+        run: cargo build --release --locked
 
-    - name: Stamp Cargo version from tag
-      env:
-        CRATE_VERSION: ${{ steps.version.outputs.crate_version }}
-      run: |
-        python3 - <<'PY'
-        import os
-        import re
-        from pathlib import Path
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp "target/release/${{ env.BINARY_NAME }}" "dist/${{ env.BINARY_NAME }}"
+          tar -czf "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz" -C dist "${{ env.BINARY_NAME }}"
 
-        path = Path("Cargo.toml")
-        text = path.read_text()
-        version = os.environ["CRATE_VERSION"]
-        updated, count = re.subn(
-            r'(?m)^version = ".*"$',
-            f'version = "{version}"',
-            text,
-            count=1,
-        )
-        if count != 1:
-            raise SystemExit("failed to update Cargo.toml version")
-        path.write_text(updated)
-        PY
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "dist/${{ env.BINARY_NAME }}.exe"
+          Compress-Archive -Path "dist/${{ env.BINARY_NAME }}.exe" -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.zip" -Force
 
-    - name: Build for ${{ matrix.name }}
-      run: |
-        BINARY_NAME="haruki-sekai-asset-updater"
-        if [ "${{ runner.os }}" = "Windows" ]; then
-          BINARY_NAME="${BINARY_NAME}.exe"
-        fi
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.name }}
+          path: dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.${{ matrix.archive }}
+          if-no-files-found: error
 
-        mkdir -p dist
-
-        cargo build --release --bin haruki-sekai-asset-updater
-        cp "target/release/${BINARY_NAME}" "dist/${BINARY_NAME}"
-
-        cd dist
-        if [ "${{ runner.os }}" = "Windows" ]; then
-          zip "haruki-sekai-asset-updater-${{ matrix.name }}.zip" "$BINARY_NAME"
-        else
-          tar -czf "haruki-sekai-asset-updater-${{ matrix.name }}.tar.gz" "$BINARY_NAME"
-        fi
-
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v7
-      with:
-        name: ${{ matrix.name }}
-        path: dist/haruki-sekai-asset-updater-${{ matrix.name }}.*
-
-  release:
+  publish:
+    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    concurrency:
-      group: release-${{ github.ref_name }}
-      cancel-in-progress: false
-    if: github.event_name == 'push' && contains(github.ref, 'refs/tags/')
-
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
-    - name: Checkout repo
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
 
-    - name: Download all artifacts
-      uses: actions/download-artifact@v8
-      with:
-        path: artifacts
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; > "SHA256SUMS-${{ github.ref_name }}.txt"
 
-    - name: Create or update Release (idempotent)
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        TAG="${GITHUB_REF_NAME}"
-        TITLE="Release ${TAG}"
-        REPO="${GITHUB_REPOSITORY}"
-        if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-          gh release edit "$TAG" --repo "$REPO" --title "$TITLE" --latest
-        else
-          gh release create "$TAG" --repo "$REPO" --title "$TITLE" --generate-notes --latest
-        fi
-
-    - name: Upload Release Assets (overwrite)
-      env:
-        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        TAG="${GITHUB_REF_NAME}"
-        REPO="${GITHUB_REPOSITORY}"
-        gh release upload "$TAG" artifacts/**/* --repo "$REPO" --clobber
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/SHA256SUMS-${{ github.ref_name }}.txt
+          generate_release_notes: true
