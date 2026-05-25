@@ -6,35 +6,35 @@ description = "Rust service for Haruki Sekai Asset Updater"
 license = "MIT"
 
 [dependencies]
-aes = "0.9.0"
-axum = { version = "0.8.9", features = ["macros", "json"] }
-aws-config = "1.8.16"
-aws-sdk-s3 = { version = "1.132.0", default-features = false, features = [
+aes = "0.9"
+axum = { version = "0.8", features = ["macros", "json"] }
+aws-config = "1.8"
+aws-sdk-s3 = { version = "1", default-features = false, features = [
     "default-https-client",
     "http-1x",
     "rt-tokio",
     "sigv4a",
 ] }
-cbc = { version = "0.2.0", features = ["alloc"] }
-chrono = { version = "0.4.44", features = ["clock", "serde"] }
-clap = { version = "4.6.1", features = ["derive"] }
-cridecoder = "0.1.1"
-hex = "0.4.3"
-image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
-mime_guess = "2.0.5"
-regex = "1.12.3"
-reqwest = { version = "0.13.3", default-features = false, features = ["brotli", "deflate", "gzip", "http2", "json", "rustls"] }
-rmp-serde = "1.3.1"
-serde = { version = "1.0.228", features = ["derive"] }
-sonic-rs = "0.5.8"
-tempfile = "3.27.0"
-thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tracing = "0.1.44"
-tracing-appender = "0.2.5"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
-uuid = { version = "1.23.1", features = ["serde", "v4"] }
-yaml_serde = "0.10.4"
+cbc = { version = "0.2", features = ["alloc"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4.6", features = ["derive"] }
+cridecoder = "0.1"
+hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+mime_guess = "2.0"
+regex = "1.12"
+reqwest = { version = "0.13", default-features = false, features = ["brotli", "deflate", "gzip", "http2", "json", "rustls"] }
+rmp-serde = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+sonic-rs = "0.5"
+tempfile = "3.27"
+thiserror = "2.0"
+tokio = { version = "1.52", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1.23", features = ["serde", "v4"] }
+yaml_serde = "0.10"
 
 [dev-dependencies]
 sha2 = "0.11.0"
