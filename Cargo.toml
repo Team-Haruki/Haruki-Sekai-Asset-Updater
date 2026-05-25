@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 aes = "0.9.0"
 axum = { version = "0.8.9", features = ["macros", "json"] }
-aws-config = "1.8.16"
+aws-config = "1.8.17"
 aws-sdk-s3 = { version = "1.132.0", default-features = false, features = [
     "default-https-client",
     "http-1x",
