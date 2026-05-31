@@ -66,7 +66,7 @@ Library callers can use the same native adapter through the Rust client API:
 
 ```rust
 use haruki_sekai_asset_updater::{
-    AssetStudioInspectOptions, AssetStudioNativeClient,
+    AssetStudioExportOptions, AssetStudioInspectOptions, AssetStudioNativeClient,
 };
 
 let client = AssetStudioNativeClient::new("/path/to/HarukiAssetStudioNative.dylib");
@@ -77,6 +77,15 @@ let response = client.inspect(&options)?;
 for asset in response.assets {
     println!("{:?} {:?}", asset.asset_type, asset.container);
 }
+
+let export_options =
+    AssetStudioExportOptions::new("/path/to/bundle.unityfs", "/tmp/export")
+        .export_path("music/jacket/jacket_s_712")
+        .strip_path_prefix("assets/sekai/assetbundle/resources")
+        .asset_types(["tex2d"])
+        .unity_version("2022.3.21f1");
+let export_response = client.export(&export_options)?;
+println!("exported {} files", export_response.exported_files.len());
 # Ok::<(), haruki_sekai_asset_updater::core::errors::ExportPipelineError>(())
 ```
 

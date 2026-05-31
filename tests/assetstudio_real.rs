@@ -8,6 +8,7 @@ use haruki_sekai_asset_updater::core::config::{
     RegionUploadConfig, RetryConfig, StorageConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::extract_unity_asset_bundle;
+use haruki_sekai_asset_updater::{AssetStudioExportOptions, AssetStudioNativeClient};
 use tempfile::tempdir;
 
 fn required_env(name: &str) -> Option<String> {
@@ -39,6 +40,58 @@ fn real_assetstudio_native_exports_expected_file_when_configured() {
         None,
         Some(asset_studio_native_library_path),
     );
+}
+
+#[test]
+fn real_assetstudio_native_client_exports_when_configured() {
+    let Some(native_library_path) = required_env("ASSET_STUDIO_NATIVE_LIBRARY_PATH") else {
+        return;
+    };
+    let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
+        return;
+    };
+
+    let output_dir = tempdir().unwrap();
+    let export_path = required_env("ASSET_STUDIO_EXPORT_PATH").unwrap_or_default();
+    let unity_version =
+        required_env("ASSET_STUDIO_UNITY_VERSION").unwrap_or_else(|| "2022.3.21f1".to_string());
+    let strip_path_prefix = required_env("ASSET_STUDIO_STRIP_PATH_PREFIX")
+        .unwrap_or_else(|| "assets/sekai/assetbundle/resources".to_string());
+    let asset_types = required_env("ASSET_STUDIO_ASSET_TYPES")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| vec!["tex2d".to_string()]);
+
+    let options = AssetStudioExportOptions::new(&bundle_path, output_dir.path())
+        .export_path(&export_path)
+        .strip_path_prefix(strip_path_prefix)
+        .asset_types(asset_types)
+        .unity_version(unity_version);
+    let response = AssetStudioNativeClient::new(native_library_path)
+        .export(&options)
+        .unwrap();
+
+    assert!(response.success);
+    assert!(
+        !response.exported_files.is_empty(),
+        "native client export returned no files"
+    );
+    if let Some(expected_relative_file) = required_env("ASSET_STUDIO_EXPECTED_RELATIVE_FILE") {
+        let export_root = output_dir.path().join(export_path);
+        let expected_path = export_root.join(PathBuf::from(expected_relative_file));
+        assert!(
+            expected_path.exists(),
+            "expected native client output missing: {}",
+            expected_path.display()
+        );
+    }
 }
 
 fn run_real_assetstudio_export(

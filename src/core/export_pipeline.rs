@@ -30,33 +30,32 @@ struct AssetStudioCliCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct AssetStudioNativeExportRequest {
-    input_path: String,
-    output_dir: String,
-    export_path: String,
-    strip_path_prefix: String,
-    asset_types: Vec<String>,
-    group_option: String,
-    filename_format: String,
-    overwrite_existing: bool,
-    filter_exclude_mode: bool,
-    filter_with_regex: bool,
-    filter_by_name: Option<String>,
-    unity_version: Option<String>,
-    keep_single_container_filename: bool,
+pub struct AssetStudioNativeExportRequest {
+    pub input_path: String,
+    pub output_dir: String,
+    pub export_path: String,
+    pub strip_path_prefix: String,
+    pub asset_types: Vec<String>,
+    pub group_option: String,
+    pub filename_format: String,
+    pub overwrite_existing: bool,
+    pub filter_exclude_mode: bool,
+    pub filter_with_regex: bool,
+    pub filter_by_name: Option<String>,
+    pub unity_version: Option<String>,
+    pub keep_single_container_filename: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct AssetStudioNativeExportResponse {
-    success: bool,
-    #[allow(dead_code)]
-    export_root: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetStudioNativeExportResponse {
+    pub success: bool,
+    pub export_root: Option<String>,
     #[serde(default)]
-    exported_files: Vec<String>,
+    pub exported_files: Vec<String>,
     #[serde(default)]
-    warnings: Vec<String>,
-    error: Option<String>,
-    duration_ms: Option<u64>,
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -558,10 +557,10 @@ pub fn inspect_assetstudio_native_bundle(
     }
 }
 
-fn call_assetstudio_native_export(
+pub fn export_assetstudio_native_bundle(
     native_library_path: &str,
     request: &AssetStudioNativeExportRequest,
-) -> Result<(), ExportPipelineError> {
+) -> Result<AssetStudioNativeExportResponse, ExportPipelineError> {
     let _lock = native_call_lock();
     let request_json = sonic_rs::to_string(request)
         .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
@@ -608,7 +607,7 @@ fn call_assetstudio_native_export(
     let (status, response_json) = response_json;
     let response: AssetStudioNativeExportResponse = sonic_rs::from_str(&response_json)
         .map_err(|source| ExportPipelineError::NativeParse { source })?;
-    for warning in response.warnings {
+    for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native backend warning");
     }
     if status == 0 && response.success {
@@ -617,14 +616,21 @@ fn call_assetstudio_native_export(
             duration_ms = response.duration_ms,
             "assetstudio native export completed"
         );
-        Ok(())
+        Ok(response)
     } else {
         Err(ExportPipelineError::AssetStudioNative {
-            message: response.error.unwrap_or_else(|| {
+            message: response.error.clone().unwrap_or_else(|| {
                 format!("native export failed with status {status} and no error message")
             }),
         })
     }
+}
+
+fn call_assetstudio_native_export(
+    native_library_path: &str,
+    request: &AssetStudioNativeExportRequest,
+) -> Result<(), ExportPipelineError> {
+    export_assetstudio_native_bundle(native_library_path, request).map(|_| ())
 }
 
 unsafe fn take_native_response_string(
