@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use haruki_sekai_asset_updater::core::config::DEFAULT_ASSET_STUDIO_EXPORT_TYPES;
-use haruki_sekai_asset_updater::core::export_pipeline::{
-    inspect_assetstudio_native_bundle, query_assetstudio_native_version,
-    AssetStudioNativeInspectRequest,
+use haruki_sekai_asset_updater::core::assetstudio_native::{
+    AssetStudioInspectOptions, AssetStudioNativeClient,
 };
 
 #[derive(Debug, Parser)]
@@ -44,33 +42,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .ok_or("--native-library or HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH is required")?;
 
+    let client = AssetStudioNativeClient::new(native_library);
+
     if !args.skip_version_check {
-        let version = query_assetstudio_native_version(&native_library)?;
+        let version = client.version()?;
         eprintln!(
             "native adapter: adapter_version={:?} assetstudio_cli_version={:?}",
             version.adapter_version, version.assetstudio_cli_version
         );
     }
 
-    let request = AssetStudioNativeInspectRequest {
-        input_path: args.bundle.display().to_string(),
-        asset_types: args.asset_types.unwrap_or_else(default_asset_types),
-        unity_version: args.unity_version,
-        filter_exclude_mode: args.filter_exclude_mode,
-        filter_with_regex: args.filter_with_regex,
-        filter_by_name: args.filter_by_name,
-        filter_by_container: args.filter_by_container,
-        load_all_assets: args.load_all_assets,
-    };
-    let response = inspect_assetstudio_native_bundle(&native_library, &request)?;
+    let mut options = AssetStudioInspectOptions::new(args.bundle)
+        .filter_exclude_mode(args.filter_exclude_mode)
+        .filter_with_regex(args.filter_with_regex)
+        .load_all_assets(args.load_all_assets);
+    if let Some(asset_types) = args.asset_types {
+        options = options.asset_types(asset_types);
+    }
+    if let Some(unity_version) = args.unity_version {
+        options = options.unity_version(unity_version);
+    }
+    if let Some(filter_by_name) = args.filter_by_name {
+        options = options.filter_by_name(filter_by_name);
+    }
+    if let Some(filter_by_container) = args.filter_by_container {
+        options = options.filter_by_container(filter_by_container);
+    }
+
+    let response = client.inspect(&options)?;
 
     println!("{}", sonic_rs::to_string_pretty(&response)?);
     Ok(())
-}
-
-fn default_asset_types() -> Vec<String> {
-    DEFAULT_ASSET_STUDIO_EXPORT_TYPES
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect()
 }

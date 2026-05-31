@@ -62,6 +62,24 @@ cargo run --bin assetstudio_inspect -- \
 
 The command prints pretty JSON using `sonic-rs`.
 
+Library callers can use the same native adapter through the Rust client API:
+
+```rust
+use haruki_sekai_asset_updater::{
+    AssetStudioInspectOptions, AssetStudioNativeClient,
+};
+
+let client = AssetStudioNativeClient::new("/path/to/HarukiAssetStudioNative.dylib");
+let options = AssetStudioInspectOptions::new("/path/to/bundle.unityfs")
+    .asset_types(["tex2d"])
+    .unity_version("2022.3.21f1");
+let response = client.inspect(&options)?;
+for asset in response.assets {
+    println!("{:?} {:?}", asset.asset_type, asset.container);
+}
+# Ok::<(), haruki_sekai_asset_updater::core::errors::ExportPipelineError>(())
+```
+
 ## Native Library Layout
 
 Keep the NativeAOT adapter and the texture decoder native library together:
