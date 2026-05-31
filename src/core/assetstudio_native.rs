@@ -78,6 +78,7 @@ pub struct AssetStudioExportOptions {
     pub filter_exclude_mode: bool,
     pub filter_with_regex: bool,
     pub filter_by_name: Option<String>,
+    pub filter_by_path_ids: Vec<i64>,
     pub unity_version: Option<String>,
     pub keep_single_container_filename: bool,
 }
@@ -96,6 +97,7 @@ impl AssetStudioExportOptions {
             filter_exclude_mode: false,
             filter_with_regex: false,
             filter_by_name: None,
+            filter_by_path_ids: Vec::new(),
             unity_version: None,
             keep_single_container_filename: false,
         }
@@ -146,6 +148,11 @@ impl AssetStudioExportOptions {
         self
     }
 
+    pub fn filter_by_path_ids(mut self, filter_by_path_ids: impl IntoIterator<Item = i64>) -> Self {
+        self.filter_by_path_ids = filter_by_path_ids.into_iter().collect();
+        self
+    }
+
     pub fn unity_version(mut self, unity_version: impl Into<String>) -> Self {
         self.unity_version = Some(unity_version.into());
         self
@@ -169,6 +176,7 @@ impl AssetStudioExportOptions {
             filter_exclude_mode: self.filter_exclude_mode,
             filter_with_regex: self.filter_with_regex,
             filter_by_name: self.filter_by_name.clone(),
+            filter_by_path_ids: self.filter_by_path_ids.clone(),
             unity_version: self.unity_version.clone(),
             keep_single_container_filename: self.keep_single_container_filename,
         }
@@ -184,6 +192,7 @@ pub struct AssetStudioInspectOptions {
     pub filter_with_regex: bool,
     pub filter_by_name: Option<String>,
     pub filter_by_container: Option<String>,
+    pub filter_by_path_ids: Vec<i64>,
     pub load_all_assets: bool,
 }
 
@@ -197,6 +206,7 @@ impl AssetStudioInspectOptions {
             filter_with_regex: false,
             filter_by_name: None,
             filter_by_container: None,
+            filter_by_path_ids: Vec::new(),
             load_all_assets: false,
         }
     }
@@ -218,6 +228,11 @@ impl AssetStudioInspectOptions {
 
     pub fn filter_by_container(mut self, filter_by_container: impl Into<String>) -> Self {
         self.filter_by_container = Some(filter_by_container.into());
+        self
+    }
+
+    pub fn filter_by_path_ids(mut self, filter_by_path_ids: impl IntoIterator<Item = i64>) -> Self {
+        self.filter_by_path_ids = filter_by_path_ids.into_iter().collect();
         self
     }
 
@@ -245,6 +260,7 @@ impl AssetStudioInspectOptions {
             filter_with_regex: self.filter_with_regex,
             filter_by_name: self.filter_by_name.clone(),
             filter_by_container: self.filter_by_container.clone(),
+            filter_by_path_ids: self.filter_by_path_ids.clone(),
             load_all_assets: self.load_all_assets,
         }
     }
@@ -292,6 +308,7 @@ mod tests {
             .filter_exclude_mode(true)
             .filter_with_regex(true)
             .filter_by_name(".*\\.mp3$")
+            .filter_by_path_ids([-7162526471603727243])
             .unity_version("2022.3.21f1")
             .keep_single_container_filename(true);
 
@@ -311,6 +328,7 @@ mod tests {
         assert!(request.filter_exclude_mode);
         assert!(request.filter_with_regex);
         assert_eq!(request.filter_by_name.as_deref(), Some(".*\\.mp3$"));
+        assert_eq!(request.filter_by_path_ids, vec![-7162526471603727243]);
         assert_eq!(request.unity_version.as_deref(), Some("2022.3.21f1"));
         assert!(request.keep_single_container_filename);
     }
@@ -338,6 +356,7 @@ mod tests {
             .unity_version("2022.3.21f1")
             .filter_by_name(".*\\.png$")
             .filter_by_container("assets/sekai/.*")
+            .filter_by_path_ids([42])
             .filter_with_regex(true)
             .filter_exclude_mode(true)
             .load_all_assets(true);
@@ -352,6 +371,7 @@ mod tests {
             request.filter_by_container.as_deref(),
             Some("assets/sekai/.*")
         );
+        assert_eq!(request.filter_by_path_ids, vec![42]);
         assert!(request.filter_with_regex);
         assert!(request.filter_exclude_mode);
         assert!(request.load_all_assets);

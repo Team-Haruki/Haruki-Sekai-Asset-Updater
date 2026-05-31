@@ -42,6 +42,7 @@ pub struct AssetStudioNativeExportRequest {
     pub filter_exclude_mode: bool,
     pub filter_with_regex: bool,
     pub filter_by_name: Option<String>,
+    pub filter_by_path_ids: Vec<i64>,
     pub unity_version: Option<String>,
     pub keep_single_container_filename: bool,
 }
@@ -67,6 +68,7 @@ pub struct AssetStudioNativeInspectRequest {
     pub filter_with_regex: bool,
     pub filter_by_name: Option<String>,
     pub filter_by_container: Option<String>,
+    pub filter_by_path_ids: Vec<i64>,
     pub load_all_assets: bool,
 }
 
@@ -397,6 +399,7 @@ fn build_assetstudio_native_export_request(
         filter_with_regex: true,
         filter_by_name: (!excluded_exts.is_empty())
             .then(|| format!(r".*\.({})$", excluded_exts.join("|"))),
+        filter_by_path_ids: Vec::new(),
         unity_version: (!region.runtime.unity_version.is_empty())
             .then(|| region.runtime.unity_version.clone()),
         keep_single_container_filename: capabilities.sekai_keep_single_container_filename,
@@ -1758,6 +1761,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             filter_exclude_mode: true,
             filter_with_regex: true,
             filter_by_name: None,
+            filter_by_path_ids: Vec::new(),
             unity_version: Some("2022.3.21f1".to_string()),
             keep_single_container_filename: true,
         };
@@ -1804,6 +1808,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             filter_with_regex: true,
             filter_by_name: None,
             filter_by_container: Some("assets/.*".to_string()),
+            filter_by_path_ids: vec![42],
             load_all_assets: false,
         };
 
@@ -1839,6 +1844,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             filter_exclude_mode: true,
             filter_with_regex: true,
             filter_by_name: None,
+            filter_by_path_ids: Vec::new(),
             unity_version: None,
             keep_single_container_filename: true,
         };

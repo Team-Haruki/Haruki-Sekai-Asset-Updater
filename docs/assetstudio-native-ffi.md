@@ -39,6 +39,8 @@ Request fields:
 - `unity_version`: optional Unity version override.
 - `filter_exclude_mode`, `filter_with_regex`, `filter_by_name`,
   `filter_by_container`: optional AssetStudio filters.
+- `filter_by_path_ids`: exact asset `path_id` filters, intended for the
+  inspect-then-export flow.
 - `load_all_assets`: mirrors AssetStudio's load-all option.
 
 Response fields:
@@ -57,7 +59,8 @@ cargo run --bin assetstudio_inspect -- \
   --native-library /path/to/HarukiAssetStudioNative.dylib \
   --bundle /path/to/bundle.unityfs \
   --unity-version 2022.3.21f1 \
-  --asset-types tex2d,textAsset
+  --asset-types tex2d,textAsset \
+  --filter-by-path-id -7162526471603727243
 ```
 
 The command prints pretty JSON using `sonic-rs`.
@@ -74,15 +77,17 @@ let options = AssetStudioInspectOptions::new("/path/to/bundle.unityfs")
     .asset_types(["tex2d"])
     .unity_version("2022.3.21f1");
 let response = client.inspect(&options)?;
-for asset in response.assets {
+for asset in &response.assets {
     println!("{:?} {:?}", asset.asset_type, asset.container);
 }
+let path_ids = response.assets.iter().map(|asset| asset.path_id);
 
 let export_options =
     AssetStudioExportOptions::new("/path/to/bundle.unityfs", "/tmp/export")
         .export_path("music/jacket/jacket_s_712")
         .strip_path_prefix("assets/sekai/assetbundle/resources")
         .asset_types(["tex2d"])
+        .filter_by_path_ids(path_ids)
         .unity_version("2022.3.21f1");
 let export_response = client.export(&export_options)?;
 println!("exported {} files", export_response.exported_files.len());

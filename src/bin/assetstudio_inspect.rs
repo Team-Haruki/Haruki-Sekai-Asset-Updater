@@ -21,6 +21,12 @@ struct Args {
     filter_by_name: Option<String>,
     #[arg(long = "filter-by-container")]
     filter_by_container: Option<String>,
+    #[arg(
+        long = "filter-by-path-id",
+        value_delimiter = ',',
+        allow_hyphen_values = true
+    )]
+    filter_by_path_ids: Vec<i64>,
     #[arg(long = "filter-with-regex")]
     filter_with_regex: bool,
     #[arg(long = "filter-exclude-mode")]
@@ -55,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut options = AssetStudioInspectOptions::new(args.bundle)
         .filter_exclude_mode(args.filter_exclude_mode)
         .filter_with_regex(args.filter_with_regex)
+        .filter_by_path_ids(args.filter_by_path_ids)
         .load_all_assets(args.load_all_assets);
     if let Some(asset_types) = args.asset_types {
         options = options.asset_types(asset_types);

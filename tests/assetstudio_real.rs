@@ -68,12 +68,26 @@ fn real_assetstudio_native_client_exports_when_configured() {
         })
         .filter(|values| !values.is_empty())
         .unwrap_or_else(|| vec!["tex2d".to_string()]);
+    let filter_by_path_ids = required_env("ASSET_STUDIO_FILTER_BY_PATH_IDS")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::parse::<i64>)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        })
+        .unwrap_or_default();
 
-    let options = AssetStudioExportOptions::new(&bundle_path, output_dir.path())
+    let mut options = AssetStudioExportOptions::new(&bundle_path, output_dir.path())
         .export_path(&export_path)
         .strip_path_prefix(strip_path_prefix)
         .asset_types(asset_types)
         .unity_version(unity_version);
+    if !filter_by_path_ids.is_empty() {
+        options = options.filter_by_path_ids(filter_by_path_ids);
+    }
     let response = AssetStudioNativeClient::new(native_library_path)
         .export(&options)
         .unwrap();
