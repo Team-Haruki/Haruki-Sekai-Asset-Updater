@@ -1,0 +1,275 @@
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use clap::{Parser, ValueEnum};
+use haruki_sekai_asset_updater::core::config::{
+    AppConfig, AssetStudioBackend, ChartHashConfig, ExecutionConfig, GitSyncConfig,
+    ImageExportConfig, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
+    RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig, ToolsConfig,
+};
+use haruki_sekai_asset_updater::core::export_pipeline::{
+    extract_unity_asset_bundle, query_assetstudio_native_version,
+};
+use tempfile::tempdir;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BenchBackend {
+    Cli,
+    Native,
+}
+
+impl BenchBackend {
+    fn config_backend(self) -> AssetStudioBackend {
+        match self {
+            Self::Cli => AssetStudioBackend::Cli,
+            Self::Native => AssetStudioBackend::Native,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Native => "native",
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "assetstudio_bench")]
+#[command(about = "Benchmark AssetStudio CLI and NativeAOT FFI exports through the Rust pipeline")]
+struct Args {
+    #[arg(long)]
+    bundle: PathBuf,
+    #[arg(long = "export-path", default_value = "")]
+    export_path: String,
+    #[arg(long, default_value = "StartApp")]
+    category: String,
+    #[arg(long = "unity-version", default_value = "2022.3.21f1")]
+    unity_version: String,
+    #[arg(long = "expected-file")]
+    expected_file: Option<PathBuf>,
+    #[arg(long = "cli-path")]
+    cli_path: Option<String>,
+    #[arg(long = "native-library")]
+    native_library: Option<String>,
+    #[arg(long, value_enum, value_delimiter = ',', default_value = "cli,native")]
+    backend: Vec<BenchBackend>,
+    #[arg(long, default_value_t = 1)]
+    warmup: usize,
+    #[arg(long, default_value_t = 5)]
+    iterations: usize,
+    #[arg(long = "by-category")]
+    by_category: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    if args.iterations == 0 {
+        return Err("--iterations must be greater than zero".into());
+    }
+
+    if let Some(native_library) = args.native_library.as_deref() {
+        let version = query_assetstudio_native_version(native_library)?;
+        eprintln!(
+            "native adapter: adapter_version={:?} assetstudio_cli_version={:?}",
+            version.adapter_version, version.assetstudio_cli_version
+        );
+    }
+
+    let mut results = Vec::new();
+    for backend in &args.backend {
+        validate_backend_inputs(*backend, &args)?;
+
+        for _ in 0..args.warmup {
+            run_once(*backend, &args).await?;
+        }
+
+        let mut elapsed_ms = Vec::new();
+        let mut exported_files = Vec::new();
+        for _ in 0..args.iterations {
+            let result = run_once(*backend, &args).await?;
+            elapsed_ms.push(result.elapsed_ms);
+            exported_files.push(result.exported_files);
+        }
+        elapsed_ms.sort_unstable();
+        let mean_ms = elapsed_ms.iter().sum::<u128>() as f64 / elapsed_ms.len() as f64;
+        let median_ms = elapsed_ms[elapsed_ms.len() / 2];
+        results.push(sonic_rs::json!({
+            "backend": backend.as_str(),
+            "iterations": args.iterations,
+            "mean_ms": mean_ms,
+            "median_ms": median_ms,
+            "min_ms": elapsed_ms[0],
+            "max_ms": elapsed_ms[elapsed_ms.len() - 1],
+            "exported_files": exported_files,
+        }));
+    }
+
+    println!(
+        "{}",
+        sonic_rs::to_string_pretty(&sonic_rs::json!({
+            "bundle": args.bundle.display().to_string(),
+            "export_path": args.export_path,
+            "category": args.category,
+            "backends": results,
+        }))?
+    );
+    Ok(())
+}
+
+fn validate_backend_inputs(
+    backend: BenchBackend,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match backend {
+        BenchBackend::Cli
+            if args
+                .cli_path
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty() =>
+        {
+            Err("--cli-path is required when benchmarking cli".into())
+        }
+        BenchBackend::Native
+            if args
+                .native_library
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty() =>
+        {
+            Err("--native-library is required when benchmarking native".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+struct RunResult {
+    elapsed_ms: u128,
+    exported_files: usize,
+}
+
+async fn run_once(
+    backend: BenchBackend,
+    args: &Args,
+) -> Result<RunResult, Box<dyn std::error::Error>> {
+    let output_dir = tempdir()?;
+    let region = benchmark_region(&args.unity_version, args.by_category);
+    let config = benchmark_config(backend, args);
+
+    let start = Instant::now();
+    let summary = extract_unity_asset_bundle(
+        &config,
+        "jp",
+        &region,
+        &args.bundle,
+        &args.export_path,
+        output_dir.path(),
+        &args.category,
+    )
+    .await?;
+    let elapsed_ms = start.elapsed().as_millis();
+
+    let export_root = if args.by_category {
+        output_dir
+            .path()
+            .join(args.category.to_lowercase())
+            .join(&args.export_path)
+    } else {
+        output_dir.path().join(&args.export_path)
+    };
+
+    if let Some(expected_file) = &args.expected_file {
+        let expected_path = export_root.join(expected_file);
+        if !expected_path.exists() {
+            return Err(format!(
+                "expected exported file missing: {}",
+                expected_path.display()
+            )
+            .into());
+        }
+    }
+
+    Ok(RunResult {
+        elapsed_ms,
+        exported_files: walk_files(&summary.export_root).len(),
+    })
+}
+
+fn benchmark_config(backend: BenchBackend, args: &Args) -> AppConfig {
+    AppConfig {
+        tools: ToolsConfig {
+            ffmpeg_path: "ffmpeg".to_string(),
+            asset_studio_backend: backend.config_backend(),
+            asset_studio_cli_path: args.cli_path.clone(),
+            asset_studio_native_library_path: args.native_library.clone(),
+        },
+        storage: StorageConfig {
+            providers: Vec::new(),
+        },
+        git_sync: GitSyncConfig {
+            chart_hashes: ChartHashConfig::default(),
+        },
+        execution: ExecutionConfig {
+            retry: RetryConfig {
+                attempts: 1,
+                initial_backoff_ms: 100,
+                max_backoff_ms: 100,
+            },
+            ..ExecutionConfig::default()
+        },
+        ..AppConfig::default()
+    }
+}
+
+fn benchmark_region(unity_version: &str, by_category: bool) -> RegionConfig {
+    RegionConfig {
+        enabled: true,
+        provider: RegionProviderConfig::default(),
+        runtime: RegionRuntimeConfig {
+            unity_version: unity_version.to_string(),
+        },
+        paths: RegionPathsConfig::default(),
+        export: RegionExportConfig {
+            by_category,
+            video: haruki_sekai_asset_updater::core::config::VideoExportConfig {
+                convert_to_mp4: false,
+                direct_usm_to_mp4_with_ffmpeg: false,
+                remove_m2v: false,
+            },
+            audio: haruki_sekai_asset_updater::core::config::AudioExportConfig {
+                convert_to_mp3: false,
+                convert_to_flac: false,
+                remove_wav: false,
+            },
+            images: ImageExportConfig {
+                convert_to_webp: false,
+                remove_png: false,
+            },
+            ..RegionExportConfig::default()
+        },
+        upload: RegionUploadConfig {
+            enabled: false,
+            remove_local_after_upload: false,
+        },
+        ..RegionConfig::default()
+    }
+}
+
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walk_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}

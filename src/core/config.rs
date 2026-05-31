@@ -667,8 +667,14 @@ pub struct RegionUploadConfig {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use tempfile::NamedTempFile;
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn rejects_non_v2_config_version() {
@@ -784,6 +790,7 @@ asset_studio_types:
 
     #[test]
     fn load_from_path_resolves_secret_env_references_only_for_supported_fields() {
+        let _env_lock = env_lock();
         std::env::set_var(
             "HARUKI_TEST_AES_KEY_HEX",
             "00112233445566778899aabbccddeeff",
@@ -859,6 +866,7 @@ regions:
 
     #[test]
     fn load_from_path_applies_asset_studio_env_overrides() {
+        let _env_lock = env_lock();
         let old_backend = std::env::var("HARUKI_ASSET_STUDIO_BACKEND").ok();
         let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH").ok();
         std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", "auto");

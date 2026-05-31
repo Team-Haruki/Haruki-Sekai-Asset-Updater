@@ -50,3 +50,20 @@ runs; the table reports the measured mean.
 The native backend helps most on small bundles where CLI process startup is a
 large part of total latency. Larger exports still benefit, but Rust-side
 post-processing reduces the visible backend delta.
+
+You can repeat a local comparison with the Rust benchmark helper:
+
+```bash
+cargo run --release --bin assetstudio_bench -- \
+  --bundle /path/to/bundle.unityfs \
+  --cli-path /path/to/AssetStudioModCLI \
+  --native-library /path/to/HarukiAssetStudioNative.dylib \
+  --backend cli,native \
+  --warmup 1 \
+  --iterations 5 \
+  --expected-file music/jacket/jacket_s_712/jacket_s_712.png
+```
+
+The helper prints JSON with per-backend mean, median, min, max, and exported file
+counts. It also calls `haruki_assetstudio_version` before native benchmarking so
+ABI loading failures are separated from export failures.
