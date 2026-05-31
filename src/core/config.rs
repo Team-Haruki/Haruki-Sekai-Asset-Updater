@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -101,6 +102,16 @@ impl AppConfig {
             &mut self.tools.asset_studio_cli_path,
         )?;
         resolve_secret_env(
+            "tools.asset_studio_native_library_path",
+            &mut self.tools.asset_studio_native_library_path,
+        )?;
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_BACKEND") {
+            self.tools.asset_studio_backend = value.parse()?;
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH") {
+            self.tools.asset_studio_native_library_path = non_empty_option(value);
+        }
+        resolve_secret_env(
             "git_sync.chart_hashes.password",
             &mut self.git_sync.chart_hashes.password,
         )?;
@@ -150,6 +161,14 @@ fn resolve_secret_env(field: &str, value: &mut Option<String>) -> Result<(), Con
     })?;
     *value = Some(resolved);
     Ok(())
+}
+
+fn non_empty_option(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn candidate_paths() -> Vec<PathBuf> {
@@ -251,7 +270,35 @@ impl Default for AccessLogConfig {
 #[serde(default)]
 pub struct ToolsConfig {
     pub ffmpeg_path: String,
+    pub asset_studio_backend: AssetStudioBackend,
     pub asset_studio_cli_path: Option<String>,
+    pub asset_studio_native_library_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetStudioBackend {
+    #[default]
+    Cli,
+    Native,
+    Auto,
+}
+
+impl FromStr for AssetStudioBackend {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "cli" => Ok(Self::Cli),
+            "native" => Ok(Self::Native),
+            "auto" => Ok(Self::Auto),
+            other => Err(ConfigError::InvalidValue {
+                field: "tools.asset_studio_backend".to_string(),
+                value: other.to_string(),
+                expected: "cli, native, or auto".to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,7 +346,9 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             ffmpeg_path: "ffmpeg".to_string(),
+            asset_studio_backend: AssetStudioBackend::Cli,
             asset_studio_cli_path: None,
+            asset_studio_native_library_path: None,
         }
     }
 }
@@ -674,6 +723,45 @@ regions:
     }
 
     #[test]
+    fn asset_studio_backend_defaults_to_cli() {
+        assert_eq!(
+            AppConfig::default().tools.asset_studio_backend,
+            AssetStudioBackend::Cli
+        );
+    }
+
+    #[test]
+    fn parses_asset_studio_backend_variants() {
+        let yaml = r#"
+asset_studio_backend: native
+asset_studio_cli_path: /tmp/assetstudio-cli
+asset_studio_native_library_path: /tmp/libHarukiAssetStudioNative.so
+"#;
+        let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
+        assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Native);
+        assert_eq!(
+            tools.asset_studio_native_library_path.as_deref(),
+            Some("/tmp/libHarukiAssetStudioNative.so")
+        );
+
+        let yaml = r#"
+asset_studio_backend: auto
+"#;
+        let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
+        assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Auto);
+    }
+
+    #[test]
+    fn rejects_invalid_asset_studio_backend() {
+        let err = "sidecar".parse::<AssetStudioBackend>().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "tools.asset_studio_backend" && value == "sidecar"
+        ));
+    }
+
+    #[test]
     fn parses_configured_asset_studio_export_types() {
         let yaml = r#"
 asset_studio_types:
@@ -703,6 +791,10 @@ asset_studio_types:
         std::env::set_var("HARUKI_TEST_AES_IV_HEX", "0102030405060708090a0b0c0d0e0f10");
         std::env::set_var("HARUKI_TEST_BEARER_TOKEN", "secret-token");
         std::env::set_var("HARUKI_TEST_ASSET_STUDIO_CLI_PATH", "/tmp/assetstudio");
+        std::env::set_var(
+            "HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+            "/tmp/libassetstudio-native.so",
+        );
 
         let mut file = NamedTempFile::new().unwrap();
         write!(
@@ -717,6 +809,7 @@ logging:
     format: "[${{time}}] ${{status}}"
 tools:
   asset_studio_cli_path: "${{env:HARUKI_TEST_ASSET_STUDIO_CLI_PATH}}"
+  asset_studio_native_library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH}}"
 regions:
   jp:
     enabled: true
@@ -751,12 +844,56 @@ regions:
             config.tools.asset_studio_cli_path.as_deref(),
             Some("/tmp/assetstudio")
         );
+        assert_eq!(
+            config.tools.asset_studio_native_library_path.as_deref(),
+            Some("/tmp/libassetstudio-native.so")
+        );
         assert_eq!(config.logging.access.format, "[${time}] ${status}");
 
         std::env::remove_var("HARUKI_TEST_AES_KEY_HEX");
         std::env::remove_var("HARUKI_TEST_AES_IV_HEX");
         std::env::remove_var("HARUKI_TEST_BEARER_TOKEN");
         std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_CLI_PATH");
+        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH");
+    }
+
+    #[test]
+    fn load_from_path_applies_asset_studio_env_overrides() {
+        let old_backend = std::env::var("HARUKI_ASSET_STUDIO_BACKEND").ok();
+        let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH").ok();
+        std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", "auto");
+        std::env::set_var(
+            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+            "/tmp/override-native.so",
+        );
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 2
+tools:
+  asset_studio_backend: cli
+  asset_studio_native_library_path: /tmp/config-native.so
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(file.path()).unwrap();
+        assert_eq!(config.tools.asset_studio_backend, AssetStudioBackend::Auto);
+        assert_eq!(
+            config.tools.asset_studio_native_library_path.as_deref(),
+            Some("/tmp/override-native.so")
+        );
+
+        match old_backend {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_BACKEND"),
+        }
+        match old_native_path {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"),
+        }
     }
 
     #[test]

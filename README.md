@@ -31,6 +31,7 @@
 - The loader resolves this syntax for:
   `server.auth.bearer_token`,
   `tools.asset_studio_cli_path`,
+  `tools.asset_studio_native_library_path`,
   `storage.providers[].access_key`,
   `storage.providers[].secret_key`,
   `git_sync.chart_hashes.password`,
@@ -38,6 +39,8 @@
   `regions.*.crypto.aes_iv_hex`.
 - Tracked config templates expect values such as:
   `HARUKI_ASSET_STUDIO_CLI_PATH`,
+  `HARUKI_ASSET_STUDIO_BACKEND`,
+  `HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH`,
   `HARUKI_SHARED_AES_KEY_HEX`,
   `HARUKI_SHARED_AES_IV_HEX`,
   `HARUKI_EN_AES_KEY_HEX`,
@@ -56,6 +59,9 @@ cp haruki-asset-configs.example.yaml haruki-asset-configs.yaml
 ```bash
 cp .env.example .env
 export HARUKI_ASSET_STUDIO_CLI_PATH=/path/to/AssetStudioModCLI
+# Optional experimental NativeAOT FFI backend:
+# export HARUKI_ASSET_STUDIO_BACKEND=auto
+# export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/path/to/HarukiAssetStudioNative.so
 export HARUKI_SHARED_AES_KEY_HEX=...
 export HARUKI_SHARED_AES_IV_HEX=...
 export HARUKI_EN_AES_KEY_HEX=...

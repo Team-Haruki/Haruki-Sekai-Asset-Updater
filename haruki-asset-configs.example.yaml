@@ -33,7 +33,9 @@ execution:
 
 tools:
   ffmpeg_path: "ffmpeg"
+  asset_studio_backend: "cli" # cli | native | auto
   asset_studio_cli_path: ""
+  asset_studio_native_library_path: ""
 
 concurrency:
   download: 4

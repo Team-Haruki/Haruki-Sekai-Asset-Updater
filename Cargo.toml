@@ -21,6 +21,7 @@ clap = { version = "4.6", features = ["derive"] }
 cridecoder = "0.1"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+libloading = "0.8"
 mime_guess = "2.0"
 regex = "1.12"
 reqwest = { version = "0.13", default-features = false, features = ["brotli", "deflate", "gzip", "http2", "json", "rustls"] }

@@ -24,6 +24,12 @@ pub enum ConfigError {
     InvalidRegionName(String),
     #[error("missing required environment variable `{name}` referenced by `{field}`")]
     MissingEnvironmentVariable { field: String, name: String },
+    #[error("invalid value `{value}` for `{field}`; expected {expected}")]
+    InvalidValue {
+        field: String,
+        value: String,
+        expected: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -180,6 +186,18 @@ pub enum ExportPipelineError {
         program: String,
         status: String,
         stderr: String,
+    },
+    #[error("assetstudio native backend failed: {message}")]
+    AssetStudioNative { message: String },
+    #[error("failed to serialize assetstudio native request: {source}")]
+    NativeSerialize {
+        #[source]
+        source: sonic_rs::Error,
+    },
+    #[error("failed to parse assetstudio native response: {source}")]
+    NativeParse {
+        #[source]
+        source: sonic_rs::Error,
     },
     #[error("failed to spawn worker `{worker}`: {source}")]
     WorkerSpawn {

@@ -1100,6 +1100,7 @@ mod tests {
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: "ffmpeg".to_string(),
                 asset_studio_cli_path: None,
+                ..crate::core::config::ToolsConfig::default()
             },
             git_sync: GitSyncConfig {
                 chart_hashes: ChartHashConfig::default(),
@@ -1251,6 +1252,7 @@ mod tests {
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: "ffmpeg".to_string(),
                 asset_studio_cli_path: None,
+                ..crate::core::config::ToolsConfig::default()
             },
             git_sync: GitSyncConfig {
                 chart_hashes: ChartHashConfig::default(),

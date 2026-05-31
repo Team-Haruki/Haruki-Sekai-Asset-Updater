@@ -1,14 +1,20 @@
 use std::collections::VecDeque;
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
+use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageReader};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
+use tracing::warn;
 
 use crate::core::codec;
-use crate::core::config::{AppConfig, RegionConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES};
+use crate::core::config::{
+    AppConfig, AssetStudioBackend, RegionConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
+};
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
     convert_m2v_to_mp4, convert_usm_to_mp4, convert_wav_to_flac, convert_wav_to_mp3, FrameRate,
@@ -21,6 +27,38 @@ struct AssetStudioCliCapabilities {
     filter_exclude_mode: bool,
     filter_blacklist_mode: bool,
     sekai_keep_single_container_filename: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AssetStudioNativeExportRequest {
+    input_path: String,
+    output_dir: String,
+    export_path: String,
+    strip_path_prefix: String,
+    asset_types: Vec<String>,
+    group_option: String,
+    filename_format: String,
+    overwrite_existing: bool,
+    filter_exclude_mode: bool,
+    filter_with_regex: bool,
+    filter_by_name: Option<String>,
+    unity_version: Option<String>,
+    keep_single_container_filename: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetStudioNativeExportResponse {
+    success: bool,
+    #[allow(dead_code)]
+    export_root: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    exported_files: Vec<String>,
+    #[serde(default)]
+    warnings: Vec<String>,
+    error: Option<String>,
+    #[allow(dead_code)]
+    duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -64,13 +102,6 @@ pub async fn extract_unity_asset_bundle(
     output_dir: &Path,
     category: &str,
 ) -> Result<PostProcessSummary, ExportPipelineError> {
-    let Some(asset_studio_cli_path) = app_config.tools.asset_studio_cli_path.as_deref() else {
-        return Ok(PostProcessSummary {
-            export_root: output_dir.to_path_buf(),
-            ..PostProcessSummary::default()
-        });
-    };
-
     let exclude_path_prefix = if region.export.by_category {
         "assets/sekai/assetbundle/resources".to_string()
     } else if export_path.starts_with("mysekai") {
@@ -87,19 +118,141 @@ pub async fn extract_unity_asset_bundle(
     } else {
         output_dir.join(export_path)
     };
+
+    match app_config.tools.asset_studio_backend {
+        AssetStudioBackend::Cli => {
+            let Some(asset_studio_cli_path) =
+                configured_path(app_config.tools.asset_studio_cli_path.as_deref())
+            else {
+                return Ok(PostProcessSummary {
+                    export_root: output_dir.to_path_buf(),
+                    ..PostProcessSummary::default()
+                });
+            };
+            run_assetstudio_cli_export(
+                app_config,
+                region,
+                asset_bundle_file,
+                output_dir,
+                export_path,
+                &exclude_path_prefix,
+                asset_studio_cli_path,
+            )
+            .await?;
+        }
+        AssetStudioBackend::Native => {
+            let native_library_path =
+                configured_path(app_config.tools.asset_studio_native_library_path.as_deref())
+                    .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+                        message:
+                            "tools.asset_studio_native_library_path is required for native backend"
+                                .to_string(),
+                    })?;
+            run_assetstudio_native_export(
+                app_config,
+                region,
+                asset_bundle_file,
+                output_dir,
+                export_path,
+                &exclude_path_prefix,
+                native_library_path,
+            )
+            .await?;
+        }
+        AssetStudioBackend::Auto => {
+            if let Some(native_library_path) =
+                configured_path(app_config.tools.asset_studio_native_library_path.as_deref())
+            {
+                let native_result = run_assetstudio_native_export(
+                    app_config,
+                    region,
+                    asset_bundle_file,
+                    output_dir,
+                    export_path,
+                    &exclude_path_prefix,
+                    native_library_path,
+                )
+                .await;
+                if let Err(error) = native_result {
+                    if let Some(asset_studio_cli_path) =
+                        configured_path(app_config.tools.asset_studio_cli_path.as_deref())
+                    {
+                        warn!(
+                            error = %error,
+                            "assetstudio native backend failed; falling back to cli backend"
+                        );
+                        run_assetstudio_cli_export(
+                            app_config,
+                            region,
+                            asset_bundle_file,
+                            output_dir,
+                            export_path,
+                            &exclude_path_prefix,
+                            asset_studio_cli_path,
+                        )
+                        .await?;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            } else if let Some(asset_studio_cli_path) =
+                configured_path(app_config.tools.asset_studio_cli_path.as_deref())
+            {
+                run_assetstudio_cli_export(
+                    app_config,
+                    region,
+                    asset_bundle_file,
+                    output_dir,
+                    export_path,
+                    &exclude_path_prefix,
+                    asset_studio_cli_path,
+                )
+                .await?;
+            } else {
+                return Ok(PostProcessSummary {
+                    export_root: output_dir.to_path_buf(),
+                    ..PostProcessSummary::default()
+                });
+            }
+        }
+    }
+
+    post_process_exported_files(
+        app_config,
+        region_name,
+        region,
+        &actual_export_path,
+        output_dir,
+    )
+    .await
+}
+
+fn configured_path(path: Option<&str>) -> Option<&str> {
+    path.map(str::trim).filter(|value| !value.is_empty())
+}
+
+async fn run_assetstudio_cli_export(
+    app_config: &AppConfig,
+    region: &RegionConfig,
+    asset_bundle_file: &Path,
+    output_dir: &Path,
+    export_path: &str,
+    exclude_path_prefix: &str,
+    asset_studio_cli_path: &str,
+) -> Result<(), ExportPipelineError> {
     let capabilities = detect_assetstudio_cli_capabilities(asset_studio_cli_path);
     let args = build_assetstudio_export_args(
         asset_bundle_file,
         output_dir,
         export_path,
-        &exclude_path_prefix,
+        exclude_path_prefix,
         region,
         capabilities,
     );
 
     retry_async(
         &app_config.execution.retry,
-        "assetstudio export",
+        "assetstudio cli export",
         |_| async {
             let output = Command::new(asset_studio_cli_path)
                 .args(&args)
@@ -122,16 +275,224 @@ pub async fn extract_unity_asset_bundle(
         },
         is_retryable_command_error,
     )
-    .await?;
+    .await
+}
 
-    post_process_exported_files(
-        app_config,
-        region_name,
-        region,
-        &actual_export_path,
+async fn run_assetstudio_native_export(
+    app_config: &AppConfig,
+    region: &RegionConfig,
+    asset_bundle_file: &Path,
+    output_dir: &Path,
+    export_path: &str,
+    exclude_path_prefix: &str,
+    native_library_path: &str,
+) -> Result<(), ExportPipelineError> {
+    let capabilities = AssetStudioCliCapabilities {
+        filter_exclude_mode: true,
+        filter_blacklist_mode: false,
+        sekai_keep_single_container_filename: true,
+    };
+    let request = build_assetstudio_native_export_request(
+        asset_bundle_file,
         output_dir,
+        export_path,
+        exclude_path_prefix,
+        region,
+        capabilities,
+    );
+    let native_library_path = native_library_path.to_string();
+
+    retry_async(
+        &app_config.execution.retry,
+        "assetstudio native export",
+        |_| {
+            let request = request.clone();
+            let native_library_path = native_library_path.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    call_assetstudio_native_export(&native_library_path, &request)
+                })
+                .await
+                .map_err(|source| ExportPipelineError::WorkerPanic {
+                    worker: "assetstudio native export".to_string(),
+                    message: source.to_string(),
+                })?
+            }
+        },
+        is_retryable_command_error,
     )
     .await
+}
+
+fn build_assetstudio_native_export_request(
+    asset_bundle_file: &Path,
+    output_dir: &Path,
+    export_path: &str,
+    exclude_path_prefix: &str,
+    region: &RegionConfig,
+    capabilities: AssetStudioCliCapabilities,
+) -> AssetStudioNativeExportRequest {
+    let mut excluded_exts = Vec::new();
+    if !region.export.usm.export {
+        excluded_exts.push("usm");
+    }
+    if !region.export.acb.export {
+        excluded_exts.push("acb");
+    }
+
+    AssetStudioNativeExportRequest {
+        input_path: asset_bundle_file.to_string_lossy().to_string(),
+        output_dir: output_dir.to_string_lossy().to_string(),
+        export_path: export_path.to_string(),
+        strip_path_prefix: exclude_path_prefix.to_string(),
+        asset_types: asset_studio_export_type_list(region),
+        group_option: get_export_group(export_path).to_string(),
+        filename_format: "assetName".to_string(),
+        overwrite_existing: true,
+        filter_exclude_mode: capabilities.filter_exclude_mode || capabilities.filter_blacklist_mode,
+        filter_with_regex: true,
+        filter_by_name: (!excluded_exts.is_empty())
+            .then(|| format!(r".*\.({})$", excluded_exts.join("|"))),
+        unity_version: (!region.runtime.unity_version.is_empty())
+            .then(|| region.runtime.unity_version.clone()),
+        keep_single_container_filename: capabilities.sekai_keep_single_container_filename,
+    }
+}
+
+type AssetStudioExportFn =
+    unsafe extern "C" fn(request_json: *const c_char, response_json: *mut *mut c_char) -> c_int;
+type AssetStudioFreeStringFn = unsafe extern "C" fn(value: *mut c_char);
+
+fn call_assetstudio_native_export(
+    native_library_path: &str,
+    request: &AssetStudioNativeExportRequest,
+) -> Result<(), ExportPipelineError> {
+    let request_json = sonic_rs::to_string(request)
+        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
+    let request_json =
+        CString::new(request_json).map_err(|source| ExportPipelineError::AssetStudioNative {
+            message: format!("request json contains interior nul byte: {source}"),
+        })?;
+
+    let response_json = unsafe {
+        std::env::set_var(
+            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+            native_library_path,
+        );
+        let _native_dependency_handles =
+            preload_assetstudio_native_dependencies(native_library_path);
+        let library = libloading::Library::new(native_library_path).map_err(|source| {
+            ExportPipelineError::AssetStudioNative {
+                message: format!("failed to load native library `{native_library_path}`: {source}"),
+            }
+        })?;
+        let export = library
+            .get::<AssetStudioExportFn>(b"haruki_assetstudio_export")
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("missing haruki_assetstudio_export symbol: {source}"),
+            })?;
+        let free = library
+            .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
+            })?;
+
+        let mut response_ptr: *mut c_char = ptr::null_mut();
+        let status = export(request_json.as_ptr(), &mut response_ptr);
+        let response = if response_ptr.is_null() {
+            String::new()
+        } else {
+            let response = CStr::from_ptr(response_ptr).to_string_lossy().into_owned();
+            free(response_ptr);
+            response
+        };
+
+        if status != 0 && response.is_empty() {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!("native export failed with status {status} and no response"),
+            });
+        }
+        response
+    };
+
+    let response: AssetStudioNativeExportResponse = sonic_rs::from_str(&response_json)
+        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    for warning in response.warnings {
+        warn!(warning = %warning, "assetstudio native backend warning");
+    }
+    if response.success {
+        Ok(())
+    } else {
+        Err(ExportPipelineError::AssetStudioNative {
+            message: response
+                .error
+                .unwrap_or_else(|| "native export failed without an error message".to_string()),
+        })
+    }
+}
+
+fn preload_assetstudio_native_dependencies(native_library_path: &str) -> Vec<libloading::Library> {
+    let Some(native_library_dir) = Path::new(native_library_path).parent() else {
+        return Vec::new();
+    };
+
+    assetstudio_native_dependency_names()
+        .iter()
+        .filter_map(|library_name| {
+            let dependency_path = native_library_dir.join(library_name);
+            if !dependency_path.exists() {
+                return None;
+            }
+
+            match unsafe { load_assetstudio_native_dependency(&dependency_path) } {
+                Ok(library) => Some(library),
+                Err(source) => {
+                    warn!(
+                        dependency_path = %dependency_path.display(),
+                        error = %source,
+                        "failed to preload assetstudio native dependency"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+    &["libTexture2DDecoderNative.so"]
+}
+
+#[cfg(target_os = "macos")]
+fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+    &["libTexture2DDecoderNative.dylib"]
+}
+
+#[cfg(target_os = "windows")]
+fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+    &["Texture2DDecoderNative.dll"]
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+    &[]
+}
+
+#[cfg(unix)]
+unsafe fn load_assetstudio_native_dependency(
+    dependency_path: &Path,
+) -> Result<libloading::Library, libloading::Error> {
+    use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_NOW};
+
+    UnixLibrary::open(Some(dependency_path), RTLD_NOW | RTLD_GLOBAL).map(Into::into)
+}
+
+#[cfg(not(unix))]
+unsafe fn load_assetstudio_native_dependency(
+    dependency_path: &Path,
+) -> Result<libloading::Library, libloading::Error> {
+    libloading::Library::new(dependency_path)
 }
 
 pub async fn post_process_exported_files(
@@ -533,6 +894,10 @@ fn build_assetstudio_export_args(
 }
 
 fn asset_studio_export_types(region: &RegionConfig) -> String {
+    asset_studio_export_type_list(region).join(",")
+}
+
+fn asset_studio_export_type_list(region: &RegionConfig) -> Vec<String> {
     let mut export_types = Vec::new();
     for asset_type in &region.export.asset_studio_types {
         let asset_type = asset_type.trim();
@@ -543,9 +908,12 @@ fn asset_studio_export_types(region: &RegionConfig) -> String {
     }
 
     if export_types.is_empty() {
-        DEFAULT_ASSET_STUDIO_EXPORT_TYPES.join(",")
+        DEFAULT_ASSET_STUDIO_EXPORT_TYPES
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
     } else {
-        export_types.join(",")
+        export_types
     }
 }
 
@@ -799,16 +1167,17 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::core::config::{
-        AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionExportConfig,
-        RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig,
-        RetryConfig, StorageConfig,
+        AppConfig, AssetStudioBackend, ChartHashConfig, GitSyncConfig, RegionConfig,
+        RegionExportConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
+        RegionUploadConfig, RetryConfig, StorageConfig,
     };
     use crate::core::errors::ExportPipelineError;
 
     use super::{
-        build_assetstudio_export_args, extract_unity_asset_bundle, get_export_group,
-        handle_png_conversion, merge_usm_files, post_process_exported_files, process_usm_file,
-        run_path_tasks, scan_all_files, AssetStudioCliCapabilities,
+        build_assetstudio_export_args, call_assetstudio_native_export, extract_unity_asset_bundle,
+        get_export_group, handle_png_conversion, merge_usm_files, post_process_exported_files,
+        process_usm_file, run_path_tasks, scan_all_files, AssetStudioCliCapabilities,
+        AssetStudioNativeExportRequest,
     };
 
     fn repo_root() -> PathBuf {
@@ -817,6 +1186,93 @@ mod tests {
 
     fn sample_path(name: &str) -> PathBuf {
         repo_root().join("tests").join("files").join(name)
+    }
+
+    fn dynamic_library_name(stem: &str) -> String {
+        #[cfg(target_os = "windows")]
+        {
+            format!("{stem}.dll")
+        }
+        #[cfg(target_os = "macos")]
+        {
+            format!("lib{stem}.dylib")
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            format!("lib{stem}.so")
+        }
+    }
+
+    fn build_native_shim(dir: &Path) -> PathBuf {
+        let source = dir.join("assetstudio_native_shim.rs");
+        fs::write(
+            &source,
+            r##"
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int};
+use std::ptr;
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_export(
+    request_json: *const c_char,
+    response_json: *mut *mut c_char,
+) -> c_int {
+    if response_json.is_null() {
+        return 10;
+    }
+    *response_json = ptr::null_mut();
+    if request_json.is_null() {
+        *response_json = CString::new(
+            r#"{"success":false,"exported_files":[],"warnings":[],"error":"null request","duration_ms":0}"#,
+        )
+        .unwrap()
+        .into_raw();
+        return 11;
+    }
+    let request = CStr::from_ptr(request_json).to_string_lossy();
+    if request.contains("force_error") {
+        *response_json = CString::new(
+            r#"{"success":false,"exported_files":[],"warnings":["shim warning"],"error":"forced failure","duration_ms":1}"#,
+        )
+        .unwrap()
+        .into_raw();
+        return 12;
+    }
+    *response_json = CString::new(
+        r#"{"success":true,"export_root":"/tmp/export","exported_files":["/tmp/export/a.txt"],"warnings":["shim warning"],"error":null,"duration_ms":1}"#,
+    )
+    .unwrap()
+    .into_raw();
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
+    if !value.is_null() {
+        if let Ok(path) = std::env::var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER") {
+            let _ = std::fs::write(path, b"freed");
+        }
+        drop(CString::from_raw(value));
+    }
+}
+"##,
+        )
+        .unwrap();
+        let library = dir.join(dynamic_library_name("assetstudio_native_shim"));
+        let output = std::process::Command::new("rustc")
+            .arg("--crate-type")
+            .arg("cdylib")
+            .arg(&source)
+            .arg("-o")
+            .arg(&library)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "failed to compile native shim: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        library
     }
 
     fn processing_config() -> (AppConfig, RegionConfig) {
@@ -867,6 +1323,7 @@ mod tests {
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: std::env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string()),
                 asset_studio_cli_path: None,
+                ..crate::core::config::ToolsConfig::default()
             },
             storage: StorageConfig {
                 providers: Vec::new(),
@@ -1019,6 +1476,155 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn native_backend_uses_json_abi_and_releases_response_string() {
+        let dir = tempdir().unwrap();
+        let library = build_native_shim(dir.path());
+        let free_marker = dir.path().join("freed.txt");
+        std::env::set_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER", &free_marker);
+
+        let request = AssetStudioNativeExportRequest {
+            input_path: "/tmp/input.bundle".to_string(),
+            output_dir: "/tmp/out".to_string(),
+            export_path: "event_story/foo".to_string(),
+            strip_path_prefix: "assets/sekai/assetbundle/resources".to_string(),
+            asset_types: vec!["textAsset".to_string()],
+            group_option: "container".to_string(),
+            filename_format: "assetName".to_string(),
+            overwrite_existing: true,
+            filter_exclude_mode: true,
+            filter_with_regex: true,
+            filter_by_name: None,
+            unity_version: Some("2022.3.21f1".to_string()),
+            keep_single_container_filename: true,
+        };
+
+        call_assetstudio_native_export(&library.to_string_lossy(), &request).unwrap();
+        assert_eq!(fs::read_to_string(&free_marker).unwrap(), "freed");
+
+        std::env::remove_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER");
+    }
+
+    #[test]
+    fn native_backend_reports_nonzero_status_response_errors() {
+        let dir = tempdir().unwrap();
+        let library = build_native_shim(dir.path());
+        let request = AssetStudioNativeExportRequest {
+            input_path: "force_error.bundle".to_string(),
+            output_dir: "/tmp/out".to_string(),
+            export_path: "event_story/foo".to_string(),
+            strip_path_prefix: "assets/sekai/assetbundle/resources".to_string(),
+            asset_types: vec!["textAsset".to_string()],
+            group_option: "container".to_string(),
+            filename_format: "assetName".to_string(),
+            overwrite_existing: true,
+            filter_exclude_mode: true,
+            filter_with_regex: true,
+            filter_by_name: None,
+            unity_version: None,
+            keep_single_container_filename: true,
+        };
+
+        let err = call_assetstudio_native_export(&library.to_string_lossy(), &request).unwrap_err();
+        assert!(matches!(
+            err,
+            ExportPipelineError::AssetStudioNative { ref message }
+                if message == "forced failure"
+        ));
+    }
+
+    #[test]
+    fn native_backend_requires_library_path_when_selected() {
+        let dir = tempdir().unwrap();
+        let fake_bundle = dir.path().join("bundle.bin");
+        fs::write(&fake_bundle, b"bundle").unwrap();
+        let output_dir = dir.path().join("out");
+        let (mut config, region) = processing_config();
+        config.tools.asset_studio_backend = AssetStudioBackend::Native;
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let err = runtime
+            .block_on(extract_unity_asset_bundle(
+                &config,
+                "jp",
+                &region,
+                &fake_bundle,
+                "event_story/foo",
+                &output_dir,
+                "StartApp",
+            ))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ExportPipelineError::AssetStudioNative { ref message }
+                if message.contains("asset_studio_native_library_path")
+        ));
+    }
+
+    #[test]
+    fn auto_backend_falls_back_to_cli_when_native_load_fails() {
+        let dir = tempdir().unwrap();
+        let output_dir = dir.path().join("out");
+        let fake_bundle = dir.path().join("bundle.bin");
+        let script_path = dir.path().join("fake_assetstudio.sh");
+        fs::write(&fake_bundle, b"bundle").unwrap();
+        let script = r#"#!/bin/sh
+set -eu
+if [ "${1:-}" = "--help" ]; then
+  echo "--filter-exclude-mode --sekai-keep-single-container-filename"
+  exit 0
+fi
+OUT=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    OUT="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+mkdir -p "$OUT/fallback/path"
+printf fallback > "$OUT/fallback/path/done.txt"
+"#;
+        fs::write(&script_path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let (mut config, region) = processing_config();
+        config.tools.asset_studio_backend = AssetStudioBackend::Auto;
+        config.tools.asset_studio_native_library_path = Some(
+            dir.path()
+                .join("missing-native.so")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        config.tools.asset_studio_cli_path = Some(script_path.to_string_lossy().into_owned());
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(extract_unity_asset_bundle(
+                &config,
+                "jp",
+                &region,
+                &fake_bundle,
+                "fallback/path",
+                &output_dir,
+                "StartApp",
+            ))
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(output_dir.join("fallback/path/done.txt")).unwrap(),
+            "fallback"
+        );
     }
 
     #[test]
