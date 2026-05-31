@@ -16,6 +16,7 @@ The native backend uses a JSON C ABI:
 
 ```c
 int haruki_assetstudio_version(char** response_json);
+int haruki_assetstudio_inspect(const char* request_json, char** response_json);
 int haruki_assetstudio_export(const char* request_json, char** response_json);
 void haruki_assetstudio_free_string(char* ptr);
 ```
@@ -23,6 +24,43 @@ void haruki_assetstudio_free_string(char* ptr);
 Rust still owns request/response parsing with `sonic-rs`. The C# adapter
 serializes execution with a global lock because the AssetStudio export path uses
 static process state.
+
+## Inspect ABI
+
+`haruki_assetstudio_inspect` is the first higher-integration API beyond export.
+It lets Rust load a bundle, parse assets, and receive metadata before deciding
+what to export.
+
+Request fields:
+
+- `input_path`: bundle or extracted UnityFS path.
+- `asset_types`: AssetStudio type filters such as `tex2d`, `textAsset`, or
+  `audio`.
+- `unity_version`: optional Unity version override.
+- `filter_exclude_mode`, `filter_with_regex`, `filter_by_name`,
+  `filter_by_container`: optional AssetStudio filters.
+- `load_all_assets`: mirrors AssetStudio's load-all option.
+
+Response fields:
+
+- `success`, `error`, `warnings`, `duration_ms`.
+- `assets_file_count`: loaded assets file count.
+- `exportable_asset_count`: parsed/exportable asset count after filters.
+- `unity_version`: version discovered from the first loaded assets file.
+- `assets`: array of `index`, `name`, `container`, `type`, `type_id`,
+  `path_id`, `size`, and `source_file`.
+
+Rust has a helper CLI for local inspection:
+
+```bash
+cargo run --bin assetstudio_inspect -- \
+  --native-library /path/to/HarukiAssetStudioNative.dylib \
+  --bundle /path/to/bundle.unityfs \
+  --unity-version 2022.3.21f1 \
+  --asset-types tex2d,textAsset
+```
+
+The command prints pretty JSON using `sonic-rs`.
 
 ## Native Library Layout
 

@@ -59,6 +59,45 @@ struct AssetStudioNativeExportResponse {
     duration_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetStudioNativeInspectRequest {
+    pub input_path: String,
+    pub asset_types: Vec<String>,
+    pub unity_version: Option<String>,
+    pub filter_exclude_mode: bool,
+    pub filter_with_regex: bool,
+    pub filter_by_name: Option<String>,
+    pub filter_by_container: Option<String>,
+    pub load_all_assets: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetStudioNativeAssetInfo {
+    pub index: usize,
+    pub name: Option<String>,
+    pub container: Option<String>,
+    #[serde(rename = "type")]
+    pub asset_type: Option<String>,
+    pub type_id: i32,
+    pub path_id: i64,
+    pub size: i64,
+    pub source_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetStudioNativeInspectResponse {
+    pub success: bool,
+    pub assets_file_count: usize,
+    pub exportable_asset_count: usize,
+    pub unity_version: Option<String>,
+    #[serde(default)]
+    pub assets: Vec<AssetStudioNativeAssetInfo>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssetStudioNativeVersion {
     pub success: bool,
@@ -367,6 +406,8 @@ fn build_assetstudio_native_export_request(
 
 type AssetStudioExportFn =
     unsafe extern "C" fn(request_json: *const c_char, response_json: *mut *mut c_char) -> c_int;
+type AssetStudioInspectFn =
+    unsafe extern "C" fn(request_json: *const c_char, response_json: *mut *mut c_char) -> c_int;
 type AssetStudioVersionFn = unsafe extern "C" fn(response_json: *mut *mut c_char) -> c_int;
 type AssetStudioFreeStringFn = unsafe extern "C" fn(value: *mut c_char);
 
@@ -444,6 +485,74 @@ pub fn query_assetstudio_native_version(
         Err(ExportPipelineError::AssetStudioNative {
             message: response.error.unwrap_or_else(|| {
                 format!("native version failed with status {status} and no error message")
+            }),
+        })
+    }
+}
+
+pub fn inspect_assetstudio_native_bundle(
+    native_library_path: &str,
+    request: &AssetStudioNativeInspectRequest,
+) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
+    let _lock = native_call_lock();
+    let request_json = sonic_rs::to_string(request)
+        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
+    let request_json =
+        CString::new(request_json).map_err(|source| ExportPipelineError::AssetStudioNative {
+            message: format!("inspect request json contains interior nul byte: {source}"),
+        })?;
+
+    let response_json = unsafe {
+        let _env_guard = EnvVarGuard::set(
+            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+            native_library_path,
+        );
+        let _native_dependency_handles =
+            preload_assetstudio_native_dependencies(native_library_path);
+        let library = libloading::Library::new(native_library_path).map_err(|source| {
+            ExportPipelineError::AssetStudioNative {
+                message: format!("failed to load native library `{native_library_path}`: {source}"),
+            }
+        })?;
+        let inspect = library
+            .get::<AssetStudioInspectFn>(b"haruki_assetstudio_inspect")
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("missing haruki_assetstudio_inspect symbol: {source}"),
+            })?;
+        let free = library
+            .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
+            })?;
+
+        let mut response_ptr: *mut c_char = ptr::null_mut();
+        let status = inspect(request_json.as_ptr(), &mut response_ptr);
+        let response = take_native_response_string(response_ptr, *free);
+        if status != 0 && response.is_empty() {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!("native inspect failed with status {status} and no response"),
+            });
+        }
+        (status, response)
+    };
+
+    let (status, response_json) = response_json;
+    let response: AssetStudioNativeInspectResponse = sonic_rs::from_str(&response_json)
+        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    for warning in &response.warnings {
+        warn!(warning = %warning, "assetstudio native inspect warning");
+    }
+    if status == 0 && response.success {
+        info!(
+            assets = response.assets.len(),
+            duration_ms = response.duration_ms,
+            "assetstudio native inspect completed"
+        );
+        Ok(response)
+    } else {
+        Err(ExportPipelineError::AssetStudioNative {
+            message: response.error.clone().unwrap_or_else(|| {
+                format!("native inspect failed with status {status} and no error message")
             }),
         })
     }
@@ -1275,9 +1384,11 @@ mod tests {
 
     use super::{
         build_assetstudio_export_args, call_assetstudio_native_export, extract_unity_asset_bundle,
-        get_export_group, handle_png_conversion, merge_usm_files, post_process_exported_files,
-        process_usm_file, query_assetstudio_native_version, run_path_tasks, scan_all_files,
+        get_export_group, handle_png_conversion, inspect_assetstudio_native_bundle,
+        merge_usm_files, post_process_exported_files, process_usm_file,
+        query_assetstudio_native_version, run_path_tasks, scan_all_files,
         AssetStudioCliCapabilities, AssetStudioNativeExportRequest,
+        AssetStudioNativeInspectRequest,
     };
 
     fn repo_root() -> PathBuf {
@@ -1353,6 +1464,31 @@ pub unsafe extern "C" fn haruki_assetstudio_version(response_json: *mut *mut c_c
     }
     *response_json = CString::new(
         r#"{"success":true,"adapter_version":"shim-1","assetstudio_cli_version":"shim-cli-1"}"#,
+    )
+    .unwrap()
+    .into_raw();
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_inspect(
+    request_json: *const c_char,
+    response_json: *mut *mut c_char,
+) -> c_int {
+    if response_json.is_null() {
+        return 30;
+    }
+    *response_json = ptr::null_mut();
+    if request_json.is_null() {
+        *response_json = CString::new(
+            r#"{"success":false,"assets_file_count":0,"exportable_asset_count":0,"assets":[],"warnings":[],"error":"null request","duration_ms":0}"#,
+        )
+        .unwrap()
+        .into_raw();
+        return 31;
+    }
+    *response_json = CString::new(
+        r#"{"success":true,"assets_file_count":1,"exportable_asset_count":1,"unity_version":"2022.3.21f1","assets":[{"index":0,"name":"asset","container":"assets/foo.png","type":"Texture2D","type_id":28,"path_id":42,"size":99,"source_file":"/tmp/input.bundle"}],"warnings":["inspect warning"],"error":null,"duration_ms":2}"#,
     )
     .unwrap()
     .into_raw();
@@ -1641,6 +1777,41 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             version.assetstudio_cli_version.as_deref(),
             Some("shim-cli-1")
         );
+        assert_eq!(fs::read_to_string(&free_marker).unwrap(), "freed");
+
+        std::env::remove_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER");
+    }
+
+    #[test]
+    fn native_backend_inspects_assets_and_releases_response_string() {
+        let _env_lock = native_shim_env_lock();
+        let dir = tempdir().unwrap();
+        let library = build_native_shim(dir.path());
+        let free_marker = dir.path().join("inspect-freed.txt");
+        std::env::set_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER", &free_marker);
+
+        let request = AssetStudioNativeInspectRequest {
+            input_path: "/tmp/input.bundle".to_string(),
+            asset_types: vec!["tex2d".to_string()],
+            unity_version: Some("2022.3.21f1".to_string()),
+            filter_exclude_mode: true,
+            filter_with_regex: true,
+            filter_by_name: None,
+            filter_by_container: Some("assets/.*".to_string()),
+            load_all_assets: false,
+        };
+
+        let response =
+            inspect_assetstudio_native_bundle(&library.to_string_lossy(), &request).unwrap();
+
+        assert_eq!(response.assets_file_count, 1);
+        assert_eq!(response.exportable_asset_count, 1);
+        assert_eq!(response.unity_version.as_deref(), Some("2022.3.21f1"));
+        assert_eq!(response.assets.len(), 1);
+        assert_eq!(response.assets[0].name.as_deref(), Some("asset"));
+        assert_eq!(response.assets[0].asset_type.as_deref(), Some("Texture2D"));
+        assert_eq!(response.assets[0].path_id, 42);
+        assert_eq!(response.warnings, vec!["inspect warning".to_string()]);
         assert_eq!(fs::read_to_string(&free_marker).unwrap(), "freed");
 
         std::env::remove_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER");
