@@ -18,7 +18,7 @@ aws-sdk-s3 = { version = "1", default-features = false, features = [
 cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.6", features = ["derive"] }
-cridecoder = "0.1"
+cridecoder = "0.2"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 mime_guess = "2.0"
