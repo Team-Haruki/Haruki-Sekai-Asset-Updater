@@ -26,6 +26,10 @@
 - `src/`: application code
 - `src/bin/`: helper CLIs
 - `tests/`: integration tests
+- `docs/assetstudio-native-ffi.md`: NativeAOT FFI API and object-flow details
+- `docs/double-ffi-change-log.md`: recorded double-FFI implementation changes
+- `docs/double-ffi-benchmarks.md`: benchmark snapshots and interpretation
+- `docs/double-ffi-operations.md`: runtime tuning, Docker, and debugging notes
 - `docs/migration/`: preserved migration and parity notes
 
 ## Secret Config
