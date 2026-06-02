@@ -1,4 +1,4 @@
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
@@ -923,7 +923,7 @@ fn check(ret: i32, operation: &str) -> Result<(), ExportPipelineError> {
 }
 
 fn ffmpeg_error(code: i32) -> String {
-    let mut buf = [0_i8; 128];
+    let mut buf = [0 as c_char; 128];
     unsafe {
         if ffi::av_strerror(code, buf.as_mut_ptr(), buf.len()) == 0 {
             CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
