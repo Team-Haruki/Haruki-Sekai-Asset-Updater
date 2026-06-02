@@ -3,9 +3,10 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioBackend, ChartHashConfig, ExecutionConfig, GitSyncConfig,
-    ImageExportConfig, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
-    RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig, ToolsConfig,
+    AppConfig, AssetStudioBackend, AssetStudioNativeCallMode, ChartHashConfig, ExecutionConfig,
+    GitSyncConfig, ImageExportConfig, RegionConfig, RegionExportConfig, RegionPathsConfig,
+    RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
+    ToolsConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::{
     extract_unity_asset_bundle, query_assetstudio_native_version,
@@ -16,6 +17,23 @@ use tempfile::tempdir;
 enum BenchBackend {
     Cli,
     Native,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BenchNativeCallMode {
+    Direct,
+    Process,
+    Pool,
+}
+
+impl From<BenchNativeCallMode> for AssetStudioNativeCallMode {
+    fn from(value: BenchNativeCallMode) -> Self {
+        match value {
+            BenchNativeCallMode::Direct => Self::Direct,
+            BenchNativeCallMode::Process => Self::Process,
+            BenchNativeCallMode::Pool => Self::Pool,
+        }
+    }
 }
 
 impl BenchBackend {
@@ -52,7 +70,29 @@ struct Args {
     cli_path: Option<String>,
     #[arg(long = "native-library")]
     native_library: Option<String>,
-    #[arg(long, value_enum, value_delimiter = ',', default_value = "cli,native")]
+    #[arg(long = "native-call-mode", value_enum, default_value = "pool")]
+    native_call_mode: BenchNativeCallMode,
+    #[arg(long = "native-worker-path")]
+    native_worker_path: Option<String>,
+    #[arg(long = "native-process-concurrency")]
+    native_process_concurrency: Option<usize>,
+    #[arg(long = "native-read-batch-size")]
+    native_read_batch_size: Option<usize>,
+    #[arg(long = "native-unitypy-mode")]
+    native_unitypy_mode: bool,
+    #[arg(long = "image-concurrency")]
+    image_concurrency: Option<usize>,
+    #[arg(long = "acb-concurrency")]
+    acb_concurrency: Option<usize>,
+    #[arg(long = "hca-concurrency")]
+    hca_concurrency: Option<usize>,
+    #[arg(long = "usm-concurrency")]
+    usm_concurrency: Option<usize>,
+    #[arg(long = "media-encode-concurrency")]
+    media_encode_concurrency: Option<usize>,
+    #[arg(long = "asset-types", value_delimiter = ',')]
+    asset_types: Vec<String>,
+    #[arg(long, value_enum, value_delimiter = ',', default_value = "native")]
     backend: Vec<BenchBackend>,
     #[arg(long, default_value_t = 1)]
     warmup: usize,
@@ -87,10 +127,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut elapsed_ms = Vec::new();
         let mut exported_files = Vec::new();
+        let mut native_skipped_object_reads = Vec::new();
+        let mut native_skipped_object_read_details = Vec::new();
+        let mut native_object_read_plan = Vec::new();
+        let mut native_phase_ms = Vec::new();
         for _ in 0..args.iterations {
             let result = run_once(*backend, &args).await?;
             elapsed_ms.push(result.elapsed_ms);
             exported_files.push(result.exported_files);
+            native_skipped_object_reads.push(result.native_skipped_object_reads);
+            native_skipped_object_read_details.push(result.native_skipped_object_read_details);
+            native_object_read_plan.push(result.native_object_read_plan);
+            native_phase_ms.push(result.native_phase_ms);
         }
         elapsed_ms.sort_unstable();
         let mean_ms = elapsed_ms.iter().sum::<u128>() as f64 / elapsed_ms.len() as f64;
@@ -103,6 +151,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "min_ms": elapsed_ms[0],
             "max_ms": elapsed_ms[elapsed_ms.len() - 1],
             "exported_files": exported_files,
+            "native_skipped_object_reads": native_skipped_object_reads,
+            "native_skipped_object_read_details": native_skipped_object_read_details,
+            "native_object_read_plan": native_object_read_plan,
+            "native_phase_ms": native_phase_ms,
         }));
     }
 
@@ -150,6 +202,10 @@ fn validate_backend_inputs(
 struct RunResult {
     elapsed_ms: u128,
     exported_files: usize,
+    native_skipped_object_reads: usize,
+    native_skipped_object_read_details: sonic_rs::Value,
+    native_object_read_plan: sonic_rs::Value,
+    native_phase_ms: sonic_rs::Value,
 }
 
 async fn run_once(
@@ -157,7 +213,7 @@ async fn run_once(
     args: &Args,
 ) -> Result<RunResult, Box<dyn std::error::Error>> {
     let output_dir = tempdir()?;
-    let region = benchmark_region(&args.unity_version, args.by_category);
+    let region = benchmark_region(args);
     let config = benchmark_config(backend, args);
 
     let start = Instant::now();
@@ -193,9 +249,18 @@ async fn run_once(
         }
     }
 
+    let mut native_phase_ms = summary.native_export_phase_ms;
+    native_phase_ms.extend(summary.post_process_phase_ms);
+
     Ok(RunResult {
         elapsed_ms,
         exported_files: walk_files(&summary.export_root).len(),
+        native_skipped_object_reads: summary.native_skipped_object_reads.len(),
+        native_skipped_object_read_details: sonic_rs::to_value(
+            &summary.native_skipped_object_reads,
+        )?,
+        native_object_read_plan: sonic_rs::to_value(&summary.native_object_read_plan)?,
+        native_phase_ms: sonic_rs::to_value(&native_phase_ms)?,
     })
 }
 
@@ -203,9 +268,26 @@ fn benchmark_config(backend: BenchBackend, args: &Args) -> AppConfig {
     AppConfig {
         tools: ToolsConfig {
             ffmpeg_path: "ffmpeg".to_string(),
+            media_backend: ToolsConfig::default().media_backend,
             asset_studio_backend: backend.config_backend(),
             asset_studio_cli_path: args.cli_path.clone(),
             asset_studio_native_library_path: args.native_library.clone(),
+            asset_studio_native_call_mode: args.native_call_mode.into(),
+            asset_studio_native_worker_path: args.native_worker_path.clone(),
+            asset_studio_native_process_concurrency: args
+                .native_process_concurrency
+                .unwrap_or_else(|| ToolsConfig::default().asset_studio_native_process_concurrency)
+                .max(1),
+            asset_studio_native_worker_max_calls: ToolsConfig::default()
+                .asset_studio_native_worker_max_calls,
+            asset_studio_native_read_batch_size: args
+                .native_read_batch_size
+                .unwrap_or_else(|| ToolsConfig::default().asset_studio_native_read_batch_size)
+                .max(1),
+            asset_studio_native_image_format: ToolsConfig::default()
+                .asset_studio_native_image_format,
+            asset_studio_native_read_kinds: ToolsConfig::default().asset_studio_native_read_kinds,
+            asset_studio_native_unitypy_mode: args.native_unitypy_mode,
         },
         storage: StorageConfig {
             providers: Vec::new(),
@@ -221,20 +303,49 @@ fn benchmark_config(backend: BenchBackend, args: &Args) -> AppConfig {
             },
             ..ExecutionConfig::default()
         },
+        concurrency: haruki_sekai_asset_updater::core::config::ConcurrencyConfig {
+            images: args.image_concurrency.unwrap_or(4).max(1),
+            acb: args
+                .acb_concurrency
+                .unwrap_or_else(|| {
+                    haruki_sekai_asset_updater::core::config::ConcurrencyConfig::default().acb
+                })
+                .max(1),
+            hca: args
+                .hca_concurrency
+                .unwrap_or_else(|| {
+                    haruki_sekai_asset_updater::core::config::ConcurrencyConfig::default().hca
+                })
+                .max(1),
+            usm: args
+                .usm_concurrency
+                .unwrap_or_else(|| {
+                    haruki_sekai_asset_updater::core::config::ConcurrencyConfig::default().usm
+                })
+                .max(1),
+            media_encode: args
+                .media_encode_concurrency
+                .unwrap_or_else(|| {
+                    haruki_sekai_asset_updater::core::config::ConcurrencyConfig::default()
+                        .media_encode
+                })
+                .max(1),
+            ..Default::default()
+        },
         ..AppConfig::default()
     }
 }
 
-fn benchmark_region(unity_version: &str, by_category: bool) -> RegionConfig {
-    RegionConfig {
+fn benchmark_region(args: &Args) -> RegionConfig {
+    let mut region = RegionConfig {
         enabled: true,
         provider: RegionProviderConfig::default(),
         runtime: RegionRuntimeConfig {
-            unity_version: unity_version.to_string(),
+            unity_version: args.unity_version.clone(),
         },
         paths: RegionPathsConfig::default(),
         export: RegionExportConfig {
-            by_category,
+            by_category: args.by_category,
             video: haruki_sekai_asset_updater::core::config::VideoExportConfig {
                 convert_to_mp4: false,
                 direct_usm_to_mp4_with_ffmpeg: false,
@@ -256,7 +367,11 @@ fn benchmark_region(unity_version: &str, by_category: bool) -> RegionConfig {
             remove_local_after_upload: false,
         },
         ..RegionConfig::default()
+    };
+    if !args.asset_types.is_empty() {
+        region.export.asset_studio_types = args.asset_types.clone();
     }
+    region
 }
 
 fn walk_files(dir: &Path) -> Vec<PathBuf> {

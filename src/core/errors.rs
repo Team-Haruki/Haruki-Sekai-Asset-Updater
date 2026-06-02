@@ -187,6 +187,8 @@ pub enum ExportPipelineError {
         status: String,
         stderr: String,
     },
+    #[error("media conversion failed: {message}")]
+    Media { message: String },
     #[error("assetstudio native backend failed: {message}")]
     AssetStudioNative { message: String },
     #[error("failed to serialize assetstudio native request: {source}")]
@@ -253,6 +255,12 @@ pub enum AssetExecutionError {
     },
     #[error("failed to write temp file {path}: {source}")]
     WriteTempFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read temp file {path}: {source}")]
+    ReadTempFile {
         path: PathBuf,
         #[source]
         source: std::io::Error,

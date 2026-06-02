@@ -4,9 +4,10 @@ pub mod core;
 pub mod service;
 
 pub use core::assetstudio_native::{
-    AssetStudioAssetInfo, AssetStudioExportOptions, AssetStudioExportResponse,
-    AssetStudioInspectOptions, AssetStudioInspectResponse, AssetStudioNativeClient,
-    AssetStudioNativeVersion,
+    AssetStudioAssetInfo, AssetStudioInspectOptions, AssetStudioInspectResponse,
+    AssetStudioNativeClient, AssetStudioNativeVersion, AssetStudioObjectPayload,
+    AssetStudioObjectReadBatchOutput, AssetStudioObjectReadOptions, AssetStudioObjectReadOutput,
+    AssetStudioReadKind,
 };
 pub use core::config::AppConfig;
 pub use service::http::{build_router, AppState};

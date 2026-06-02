@@ -8,7 +8,9 @@ use haruki_sekai_asset_updater::core::config::{
     RegionUploadConfig, RetryConfig, StorageConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::extract_unity_asset_bundle;
-use haruki_sekai_asset_updater::{AssetStudioExportOptions, AssetStudioNativeClient};
+use haruki_sekai_asset_updater::{
+    AssetStudioInspectOptions, AssetStudioNativeClient, AssetStudioObjectReadOptions,
+};
 use tempfile::tempdir;
 
 fn required_env(name: &str) -> Option<String> {
@@ -43,7 +45,7 @@ fn real_assetstudio_native_exports_expected_file_when_configured() {
 }
 
 #[test]
-fn real_assetstudio_native_client_exports_when_configured() {
+fn real_assetstudio_native_client_reads_object_when_configured() {
     let Some(native_library_path) = required_env("ASSET_STUDIO_NATIVE_LIBRARY_PATH") else {
         return;
     };
@@ -51,12 +53,8 @@ fn real_assetstudio_native_client_exports_when_configured() {
         return;
     };
 
-    let output_dir = tempdir().unwrap();
-    let export_path = required_env("ASSET_STUDIO_EXPORT_PATH").unwrap_or_default();
     let unity_version =
         required_env("ASSET_STUDIO_UNITY_VERSION").unwrap_or_else(|| "2022.3.21f1".to_string());
-    let strip_path_prefix = required_env("ASSET_STUDIO_STRIP_PATH_PREFIX")
-        .unwrap_or_else(|| "assets/sekai/assetbundle/resources".to_string());
     let asset_types = required_env("ASSET_STUDIO_ASSET_TYPES")
         .map(|value| {
             value
@@ -68,7 +66,7 @@ fn real_assetstudio_native_client_exports_when_configured() {
         })
         .filter(|values| !values.is_empty())
         .unwrap_or_else(|| vec!["tex2d".to_string()]);
-    let filter_by_path_ids = required_env("ASSET_STUDIO_FILTER_BY_PATH_IDS")
+    let filter_by_path_ids: Vec<i64> = required_env("ASSET_STUDIO_FILTER_BY_PATH_IDS")
         .map(|value| {
             value
                 .split(',')
@@ -80,32 +78,31 @@ fn real_assetstudio_native_client_exports_when_configured() {
         })
         .unwrap_or_default();
 
-    let mut options = AssetStudioExportOptions::new(&bundle_path, output_dir.path())
-        .export_path(&export_path)
-        .strip_path_prefix(strip_path_prefix)
+    let mut options = AssetStudioInspectOptions::new(&bundle_path)
         .asset_types(asset_types)
         .unity_version(unity_version);
     if !filter_by_path_ids.is_empty() {
         options = options.filter_by_path_ids(filter_by_path_ids);
     }
-    let response = AssetStudioNativeClient::new(native_library_path)
-        .export(&options)
+    let mut context = AssetStudioNativeClient::new(native_library_path)
+        .open_context(&options)
         .unwrap();
-
-    assert!(response.success);
     assert!(
-        !response.exported_files.is_empty(),
-        "native client export returned no files"
+        !context.open_response().assets.is_empty(),
+        "native client context_open returned no assets"
     );
-    if let Some(expected_relative_file) = required_env("ASSET_STUDIO_EXPECTED_RELATIVE_FILE") {
-        let export_root = output_dir.path().join(export_path);
-        let expected_path = export_root.join(PathBuf::from(expected_relative_file));
-        assert!(
-            expected_path.exists(),
-            "expected native client output missing: {}",
-            expected_path.display()
-        );
-    }
+    let path_id = required_env("ASSET_STUDIO_READ_PATH_ID")
+        .map(|value| value.parse::<i64>().unwrap())
+        .unwrap_or_else(|| context.open_response().assets[0].path_id);
+    let read = context
+        .read_object(&AssetStudioObjectReadOptions::new(path_id))
+        .unwrap();
+    assert!(read.response.success);
+    assert!(
+        read.response.payload_len >= 0,
+        "native client object read returned an invalid payload length"
+    );
+    context.close().unwrap();
 }
 
 fn run_real_assetstudio_export(
@@ -178,6 +175,7 @@ fn run_real_assetstudio_export(
             asset_studio_backend: backend,
             asset_studio_cli_path,
             asset_studio_native_library_path,
+            ..haruki_sekai_asset_updater::core::config::ToolsConfig::default()
         },
         storage: StorageConfig {
             providers: Vec::new(),
