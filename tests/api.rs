@@ -347,6 +347,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
         },
         tools: haruki_sekai_asset_updater::core::config::ToolsConfig {
             ffmpeg_path: "ffmpeg".to_string(),
+            asset_studio_backend: haruki_sekai_asset_updater::core::config::AssetStudioBackend::Cli,
             asset_studio_cli_path: None,
             ..haruki_sekai_asset_updater::core::config::ToolsConfig::default()
         },

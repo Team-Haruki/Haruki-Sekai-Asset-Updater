@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cbc::cipher::{block_padding::Pkcs7, BlockModeDecrypt, KeyIvInit};
 use chrono::FixedOffset;
@@ -12,13 +12,16 @@ use reqwest::header::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
+use crate::core::config::{AppConfig, AssetStudioBackend, RegionConfig, RegionProviderConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
-use crate::core::export_pipeline::extract_unity_asset_bundle;
+use crate::core::export_pipeline::{
+    export_unity_asset_bundle_payloads, extract_unity_asset_bundle, post_process_exported_files,
+    NativeObjectReadPlanStats, UnityAssetBundlePayloadExport,
+};
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
 use crate::core::regions::{compile_patterns, first_match_index, matches_any};
@@ -126,13 +129,83 @@ pub struct AssetExecutionContext {
 
 #[derive(Debug, Clone)]
 pub enum ExecutionProgressUpdate {
-    Phase { phase: JobPhase, message: String },
-    DownloadsPlanned { total: usize },
-    BundleStarted { bundle: String },
-    BundleCompleted { bundle: String },
-    BundleFailed { bundle: String, error: String },
-    RecordSaved { entries: usize },
-    ChartHashSyncFinished { performed: bool },
+    Phase {
+        phase: JobPhase,
+        message: String,
+    },
+    DownloadsPlanned {
+        total: usize,
+    },
+    BundleStarted {
+        bundle: String,
+    },
+    BundleDownloaded {
+        bundle: String,
+        bytes: usize,
+        elapsed_ms: u128,
+    },
+    BundleFetchDetails {
+        bundle: String,
+        source: String,
+        cache_read_ms: Option<u128>,
+        network_download_ms: Option<u128>,
+        cache_write_ms: Option<u128>,
+    },
+    BundleDeobfuscated {
+        bundle: String,
+        elapsed_ms: u128,
+    },
+    BundleTempWritten {
+        bundle: String,
+        elapsed_ms: u128,
+    },
+    BundleExported {
+        bundle: String,
+        elapsed_ms: u128,
+    },
+    BundleNativeExportPhases {
+        bundle: String,
+        phase_ms: HashMap<String, u64>,
+    },
+    BundleNativeSkippedObjectReads {
+        bundle: String,
+        count: usize,
+    },
+    BundleNativeObjectReadPlan {
+        bundle: String,
+        plan: NativeObjectReadPlanStats,
+    },
+    SchedulerTelemetry {
+        bundle: Option<String>,
+        phase_ms: HashMap<String, u64>,
+    },
+    BundleCompleted {
+        bundle: String,
+    },
+    BundleFailed {
+        bundle: String,
+        error: String,
+    },
+    RecordSaved {
+        entries: usize,
+    },
+    ChartHashSyncFinished {
+        performed: bool,
+    },
+}
+
+struct NativeBundlePostProcessJob {
+    bundle_path: String,
+    bundle_hash: String,
+    export_started: Instant,
+    payload_export: UnityAssetBundlePayloadExport,
+    backlog_wait_ms: u128,
+    _backlog_permit: Option<OwnedSemaphorePermit>,
+}
+
+enum BundleWorkOutput {
+    Completed,
+    NativePostProcess(Box<NativeBundlePostProcessJob>),
 }
 
 impl AssetExecutionContext {
@@ -251,9 +324,23 @@ impl AssetExecutionContext {
         let mut failed = 0usize;
         let mut pending_save_count = 0usize;
         let batch_save_size = app_config.execution.batch_save_size;
-        let semaphore = std::sync::Arc::new(Semaphore::new(app_config.concurrency.download.max(1)));
+        let concurrency = app_config.effective_concurrency();
+        let download_concurrency = concurrency.download.max(1);
+        let media_encode_concurrency = concurrency.media_encode.max(1);
+        let semaphore = std::sync::Arc::new(Semaphore::new(download_concurrency));
+        let post_process_semaphore = std::sync::Arc::new(Semaphore::new(media_encode_concurrency));
+        let post_process_backlog_capacity =
+            post_process_backlog_capacity(download_concurrency, media_encode_concurrency);
+        let post_process_backlog_semaphore =
+            std::sync::Arc::new(Semaphore::new(post_process_backlog_capacity));
+        let post_process_queued = std::sync::Arc::new(AtomicUsize::new(0));
+        let post_process_active = std::sync::Arc::new(AtomicUsize::new(0));
         let mut joins = JoinSet::new();
+        let mut post_process_joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
+        let use_native_pipeline = app_config.tools.asset_studio_backend
+            == AssetStudioBackend::Native
+            && app_config.tools.asset_studio_native_unitypy_mode;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::Phase {
@@ -265,11 +352,14 @@ impl AssetExecutionContext {
         for task in tasks.clone() {
             let ctx = self.clone();
             let semaphore = semaphore.clone();
+            let post_process_backlog_semaphore = post_process_backlog_semaphore.clone();
             let app_config = app_config_cloned.clone();
             let progress = progress.clone();
             let cancel_flag = cancel_flag.clone();
             joins.spawn(async move {
+                let download_slot_wait_started = Instant::now();
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
+                let download_slot_wait_ms = download_slot_wait_started.elapsed().as_millis();
                 if cancel_flag
                     .as_ref()
                     .is_some_and(|flag| flag.load(Ordering::SeqCst))
@@ -288,64 +378,183 @@ impl AssetExecutionContext {
                 );
                 let bundle_path = task.bundle_path.clone();
                 let bundle_hash = task.bundle_hash.clone();
-                let result = ctx.download_and_export_bundle(&app_config, &task).await;
+                let result = if use_native_pipeline {
+                    match ctx
+                        .download_and_export_bundle_payloads(&app_config, &task, &progress)
+                        .await
+                    {
+                        Ok(mut job) => {
+                            let backlog_wait_started = Instant::now();
+                            let backlog_permit = post_process_backlog_semaphore
+                                .acquire_owned()
+                                .await
+                                .expect("post-process backlog semaphore closed");
+                            let backlog_wait_ms = backlog_wait_started.elapsed().as_millis();
+                            job.backlog_wait_ms = backlog_wait_ms;
+                            job._backlog_permit = Some(backlog_permit);
+                            Ok(BundleWorkOutput::NativePostProcess(Box::new(job)))
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    ctx.download_and_export_bundle(&app_config, &task, &progress)
+                        .await
+                        .map(|()| BundleWorkOutput::Completed)
+                };
+                let mut phase_ms = HashMap::new();
+                phase_ms.insert(
+                    "scheduler.download_slot_wait".to_string(),
+                    download_slot_wait_ms.min(u128::from(u64::MAX)) as u64,
+                );
+                Self::send_progress(
+                    &progress,
+                    ExecutionProgressUpdate::SchedulerTelemetry {
+                        bundle: Some(task.bundle_path.clone()),
+                        phase_ms,
+                    },
+                );
                 (bundle_path, bundle_hash, result)
             });
         }
 
-        while let Some(result) = joins.join_next().await {
-            let (bundle_path, bundle_hash, result) = result.expect("bundle task panicked");
-            match result {
-                Ok(()) => {
-                    completed += 1;
-                    downloaded_assets.insert(bundle_path.clone(), bundle_hash);
-                    pending_save_count += 1;
-                    Self::send_progress(
-                        &progress,
-                        ExecutionProgressUpdate::BundleCompleted {
-                            bundle: bundle_path,
-                        },
-                    );
-                    if batch_save_size > 0 && pending_save_count >= batch_save_size {
-                        tracing::info!(
-                            region = %self.region_name,
-                            batch = pending_save_count,
-                            "batch-flushing download record"
-                        );
-                        match save_download_record(&record_path, &downloaded_assets) {
-                            Ok(()) => Self::send_progress(
+        while !joins.is_empty() || !post_process_joins.is_empty() {
+            tokio::select! {
+                Some(result) = joins.join_next(), if !joins.is_empty() => {
+                    let (bundle_path, bundle_hash, result) = result.expect("bundle task panicked");
+                    match result {
+                        Ok(BundleWorkOutput::Completed) => {
+                            Self::record_completed_bundle(
                                 &progress,
-                                ExecutionProgressUpdate::RecordSaved {
-                                    entries: downloaded_assets.len(),
-                                },
-                            ),
-                            Err(err) => tracing::warn!(
-                                region = %self.region_name,
-                                error = %err,
-                                "mid-run batch save of download record failed; will retry at end"
-                            ),
+                                &record_path,
+                                &mut downloaded_assets,
+                                &mut completed,
+                                &mut pending_save_count,
+                                batch_save_size,
+                                &self.region_name,
+                                bundle_path,
+                                bundle_hash,
+                            );
                         }
-                        pending_save_count = 0;
+                        Ok(BundleWorkOutput::NativePostProcess(job)) => {
+                            let app_config = app_config_cloned.clone();
+                            let region = self.region.clone();
+                            let region_name = self.region_name.clone();
+                            let progress = progress.clone();
+                            let semaphore = post_process_semaphore.clone();
+                            let post_process_queued = post_process_queued.clone();
+                            let post_process_active = post_process_active.clone();
+                            let queued = post_process_queued.fetch_add(1, Ordering::Relaxed) + 1;
+                            Self::send_progress(
+                                &progress,
+                                ExecutionProgressUpdate::SchedulerTelemetry {
+                                    bundle: Some(job.bundle_path.clone()),
+                                    phase_ms: HashMap::from([
+                                        (
+                                            "scheduler.post_process_queued".to_string(),
+                                            queued as u64,
+                                        ),
+                                        (
+                                            "scheduler.post_process_backlog_capacity".to_string(),
+                                            post_process_backlog_capacity as u64,
+                                        ),
+                                    ]),
+                                },
+                            );
+                            post_process_joins.spawn(async move {
+                                let queue_started = Instant::now();
+                                let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
+                                let queue_wait_ms = queue_started.elapsed().as_millis();
+                                post_process_queued.fetch_sub(1, Ordering::Relaxed);
+                                let active = post_process_active.fetch_add(1, Ordering::Relaxed) + 1;
+                                let bundle_path = job.bundle_path.clone();
+                                let bundle_hash = job.bundle_hash.clone();
+                                let result = Self::finish_native_bundle_post_process(
+                                    &app_config,
+                                    &region_name,
+                                    &region,
+                                    &progress,
+                                    *job,
+                                    queue_wait_ms,
+                                )
+                                .await;
+                                post_process_active.fetch_sub(1, Ordering::Relaxed);
+                                Self::send_progress(
+                                    &progress,
+                                    ExecutionProgressUpdate::SchedulerTelemetry {
+                                        bundle: Some(bundle_path.clone()),
+                                        phase_ms: HashMap::from([
+                                            (
+                                                "scheduler.post_process_active_peak".to_string(),
+                                                active as u64,
+                                            ),
+                                            (
+                                                "scheduler.post_process_queue_wait".to_string(),
+                                                queue_wait_ms.min(u128::from(u64::MAX)) as u64,
+                                            ),
+                                        ]),
+                                    },
+                                );
+                                (bundle_path, bundle_hash, result)
+                            });
+                        }
+                        Err(AssetExecutionError::Cancelled) => {
+                            return Err(AssetExecutionError::Cancelled);
+                        }
+                        Err(err) => {
+                            failed += 1;
+                            Self::send_progress(
+                                &progress,
+                                ExecutionProgressUpdate::BundleFailed {
+                                    bundle: bundle_path.clone(),
+                                    error: err.to_string(),
+                                },
+                            );
+                            tracing::warn!(
+                                region = %self.region_name,
+                                bundle = %bundle_path,
+                                error = %err,
+                                "bundle processing failed"
+                            );
+                        }
                     }
                 }
-                Err(AssetExecutionError::Cancelled) => {
-                    return Err(AssetExecutionError::Cancelled);
-                }
-                Err(err) => {
-                    failed += 1;
-                    Self::send_progress(
-                        &progress,
-                        ExecutionProgressUpdate::BundleFailed {
-                            bundle: bundle_path.clone(),
-                            error: err.to_string(),
-                        },
-                    );
-                    tracing::warn!(
-                        region = %self.region_name,
-                        bundle = %bundle_path,
-                        error = %err,
-                        "bundle processing failed"
-                    );
+                Some(result) = post_process_joins.join_next(), if !post_process_joins.is_empty() => {
+                    let (bundle_path, bundle_hash, result) =
+                        result.expect("bundle post-process task panicked");
+                    match result {
+                        Ok(()) => {
+                            Self::record_completed_bundle(
+                                &progress,
+                                &record_path,
+                                &mut downloaded_assets,
+                                &mut completed,
+                                &mut pending_save_count,
+                                batch_save_size,
+                                &self.region_name,
+                                bundle_path,
+                                bundle_hash,
+                            );
+                        }
+                        Err(AssetExecutionError::Cancelled) => {
+                            return Err(AssetExecutionError::Cancelled);
+                        }
+                        Err(err) => {
+                            failed += 1;
+                            Self::send_progress(
+                                &progress,
+                                ExecutionProgressUpdate::BundleFailed {
+                                    bundle: bundle_path.clone(),
+                                    error: err.to_string(),
+                                },
+                            );
+                            tracing::warn!(
+                                region = %self.region_name,
+                                bundle = %bundle_path,
+                                error = %err,
+                                "bundle post-process failed"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -398,6 +607,137 @@ impl AssetExecutionContext {
         })
     }
 
+    pub async fn prefetch_asset_bundles(
+        mut self,
+        app_config: &AppConfig,
+        progress: Option<UnboundedSender<ExecutionProgressUpdate>>,
+        cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<ExecutionSummary, AssetExecutionError> {
+        self.ensure_not_cancelled(&cancel_flag)?;
+        Self::send_progress(
+            &progress,
+            ExecutionProgressUpdate::Phase {
+                phase: JobPhase::FetchingAssetInfo,
+                message: "fetching asset bundle info".to_string(),
+            },
+        );
+
+        if self.requires_cookies() {
+            self.fetch_runtime_cookies().await?;
+        }
+
+        self.ensure_not_cancelled(&cancel_flag)?;
+        let info = self.fetch_asset_bundle_info().await?;
+        Self::send_progress(
+            &progress,
+            ExecutionProgressUpdate::Phase {
+                phase: JobPhase::PlanningDownloads,
+                message: "building prefetch task list".to_string(),
+            },
+        );
+        let tasks = self.build_download_tasks(&info, &DownloadRecord::new());
+        Self::send_progress(
+            &progress,
+            ExecutionProgressUpdate::DownloadsPlanned { total: tasks.len() },
+        );
+
+        if tasks.is_empty() {
+            return Ok(ExecutionSummary {
+                discovered_bundles: info.bundles.len(),
+                queued_downloads: 0,
+                completed_downloads: 0,
+                failed_downloads: 0,
+                updated_record_entries: 0,
+                chart_hash_sync_performed: false,
+            });
+        }
+
+        let semaphore = Arc::new(Semaphore::new(
+            app_config.effective_concurrency().download.max(1),
+        ));
+        let mut joins = JoinSet::new();
+        let app_config_cloned = app_config.clone();
+        Self::send_progress(
+            &progress,
+            ExecutionProgressUpdate::Phase {
+                phase: JobPhase::DownloadingBundles,
+                message: format!("prefetching {} bundle(s)", tasks.len()),
+            },
+        );
+
+        for task in tasks.clone() {
+            let ctx = self.clone();
+            let semaphore = semaphore.clone();
+            let app_config = app_config_cloned.clone();
+            let progress = progress.clone();
+            let cancel_flag = cancel_flag.clone();
+            joins.spawn(async move {
+                let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
+                if cancel_flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::SeqCst))
+                {
+                    return (
+                        task.bundle_path.clone(),
+                        Err(AssetExecutionError::Cancelled),
+                    );
+                }
+                Self::send_progress(
+                    &progress,
+                    ExecutionProgressUpdate::BundleStarted {
+                        bundle: task.bundle_path.clone(),
+                    },
+                );
+                let bundle_path = task.bundle_path.clone();
+                let result = ctx.prefetch_bundle(&app_config, &task, &progress).await;
+                (bundle_path, result)
+            });
+        }
+
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+        while let Some(result) = joins.join_next().await {
+            let (bundle_path, result) = result.expect("bundle prefetch task panicked");
+            match result {
+                Ok(()) => {
+                    completed += 1;
+                    Self::send_progress(
+                        &progress,
+                        ExecutionProgressUpdate::BundleCompleted {
+                            bundle: bundle_path,
+                        },
+                    );
+                }
+                Err(AssetExecutionError::Cancelled) => return Err(AssetExecutionError::Cancelled),
+                Err(err) => {
+                    failed += 1;
+                    Self::send_progress(
+                        &progress,
+                        ExecutionProgressUpdate::BundleFailed {
+                            bundle: bundle_path.clone(),
+                            error: err.to_string(),
+                        },
+                    );
+                    tracing::warn!(
+                        region = %self.region_name,
+                        bundle = %bundle_path,
+                        error = %err,
+                        "bundle prefetch failed"
+                    );
+                }
+            }
+        }
+
+        Ok(ExecutionSummary {
+            discovered_bundles: info.bundles.len(),
+            queued_downloads: tasks.len(),
+            completed_downloads: completed,
+            failed_downloads: failed,
+            updated_record_entries: 0,
+            chart_hash_sync_performed: false,
+        })
+    }
+
     fn ensure_not_cancelled(
         &self,
         cancel_flag: &Option<Arc<AtomicBool>>,
@@ -419,6 +759,121 @@ impl AssetExecutionContext {
         if let Some(sender) = sender {
             let _ = sender.send(update);
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_completed_bundle(
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+        record_path: &str,
+        downloaded_assets: &mut DownloadRecord,
+        completed: &mut usize,
+        pending_save_count: &mut usize,
+        batch_save_size: usize,
+        region_name: &str,
+        bundle_path: String,
+        bundle_hash: String,
+    ) {
+        *completed += 1;
+        downloaded_assets.insert(bundle_path.clone(), bundle_hash);
+        *pending_save_count += 1;
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleCompleted {
+                bundle: bundle_path,
+            },
+        );
+        if batch_save_size > 0 && *pending_save_count >= batch_save_size {
+            tracing::info!(
+                region = %region_name,
+                batch = *pending_save_count,
+                "batch-flushing download record"
+            );
+            match save_download_record(record_path, downloaded_assets) {
+                Ok(()) => Self::send_progress(
+                    progress,
+                    ExecutionProgressUpdate::RecordSaved {
+                        entries: downloaded_assets.len(),
+                    },
+                ),
+                Err(err) => tracing::warn!(
+                    region = %region_name,
+                    error = %err,
+                    "mid-run batch save of download record failed; will retry at end"
+                ),
+            }
+            *pending_save_count = 0;
+        }
+    }
+
+    async fn finish_native_bundle_post_process(
+        app_config: &AppConfig,
+        region_name: &str,
+        region: &RegionConfig,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+        job: NativeBundlePostProcessJob,
+        queue_wait_ms: u128,
+    ) -> Result<(), AssetExecutionError> {
+        let post_process_summary = post_process_exported_files(
+            app_config,
+            region_name,
+            region,
+            &job.payload_export.export_path,
+            &job.payload_export.export_root,
+        )
+        .await?;
+
+        let mut phase_ms = job.payload_export.native_export_phase_ms;
+        phase_ms.extend(post_process_summary.post_process_phase_ms);
+        phase_ms.insert(
+            "post_process.queue_wait".to_string(),
+            queue_wait_ms.min(u128::from(u64::MAX)) as u64,
+        );
+        phase_ms.insert(
+            "scheduler.post_process_backlog_wait".to_string(),
+            job.backlog_wait_ms.min(u128::from(u64::MAX)) as u64,
+        );
+        phase_ms.insert(
+            "scheduler.bundle_active_before_post_process".to_string(),
+            job.export_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        if !phase_ms.is_empty() {
+            Self::send_progress(
+                progress,
+                ExecutionProgressUpdate::BundleNativeExportPhases {
+                    bundle: job.bundle_path.clone(),
+                    phase_ms,
+                },
+            );
+        }
+        if !job.payload_export.native_skipped_object_reads.is_empty() {
+            Self::send_progress(
+                progress,
+                ExecutionProgressUpdate::BundleNativeSkippedObjectReads {
+                    bundle: job.bundle_path.clone(),
+                    count: job.payload_export.native_skipped_object_reads.len(),
+                },
+            );
+        }
+        if !job.payload_export.native_object_read_plan.is_empty() {
+            Self::send_progress(
+                progress,
+                ExecutionProgressUpdate::BundleNativeObjectReadPlan {
+                    bundle: job.bundle_path.clone(),
+                    plan: job.payload_export.native_object_read_plan,
+                },
+            );
+        }
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleExported {
+                bundle: job.bundle_path,
+                elapsed_ms: job.export_started.elapsed().as_millis(),
+            },
+        );
+        Ok(())
     }
 
     fn requires_cookies(&self) -> bool {
@@ -675,6 +1130,7 @@ impl AssetExecutionContext {
         &self,
         app_config: &AppConfig,
         task: &DownloadTask,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
     ) -> Result<(), AssetExecutionError> {
         let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
             AssetExecutionError::MissingAssetSaveDir {
@@ -682,9 +1138,50 @@ impl AssetExecutionContext {
             }
         })?;
         let bundle_url = self.render_bundle_url(task)?;
-        let body = self.get_with_retry(&bundle_url).await?;
-        let deobfuscated = deobfuscate(&body);
+        let download_started = Instant::now();
+        let fetch = if let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) {
+            self.get_bundle_with_cache(&bundle_url, task, &cache_dir)
+                .await?
+        } else {
+            let network_started = Instant::now();
+            let body = self.get_with_retry(&bundle_url).await?;
+            BundleFetch {
+                body,
+                source: BundleFetchSource::Network,
+                cache_read_ms: None,
+                network_download_ms: Some(network_started.elapsed().as_millis()),
+                cache_write_ms: None,
+            }
+        };
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleDownloaded {
+                bundle: task.bundle_path.clone(),
+                bytes: fetch.body.len(),
+                elapsed_ms: download_started.elapsed().as_millis(),
+            },
+        );
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleFetchDetails {
+                bundle: task.bundle_path.clone(),
+                source: fetch.source.as_str().to_string(),
+                cache_read_ms: fetch.cache_read_ms,
+                network_download_ms: fetch.network_download_ms,
+                cache_write_ms: fetch.cache_write_ms,
+            },
+        );
+        let deobfuscate_started = Instant::now();
+        let deobfuscated = deobfuscate(&fetch.body);
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleDeobfuscated {
+                bundle: task.bundle_path.clone(),
+                elapsed_ms: deobfuscate_started.elapsed().as_millis(),
+            },
+        );
 
+        let write_started = Instant::now();
         let temp_file = std::env::temp_dir()
             .join(&self.region_name)
             .join(&task.bundle_path);
@@ -702,12 +1199,20 @@ impl AssetExecutionContext {
                 source,
             }
         })?;
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleTempWritten {
+                bundle: task.bundle_path.clone(),
+                elapsed_ms: write_started.elapsed().as_millis(),
+            },
+        );
 
         let category = match task.category {
             AssetCategory::StartApp => "StartApp",
             AssetCategory::OnDemand => "OnDemand",
             AssetCategory::Other(_) => "OnDemand",
         };
+        let export_started = Instant::now();
         let export_result = extract_unity_asset_bundle(
             app_config,
             &self.region_name,
@@ -718,9 +1223,285 @@ impl AssetExecutionContext {
             category,
         )
         .await;
+        if let Ok(summary) = &export_result {
+            let mut export_phase_ms = summary.native_export_phase_ms.clone();
+            export_phase_ms.extend(summary.post_process_phase_ms.clone());
+            if !export_phase_ms.is_empty() {
+                Self::send_progress(
+                    progress,
+                    ExecutionProgressUpdate::BundleNativeExportPhases {
+                        bundle: task.bundle_path.clone(),
+                        phase_ms: export_phase_ms,
+                    },
+                );
+            }
+            if !summary.native_skipped_object_reads.is_empty() {
+                Self::send_progress(
+                    progress,
+                    ExecutionProgressUpdate::BundleNativeSkippedObjectReads {
+                        bundle: task.bundle_path.clone(),
+                        count: summary.native_skipped_object_reads.len(),
+                    },
+                );
+            }
+            if !summary.native_object_read_plan.is_empty() {
+                Self::send_progress(
+                    progress,
+                    ExecutionProgressUpdate::BundleNativeObjectReadPlan {
+                        bundle: task.bundle_path.clone(),
+                        plan: summary.native_object_read_plan.clone(),
+                    },
+                );
+            }
+            Self::send_progress(
+                progress,
+                ExecutionProgressUpdate::BundleExported {
+                    bundle: task.bundle_path.clone(),
+                    elapsed_ms: export_started.elapsed().as_millis(),
+                },
+            );
+        }
         let _ = std::fs::remove_file(&temp_file);
         export_result.map(|_| ()).map_err(Into::into)
     }
+
+    async fn download_and_export_bundle_payloads(
+        &self,
+        app_config: &AppConfig,
+        task: &DownloadTask,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+    ) -> Result<NativeBundlePostProcessJob, AssetExecutionError> {
+        let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
+            AssetExecutionError::MissingAssetSaveDir {
+                region: self.region_name.clone(),
+            }
+        })?;
+        let bundle_url = self.render_bundle_url(task)?;
+        let download_started = Instant::now();
+        let fetch = if let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) {
+            self.get_bundle_with_cache(&bundle_url, task, &cache_dir)
+                .await?
+        } else {
+            let network_started = Instant::now();
+            let body = self.get_with_retry(&bundle_url).await?;
+            BundleFetch {
+                body,
+                source: BundleFetchSource::Network,
+                cache_read_ms: None,
+                network_download_ms: Some(network_started.elapsed().as_millis()),
+                cache_write_ms: None,
+            }
+        };
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleDownloaded {
+                bundle: task.bundle_path.clone(),
+                bytes: fetch.body.len(),
+                elapsed_ms: download_started.elapsed().as_millis(),
+            },
+        );
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleFetchDetails {
+                bundle: task.bundle_path.clone(),
+                source: fetch.source.as_str().to_string(),
+                cache_read_ms: fetch.cache_read_ms,
+                network_download_ms: fetch.network_download_ms,
+                cache_write_ms: fetch.cache_write_ms,
+            },
+        );
+
+        let deobfuscate_started = Instant::now();
+        let deobfuscated = deobfuscate(&fetch.body);
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleDeobfuscated {
+                bundle: task.bundle_path.clone(),
+                elapsed_ms: deobfuscate_started.elapsed().as_millis(),
+            },
+        );
+
+        let write_started = Instant::now();
+        let temp_file = std::env::temp_dir()
+            .join(&self.region_name)
+            .join(&task.bundle_path);
+        if let Some(parent) = temp_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                AssetExecutionError::CreateTempDir {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        std::fs::write(&temp_file, deobfuscated).map_err(|source| {
+            AssetExecutionError::WriteTempFile {
+                path: temp_file.clone(),
+                source,
+            }
+        })?;
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleTempWritten {
+                bundle: task.bundle_path.clone(),
+                elapsed_ms: write_started.elapsed().as_millis(),
+            },
+        );
+
+        let category = match task.category {
+            AssetCategory::StartApp => "StartApp",
+            AssetCategory::OnDemand => "OnDemand",
+            AssetCategory::Other(_) => "OnDemand",
+        };
+        let export_started = Instant::now();
+        let payload_export = export_unity_asset_bundle_payloads(
+            app_config,
+            &self.region,
+            &temp_file,
+            &task.bundle_path,
+            Path::new(&asset_save_dir),
+            category,
+        )
+        .await;
+        let _ = std::fs::remove_file(&temp_file);
+
+        Ok(NativeBundlePostProcessJob {
+            bundle_path: task.bundle_path.clone(),
+            bundle_hash: task.bundle_hash.clone(),
+            export_started,
+            payload_export: payload_export?,
+            backlog_wait_ms: 0,
+            _backlog_permit: None,
+        })
+    }
+
+    async fn prefetch_bundle(
+        &self,
+        app_config: &AppConfig,
+        task: &DownloadTask,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+    ) -> Result<(), AssetExecutionError> {
+        let bundle_url = self.render_bundle_url(task)?;
+        let download_started = Instant::now();
+        let fetch = if let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) {
+            self.get_bundle_with_cache(&bundle_url, task, &cache_dir)
+                .await?
+        } else {
+            let network_started = Instant::now();
+            let body = self.get_with_retry(&bundle_url).await?;
+            BundleFetch {
+                body,
+                source: BundleFetchSource::Network,
+                cache_read_ms: None,
+                network_download_ms: Some(network_started.elapsed().as_millis()),
+                cache_write_ms: None,
+            }
+        };
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleDownloaded {
+                bundle: task.bundle_path.clone(),
+                bytes: fetch.body.len(),
+                elapsed_ms: download_started.elapsed().as_millis(),
+            },
+        );
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleFetchDetails {
+                bundle: task.bundle_path.clone(),
+                source: fetch.source.as_str().to_string(),
+                cache_read_ms: fetch.cache_read_ms,
+                network_download_ms: fetch.network_download_ms,
+                cache_write_ms: fetch.cache_write_ms,
+            },
+        );
+        Ok(())
+    }
+
+    async fn get_bundle_with_cache(
+        &self,
+        bundle_url: &str,
+        task: &DownloadTask,
+        cache_dir: &Path,
+    ) -> Result<BundleFetch, AssetExecutionError> {
+        let cache_file = cache_dir.join(&self.region_name).join(&task.bundle_path);
+        if cache_file.exists() {
+            let cache_read_started = Instant::now();
+            let body =
+                std::fs::read(&cache_file).map_err(|source| AssetExecutionError::ReadTempFile {
+                    path: cache_file,
+                    source,
+                })?;
+            return Ok(BundleFetch {
+                body,
+                source: BundleFetchSource::CacheHit,
+                cache_read_ms: Some(cache_read_started.elapsed().as_millis()),
+                network_download_ms: None,
+                cache_write_ms: None,
+            });
+        }
+
+        let network_started = Instant::now();
+        let body = self.get_with_retry(bundle_url).await?;
+        let network_download_ms = network_started.elapsed().as_millis();
+        if let Some(parent) = cache_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                AssetExecutionError::CreateTempDir {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        let cache_write_started = Instant::now();
+        std::fs::write(&cache_file, &body).map_err(|source| {
+            AssetExecutionError::WriteTempFile {
+                path: cache_file,
+                source,
+            }
+        })?;
+        Ok(BundleFetch {
+            body,
+            source: BundleFetchSource::CacheMiss,
+            cache_read_ms: None,
+            network_download_ms: Some(network_download_ms),
+            cache_write_ms: Some(cache_write_started.elapsed().as_millis()),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct BundleFetch {
+    body: Vec<u8>,
+    source: BundleFetchSource,
+    cache_read_ms: Option<u128>,
+    network_download_ms: Option<u128>,
+    cache_write_ms: Option<u128>,
+}
+
+#[derive(Debug)]
+enum BundleFetchSource {
+    CacheHit,
+    CacheMiss,
+    Network,
+}
+
+impl BundleFetchSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::CacheHit => "cache_hit",
+            Self::CacheMiss => "cache_miss",
+            Self::Network => "network",
+        }
+    }
+}
+
+fn configured_asset_bundle_cache_dir(app_config: &AppConfig) -> Option<PathBuf> {
+    app_config
+        .execution
+        .asset_bundle_cache_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 pub async fn fetch_live_asset_bundle_info(
@@ -833,6 +1614,15 @@ pub fn should_download_bundle(
     matches_any(&compiled, bundle_name)
 }
 
+fn post_process_backlog_capacity(
+    download_concurrency: usize,
+    media_encode_concurrency: usize,
+) -> usize {
+    download_concurrency
+        .max(media_encode_concurrency.saturating_mul(2))
+        .max(1)
+}
+
 fn download_path_for_region(
     provider: &RegionProviderConfig,
     bundle_name: &str,
@@ -877,8 +1667,9 @@ mod tests {
     use crate::core::models::AssetUpdateRequest;
 
     use super::{
-        decrypt_asset_bundle_info, deobfuscate, should_download_bundle, AssetBundleDetail,
-        AssetBundleInfo, AssetCategory, AssetExecutionContext,
+        decrypt_asset_bundle_info, deobfuscate, post_process_backlog_capacity,
+        should_download_bundle, AssetBundleDetail, AssetBundleInfo, AssetCategory,
+        AssetExecutionContext,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -997,6 +1788,13 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn post_process_backlog_capacity_tracks_download_and_media_pressure() {
+        assert_eq!(post_process_backlog_capacity(0, 0), 1);
+        assert_eq!(post_process_backlog_capacity(8, 2), 8);
+        assert_eq!(post_process_backlog_capacity(4, 12), 24);
+    }
+
     #[tokio::test]
     async fn non_dry_run_can_fetch_asset_info_and_update_download_record() {
         let temp = tempdir().unwrap();
@@ -1099,6 +1897,7 @@ mod tests {
             regions,
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: "ffmpeg".to_string(),
+                asset_studio_backend: crate::core::config::AssetStudioBackend::Cli,
                 asset_studio_cli_path: None,
                 ..crate::core::config::ToolsConfig::default()
             },
@@ -1251,6 +2050,7 @@ mod tests {
             regions,
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: "ffmpeg".to_string(),
+                asset_studio_backend: crate::core::config::AssetStudioBackend::Cli,
                 asset_studio_cli_path: None,
                 ..crate::core::config::ToolsConfig::default()
             },
@@ -1392,6 +2192,10 @@ mod tests {
                     max_backoff_ms: 1,
                 },
                 ..crate::core::config::ExecutionConfig::default()
+            },
+            tools: crate::core::config::ToolsConfig {
+                asset_studio_backend: crate::core::config::AssetStudioBackend::Cli,
+                ..crate::core::config::ToolsConfig::default()
             },
             ..AppConfig::default()
         };

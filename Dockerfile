@@ -1,11 +1,20 @@
 FROM rust:1.95-bookworm AS builder
 
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
+    pkg-config \
+    libavcodec-dev \
+    libavformat-dev \
+    libavutil-dev \
+    libswresample-dev \
+    libswscale-dev && \
+    rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.toml
 COPY Cargo.lock Cargo.lock
 COPY src src
 COPY tests tests
-RUN cargo build --release
+RUN cargo build --release --features media-ffi
 
 FROM mcr.microsoft.com/dotnet/sdk:9.0-bookworm-slim AS assetstudio-builder
 WORKDIR /src
@@ -22,6 +31,7 @@ RUN cd AssetStudio/AssetStudioCLI && \
     -p:PublishTrimmed=false \
     -p:PublishSingleFile=true \
     -p:IncludeNativeLibrariesForSelfExtract=true
+# Force dependency projects away from their net472 targets during NativeAOT publish.
 RUN cd AssetStudio/AssetStudioNative && \
     dotnet publish -c Release -r linux-x64 -f net9.0 --self-contained true -o /app/assetstudio-native \
     -p:TargetFrameworks=net9.0 \
@@ -39,6 +49,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     libicu76 \
     libxml2 \
+    libavcodec61 \
+    libavformat61 \
+    libavutil59 \
+    libswresample5 \
+    libswscale8 \
     git \
     gnupg \
     openssh-client && \
@@ -46,6 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
+COPY --from=builder /app/target/release/assetstudio_native_worker /app/assetstudio_native_worker
 COPY --from=assetstudio-builder /app/assetstudio /app/assetstudio
 COPY --from=ffmpeg-builder /ffmpeg /usr/local/bin/ffmpeg
 RUN ln -sf /app/assetstudio/AssetStudioModCLI /app/assetstudio/AssetStudioCLI && \
@@ -53,9 +69,17 @@ RUN ln -sf /app/assetstudio/AssetStudioModCLI /app/assetstudio/AssetStudioCLI &&
 
 ENV TZ=Asia/Shanghai \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
-    HARUKI_ASSET_STUDIO_BACKEND=cli \
+    HARUKI_MEDIA_BACKEND=ffi \
+    HARUKI_ASSET_STUDIO_BACKEND=native \
     HARUKI_ASSET_STUDIO_CLI_PATH=/app/assetstudio/AssetStudioCLI \
     HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioNative.so \
+    HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/app/assetstudio_native_worker \
+    HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE=pool \
+    HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=3 \
+    HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS=256 \
+    HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE=32 \
+    HARUKI_ASSET_STUDIO_NATIVE_UNITYPY_MODE=true \
+    HARUKI_ASSET_STUDIO_NATIVE_MAX_EXPORT_TASKS=4 \
     HARUKI_CONFIG_PATH=/app/haruki-asset-configs.yaml
 
 EXPOSE 8080

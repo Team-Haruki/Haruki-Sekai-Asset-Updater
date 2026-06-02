@@ -407,6 +407,72 @@ async fn progress_consumer(
                         format!("downloading bundle `{bundle}`"),
                     );
                 }
+                ExecutionProgressUpdate::BundleDownloaded {
+                    bundle,
+                    bytes,
+                    elapsed_ms,
+                } => {
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("downloaded bundle `{bundle}` ({bytes} bytes) in {elapsed_ms} ms"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleFetchDetails { .. }
+                | ExecutionProgressUpdate::BundleDeobfuscated { .. } => {}
+                ExecutionProgressUpdate::BundleTempWritten { bundle, elapsed_ms } => {
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("wrote bundle `{bundle}` temp file in {elapsed_ms} ms"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleExported { bundle, elapsed_ms } => {
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("exported bundle `{bundle}` in {elapsed_ms} ms"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleNativeExportPhases { bundle, phase_ms } => {
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!(
+                            "native export phases for `{bundle}`: {}",
+                            format_native_export_phases(&phase_ms)
+                        ),
+                    );
+                }
+                ExecutionProgressUpdate::BundleNativeSkippedObjectReads { bundle, count } => {
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("native skipped {count} object read(s) for `{bundle}`"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleNativeObjectReadPlan { bundle, plan } => {
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!(
+                            "native object reads for `{bundle}`: planned={}, read={}, skipped={}, batches={}, payload={} bytes",
+                            plan.planned_objects,
+                            plan.successful_reads,
+                            plan.skipped_reads,
+                            plan.batch_count,
+                            plan.payload_bundle_bytes
+                        ),
+                    );
+                }
+                ExecutionProgressUpdate::SchedulerTelemetry { bundle, phase_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        bundle = bundle.as_deref().unwrap_or(""),
+                        phase_ms = ?phase_ms,
+                        "asset pipeline scheduler telemetry"
+                    );
+                }
                 ExecutionProgressUpdate::BundleCompleted { bundle } => {
                     job.progress.completed_downloads += 1;
                     push_progress_event(
@@ -444,6 +510,16 @@ async fn progress_consumer(
     }
 }
 
+fn format_native_export_phases(phase_ms: &HashMap<String, u64>) -> String {
+    let mut phases: Vec<_> = phase_ms.iter().collect();
+    phases.sort_by_key(|(phase, _)| *phase);
+    phases
+        .into_iter()
+        .map(|(phase, elapsed_ms)| format!("{phase}={elapsed_ms}ms"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn push_progress_event(job: &mut JobSnapshot, phase: JobPhase, message: String) {
     job.progress.phase = phase.clone();
     job.progress.current_step = message.clone();
@@ -479,6 +555,7 @@ fn classify_failure(message: &str) -> JobFailure {
         (JobFailureKind::GitSync, true)
     } else if lowered.contains("assetstudio")
         || lowered.contains("ffmpeg")
+        || lowered.contains("media conversion")
         || lowered.contains("export")
     {
         (JobFailureKind::Export, true)

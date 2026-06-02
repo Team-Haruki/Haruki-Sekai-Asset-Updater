@@ -13,10 +13,13 @@
 - Exposes `POST /v2/assets/update`
 - Exposes `GET /v2/jobs/{id}`
 - Exposes `POST /v2/jobs/{id}/cancel`
-- Uses the published [`cridecoder`](https://crates.io/crates/cridecoder) crate as the codec backend
+- Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend
 - Includes `usmexport`, `usmmeta`, `assetinfo_dump`, and `s3ls` helper CLIs
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and `git2-rs` chart sync
 - Uses a pure Rust WebP encoder for PNG to WebP conversion
+- Uses the double-FFI production path by default: AssetStudio NativeAOT worker
+  pool plus FFmpeg/rsmpeg FFI. CLI backends remain as legacy test/fallback
+  paths.
 
 ## Layout
 
@@ -32,15 +35,25 @@
   `server.auth.bearer_token`,
   `tools.asset_studio_cli_path`,
   `tools.asset_studio_native_library_path`,
+  `tools.asset_studio_native_worker_path`,
   `storage.providers[].access_key`,
   `storage.providers[].secret_key`,
   `git_sync.chart_hashes.password`,
   `regions.*.crypto.aes_key_hex`,
   `regions.*.crypto.aes_iv_hex`.
 - Tracked config templates expect values such as:
+  `HARUKI_MEDIA_BACKEND`,
   `HARUKI_ASSET_STUDIO_CLI_PATH`,
   `HARUKI_ASSET_STUDIO_BACKEND`,
   `HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH`,
+  `HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE`,
+  `HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH`,
+  `HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY`,
+  `HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS`,
+  `HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE`,
+  `HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT`,
+  `HARUKI_ASSET_STUDIO_NATIVE_UNITYPY_MODE`,
+  `HARUKI_ASSET_STUDIO_NATIVE_MAX_EXPORT_TASKS`,
   `HARUKI_SHARED_AES_KEY_HEX`,
   `HARUKI_SHARED_AES_IV_HEX`,
   `HARUKI_EN_AES_KEY_HEX`,
@@ -58,10 +71,12 @@ cp haruki-asset-configs.example.yaml haruki-asset-configs.yaml
 
 ```bash
 cp .env.example .env
-export HARUKI_ASSET_STUDIO_CLI_PATH=/path/to/AssetStudioModCLI
-# Optional experimental NativeAOT FFI backend:
-# export HARUKI_ASSET_STUDIO_BACKEND=auto
-# export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/path/to/HarukiAssetStudioNative.so
+export HARUKI_MEDIA_BACKEND=ffi
+export HARUKI_ASSET_STUDIO_BACKEND=native
+export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/path/to/HarukiAssetStudioNative.so
+export HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/path/to/assetstudio_native_worker
+export HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE=pool
+export HARUKI_ASSET_STUDIO_NATIVE_UNITYPY_MODE=true
 export HARUKI_SHARED_AES_KEY_HEX=...
 export HARUKI_SHARED_AES_IV_HEX=...
 export HARUKI_EN_AES_KEY_HEX=...
@@ -71,7 +86,7 @@ export HARUKI_EN_AES_IV_HEX=...
 3. Start the service:
 
 ```bash
-cargo run
+cargo run --features media-ffi
 ```
 
 Or run it with Docker Compose:

@@ -25,6 +25,7 @@ logging:
 execution:
   timeout_seconds: 300
   allow_cancel: true
+  asset_bundle_cache_dir: "" # optional benchmark/debug raw bundle cache
   batch_save_size: 50
   retry:
     attempts: 4
@@ -33,16 +34,35 @@ execution:
 
 tools:
   ffmpeg_path: "ffmpeg"
-  asset_studio_backend: "cli" # cli | native | auto
+  media_backend: "ffi" # ffi preferred; auto | cli are legacy
+  asset_studio_backend: "native" # native preferred; cli | auto are legacy
   asset_studio_cli_path: ""
   asset_studio_native_library_path: ""
+  asset_studio_native_call_mode: "pool" # direct | process | pool
+  asset_studio_native_worker_path: ""
+  asset_studio_native_process_concurrency: 3
+  asset_studio_native_worker_max_calls: 256 # 0 disables recycling
+  asset_studio_native_read_batch_size: 32 # context_read_objects chunk size
+  asset_studio_native_image_format: "" # default bmp surrogate; png | bmp | tga | jpeg | webp
+  asset_studio_native_read_kinds: # optional per AssetStudio type selector
+    Texture2D: image
+    Sprite: image
+    TextAsset: text_bytes
+    MonoBehaviour: typetree_json
+    AudioClip: audio
+    Animator: fbx
+    all: typetree_json
+  asset_studio_native_unitypy_mode: true # compatibility only; native always uses object-level reads
 
 concurrency:
+  auto_tune: false # when true, values below are treated as caps and scaled to CPU count
   download: 4
   upload: 4
   acb: 8
   usm: 4
   hca: 16
+  media_encode: 12 # global FFmpeg/rsmpeg encode limit
+  images: 4
 
 storage:
   providers: []

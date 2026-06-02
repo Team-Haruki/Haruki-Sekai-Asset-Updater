@@ -81,8 +81,38 @@ impl AppConfig {
                 return Err(ConfigError::InvalidRegionName(region_name.clone()));
             }
         }
+        if self.tools.asset_studio_native_process_concurrency == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "tools.asset_studio_native_process_concurrency".to_string(),
+                value: "0".to_string(),
+                expected: "a positive integer".to_string(),
+            });
+        }
+        if self.tools.asset_studio_native_read_batch_size == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "tools.asset_studio_native_read_batch_size".to_string(),
+                value: "0".to_string(),
+                expected: "a positive integer".to_string(),
+            });
+        }
+        if self.concurrency.media_encode == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "concurrency.media_encode".to_string(),
+                value: "0".to_string(),
+                expected: "a positive integer".to_string(),
+            });
+        }
+        if let Some(image_format) = &self.tools.asset_studio_native_image_format {
+            validate_asset_studio_native_image_format(image_format)?;
+        }
+        validate_asset_studio_native_read_kinds(&self.tools.asset_studio_native_read_kinds)?;
+        warn_legacy_backend_options(&self.tools);
 
         Ok(())
+    }
+
+    pub fn effective_concurrency(&self) -> ConcurrencyConfig {
+        self.concurrency.effective()
     }
 
     pub fn enabled_regions(&self) -> Vec<String> {
@@ -105,11 +135,51 @@ impl AppConfig {
             "tools.asset_studio_native_library_path",
             &mut self.tools.asset_studio_native_library_path,
         )?;
+        resolve_secret_env(
+            "tools.asset_studio_native_worker_path",
+            &mut self.tools.asset_studio_native_worker_path,
+        )?;
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_BACKEND") {
             self.tools.asset_studio_backend = value.parse()?;
         }
+        if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
+            self.tools.media_backend = value.parse()?;
+        }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH") {
             self.tools.asset_studio_native_library_path = non_empty_option(value);
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE") {
+            self.tools.asset_studio_native_call_mode = value.parse()?;
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH") {
+            self.tools.asset_studio_native_worker_path = non_empty_option(value);
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY") {
+            self.tools.asset_studio_native_process_concurrency =
+                parse_positive_usize("tools.asset_studio_native_process_concurrency", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS") {
+            self.tools.asset_studio_native_worker_max_calls =
+                parse_usize_env("tools.asset_studio_native_worker_max_calls", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE") {
+            self.tools.asset_studio_native_read_batch_size =
+                parse_positive_usize("tools.asset_studio_native_read_batch_size", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT") {
+            self.tools.asset_studio_native_image_format =
+                non_empty_option(normalize_asset_studio_native_image_format(&value)?);
+        }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_UNITYPY_MODE") {
+            self.tools.asset_studio_native_unitypy_mode =
+                parse_bool_env("tools.asset_studio_native_unitypy_mode", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
+            self.concurrency.media_encode =
+                parse_positive_usize("concurrency.media_encode", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_CONCURRENCY_AUTO_TUNE") {
+            self.concurrency.auto_tune = parse_bool_env("concurrency.auto_tune", &value)?;
         }
         resolve_secret_env(
             "git_sync.chart_hashes.password",
@@ -168,6 +238,122 @@ fn non_empty_option(value: String) -> Option<String> {
         None
     } else {
         Some(value)
+    }
+}
+
+fn parse_positive_usize(field: &str, value: &str) -> Result<usize, ConfigError> {
+    let trimmed = value.trim();
+    let parsed = trimmed
+        .parse::<usize>()
+        .map_err(|_| ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: trimmed.to_string(),
+            expected: "a positive integer".to_string(),
+        })?;
+    if parsed == 0 {
+        Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: trimmed.to_string(),
+            expected: "a positive integer".to_string(),
+        })
+    } else {
+        Ok(parsed)
+    }
+}
+
+fn parse_usize_env(field: &str, value: &str) -> Result<usize, ConfigError> {
+    let trimmed = value.trim();
+    trimmed
+        .parse::<usize>()
+        .map_err(|_| ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: trimmed.to_string(),
+            expected: "a non-negative integer".to_string(),
+        })
+}
+
+fn normalize_asset_studio_native_image_format(value: &str) -> Result<String, ConfigError> {
+    let normalized = value.trim().to_lowercase();
+    validate_asset_studio_native_image_format(&normalized)?;
+    Ok(normalized)
+}
+
+fn validate_asset_studio_native_image_format(value: &str) -> Result<(), ConfigError> {
+    match value.trim().to_lowercase().as_str() {
+        "jpeg" | "jpg" | "png" | "bmp" | "tga" | "webp" => Ok(()),
+        other => Err(ConfigError::InvalidValue {
+            field: "tools.asset_studio_native_image_format".to_string(),
+            value: other.to_string(),
+            expected: "jpeg, jpg, png, bmp, tga, or webp".to_string(),
+        }),
+    }
+}
+
+fn validate_asset_studio_native_read_kinds(
+    read_kinds: &BTreeMap<String, String>,
+) -> Result<(), ConfigError> {
+    for (asset_type, kind) in read_kinds {
+        if asset_type.trim().is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: "tools.asset_studio_native_read_kinds".to_string(),
+                value: asset_type.clone(),
+                expected: "non-empty AssetStudio type selector".to_string(),
+            });
+        }
+        validate_asset_studio_native_read_kind(
+            &format!("tools.asset_studio_native_read_kinds.{asset_type}"),
+            kind,
+        )?;
+    }
+    Ok(())
+}
+
+fn warn_legacy_backend_options(tools: &ToolsConfig) {
+    match tools.asset_studio_backend {
+        AssetStudioBackend::Native => {}
+        AssetStudioBackend::Cli => {
+            tracing::warn!("tools.asset_studio_backend=cli is legacy; production should use native")
+        }
+        AssetStudioBackend::Auto => tracing::warn!(
+            "tools.asset_studio_backend=auto is legacy fallback mode; production should use native"
+        ),
+    }
+
+    match tools.media_backend {
+        MediaBackend::Ffi => {}
+        MediaBackend::Cli => {
+            tracing::warn!("tools.media_backend=cli is legacy; production should use ffi")
+        }
+        MediaBackend::Auto => tracing::warn!(
+            "tools.media_backend=auto is legacy fallback mode; production should use ffi"
+        ),
+    }
+}
+
+fn validate_asset_studio_native_read_kind(field: &str, value: &str) -> Result<(), ConfigError> {
+    match value.trim().to_lowercase().as_str() {
+        "auto" | "raw" | "typetree_json" | "image" | "image_archive" | "audio" | "video"
+        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx" => {
+            Ok(())
+        }
+        other => Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: other.to_string(),
+            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, or fbx".to_string(),
+        }),
+    }
+}
+
+fn parse_bool_env(field: &str, value: &str) -> Result<bool, ConfigError> {
+    let trimmed = value.trim();
+    match trimmed.to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: trimmed.to_string(),
+            expected: "true or false".to_string(),
+        }),
     }
 }
 
@@ -270,16 +456,51 @@ impl Default for AccessLogConfig {
 #[serde(default)]
 pub struct ToolsConfig {
     pub ffmpeg_path: String,
+    pub media_backend: MediaBackend,
     pub asset_studio_backend: AssetStudioBackend,
     pub asset_studio_cli_path: Option<String>,
     pub asset_studio_native_library_path: Option<String>,
+    pub asset_studio_native_call_mode: AssetStudioNativeCallMode,
+    pub asset_studio_native_worker_path: Option<String>,
+    pub asset_studio_native_process_concurrency: usize,
+    pub asset_studio_native_worker_max_calls: usize,
+    pub asset_studio_native_read_batch_size: usize,
+    pub asset_studio_native_image_format: Option<String>,
+    pub asset_studio_native_read_kinds: BTreeMap<String, String>,
+    pub asset_studio_native_unitypy_mode: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaBackend {
+    Auto,
+    #[default]
+    Ffi,
+    Cli,
+}
+
+impl FromStr for MediaBackend {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "ffi" => Ok(Self::Ffi),
+            "cli" => Ok(Self::Cli),
+            other => Err(ConfigError::InvalidValue {
+                field: "tools.media_backend".to_string(),
+                value: other.to_string(),
+                expected: "auto, ffi, or cli".to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AssetStudioBackend {
-    #[default]
     Cli,
+    #[default]
     Native,
     Auto,
 }
@@ -301,11 +522,38 @@ impl FromStr for AssetStudioBackend {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetStudioNativeCallMode {
+    Direct,
+    Process,
+    #[default]
+    Pool,
+}
+
+impl FromStr for AssetStudioNativeCallMode {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "direct" => Ok(Self::Direct),
+            "process" => Ok(Self::Process),
+            "pool" => Ok(Self::Pool),
+            other => Err(ConfigError::InvalidValue {
+                field: "tools.asset_studio_native_call_mode".to_string(),
+                value: other.to_string(),
+                expected: "direct, process, or pool".to_string(),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExecutionConfig {
     pub timeout_seconds: u64,
     pub allow_cancel: bool,
+    pub asset_bundle_cache_dir: Option<String>,
     /// How many successful downloads to accumulate before flushing the download
     /// record to disk mid-run.  Set to `0` to disable mid-run flushing (record
     /// is only written once at the end).  Mirrors Go's `batchSaveSize`.
@@ -318,6 +566,7 @@ impl Default for ExecutionConfig {
         Self {
             timeout_seconds: 300,
             allow_cancel: true,
+            asset_bundle_cache_dir: None,
             batch_save_size: 50,
             retry: RetryConfig::default(),
         }
@@ -346,9 +595,18 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             ffmpeg_path: "ffmpeg".to_string(),
-            asset_studio_backend: AssetStudioBackend::Cli,
+            media_backend: MediaBackend::Ffi,
+            asset_studio_backend: AssetStudioBackend::Native,
             asset_studio_cli_path: None,
             asset_studio_native_library_path: None,
+            asset_studio_native_call_mode: AssetStudioNativeCallMode::Pool,
+            asset_studio_native_worker_path: None,
+            asset_studio_native_process_concurrency: 3,
+            asset_studio_native_worker_max_calls: 256,
+            asset_studio_native_read_batch_size: 32,
+            asset_studio_native_image_format: None,
+            asset_studio_native_read_kinds: BTreeMap::new(),
+            asset_studio_native_unitypy_mode: true,
         }
     }
 }
@@ -356,21 +614,49 @@ impl Default for ToolsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConcurrencyConfig {
+    pub auto_tune: bool,
     pub download: usize,
     pub upload: usize,
     pub acb: usize,
     pub usm: usize,
     pub hca: usize,
+    pub media_encode: usize,
+    pub images: usize,
 }
 
 impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
+            auto_tune: false,
             download: 4,
             upload: 4,
             acb: 8,
             usm: 4,
             hca: 16,
+            media_encode: 12,
+            images: 4,
+        }
+    }
+}
+
+impl ConcurrencyConfig {
+    pub fn effective(&self) -> Self {
+        if !self.auto_tune {
+            return self.clone();
+        }
+        let cpus = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(4)
+            .max(1);
+        Self {
+            auto_tune: true,
+            download: self.download.min(cpus.saturating_mul(2).max(2)).max(1),
+            upload: self.upload.min(cpus.max(2)).max(1),
+            acb: self.acb.min(cpus.max(2)).max(1),
+            usm: self.usm.min((cpus / 2).max(1)).max(1),
+            hca: self.hca.min(cpus.saturating_mul(2).max(2)).max(1),
+            media_encode: self.media_encode.min(cpus.saturating_sub(1).max(1)).max(1),
+            images: self.images.min(cpus.max(2)).max(1),
         }
     }
 }
@@ -530,8 +816,14 @@ pub struct RegionFiltersConfig {
     pub priority: Vec<String>,
 }
 
-pub const DEFAULT_ASSET_STUDIO_EXPORT_TYPES: &[&str] =
-    &["monoBehaviour", "textAsset", "tex2d", "tex2dArray", "audio"];
+pub const DEFAULT_ASSET_STUDIO_EXPORT_TYPES: &[&str] = &[
+    "monoBehaviour",
+    "textAsset",
+    "tex2d",
+    "tex2dArray",
+    "sprite",
+    "audio",
+];
 
 fn default_asset_studio_export_types() -> Vec<String> {
     DEFAULT_ASSET_STUDIO_EXPORT_TYPES
@@ -729,25 +1021,84 @@ regions:
     }
 
     #[test]
-    fn asset_studio_backend_defaults_to_cli() {
+    fn asset_studio_backend_defaults_to_double_ffi() {
+        let tools = AppConfig::default().tools;
+        assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
+        assert_eq!(AssetStudioBackend::default(), AssetStudioBackend::Native);
         assert_eq!(
-            AppConfig::default().tools.asset_studio_backend,
-            AssetStudioBackend::Cli
+            AssetStudioNativeCallMode::default(),
+            AssetStudioNativeCallMode::Pool
         );
+        assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Native);
+        assert_eq!(tools.media_backend, MediaBackend::Ffi);
+        assert_eq!(
+            tools.asset_studio_native_call_mode,
+            AssetStudioNativeCallMode::Pool
+        );
+        assert_eq!(tools.asset_studio_native_process_concurrency, 3);
+        assert_eq!(tools.asset_studio_native_worker_max_calls, 256);
+        assert_eq!(tools.asset_studio_native_read_batch_size, 32);
+        assert_eq!(tools.asset_studio_native_image_format, None);
+        assert!(tools.asset_studio_native_read_kinds.is_empty());
+        assert!(tools.asset_studio_native_unitypy_mode);
+        assert_eq!(AppConfig::default().concurrency.images, 4);
+        assert_eq!(AppConfig::default().concurrency.media_encode, 12);
+        assert!(!AppConfig::default().concurrency.auto_tune);
     }
 
     #[test]
     fn parses_asset_studio_backend_variants() {
         let yaml = r#"
+media_backend: ffi
 asset_studio_backend: native
 asset_studio_cli_path: /tmp/assetstudio-cli
 asset_studio_native_library_path: /tmp/libHarukiAssetStudioNative.so
+asset_studio_native_call_mode: process
+asset_studio_native_worker_path: /tmp/assetstudio-native-worker
+asset_studio_native_process_concurrency: 6
+asset_studio_native_worker_max_calls: 128
+asset_studio_native_read_batch_size: 16
+asset_studio_native_image_format: bmp
+asset_studio_native_read_kinds:
+  Sprite: image
+  Animator: fbx
+  all: typetree_json
 "#;
         let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
+        assert_eq!(tools.media_backend, MediaBackend::Ffi);
         assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Native);
         assert_eq!(
             tools.asset_studio_native_library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioNative.so")
+        );
+        assert_eq!(
+            tools.asset_studio_native_call_mode,
+            AssetStudioNativeCallMode::Process
+        );
+        assert_eq!(
+            tools.asset_studio_native_worker_path.as_deref(),
+            Some("/tmp/assetstudio-native-worker")
+        );
+        assert_eq!(tools.asset_studio_native_process_concurrency, 6);
+        assert_eq!(tools.asset_studio_native_worker_max_calls, 128);
+        assert_eq!(tools.asset_studio_native_read_batch_size, 16);
+        assert_eq!(
+            tools.asset_studio_native_image_format.as_deref(),
+            Some("bmp")
+        );
+        assert_eq!(
+            tools
+                .asset_studio_native_read_kinds
+                .get("Animator")
+                .map(String::as_str),
+            Some("fbx")
+        );
+        assert_eq!(
+            tools
+                .asset_studio_native_read_kinds
+                .get("all")
+                .map(String::as_str),
+            Some("typetree_json")
         );
 
         let yaml = r#"
@@ -758,12 +1109,97 @@ asset_studio_backend: auto
     }
 
     #[test]
+    fn rejects_invalid_media_backend() {
+        let err = "sidecar"
+            .parse::<MediaBackend>()
+            .expect_err("invalid media backend should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { field, value, .. }
+                if field == "tools.media_backend" && value == "sidecar"
+        ));
+    }
+
+    #[test]
     fn rejects_invalid_asset_studio_backend() {
         let err = "sidecar".parse::<AssetStudioBackend>().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
                 if field == "tools.asset_studio_backend" && value == "sidecar"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_asset_studio_native_call_mode() {
+        let err = "threaded".parse::<AssetStudioNativeCallMode>().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "tools.asset_studio_native_call_mode" && value == "threaded"
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_asset_studio_native_process_concurrency() {
+        let mut config = AppConfig::default();
+        config.tools.asset_studio_native_process_concurrency = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "tools.asset_studio_native_process_concurrency" && value == "0"
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_asset_studio_native_read_batch_size() {
+        let mut config = AppConfig::default();
+        config.tools.asset_studio_native_read_batch_size = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "tools.asset_studio_native_read_batch_size" && value == "0"
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_media_encode_concurrency() {
+        let mut config = AppConfig::default();
+        config.concurrency.media_encode = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "concurrency.media_encode" && value == "0"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_asset_studio_native_image_format() {
+        let mut config = AppConfig::default();
+        config.tools.asset_studio_native_image_format = Some("gif".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "tools.asset_studio_native_image_format" && value == "gif"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_asset_studio_native_read_kind() {
+        let mut config = AppConfig::default();
+        config
+            .tools
+            .asset_studio_native_read_kinds
+            .insert("Sprite".to_string(), "thumbnail".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "tools.asset_studio_native_read_kinds.Sprite" && value == "thumbnail"
         ));
     }
 
@@ -802,6 +1238,10 @@ asset_studio_types:
             "HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
             "/tmp/libassetstudio-native.so",
         );
+        std::env::set_var(
+            "HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH",
+            "/tmp/assetstudio-native-worker",
+        );
 
         let mut file = NamedTempFile::new().unwrap();
         write!(
@@ -817,6 +1257,7 @@ logging:
 tools:
   asset_studio_cli_path: "${{env:HARUKI_TEST_ASSET_STUDIO_CLI_PATH}}"
   asset_studio_native_library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH}}"
+  asset_studio_native_worker_path: "${{env:HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH}}"
 regions:
   jp:
     enabled: true
@@ -855,6 +1296,10 @@ regions:
             config.tools.asset_studio_native_library_path.as_deref(),
             Some("/tmp/libassetstudio-native.so")
         );
+        assert_eq!(
+            config.tools.asset_studio_native_worker_path.as_deref(),
+            Some("/tmp/assetstudio-native-worker")
+        );
         assert_eq!(config.logging.access.format, "[${time}] ${status}");
 
         std::env::remove_var("HARUKI_TEST_AES_KEY_HEX");
@@ -862,18 +1307,42 @@ regions:
         std::env::remove_var("HARUKI_TEST_BEARER_TOKEN");
         std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_CLI_PATH");
         std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH");
+        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH");
     }
 
     #[test]
     fn load_from_path_applies_asset_studio_env_overrides() {
         let _env_lock = env_lock();
         let old_backend = std::env::var("HARUKI_ASSET_STUDIO_BACKEND").ok();
+        let old_media_backend = std::env::var("HARUKI_MEDIA_BACKEND").ok();
         let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH").ok();
+        let old_call_mode = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE").ok();
+        let old_worker_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH").ok();
+        let old_process_concurrency =
+            std::env::var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY").ok();
+        let old_worker_max_calls =
+            std::env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS").ok();
+        let old_read_batch_size = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE").ok();
+        let old_image_format = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT").ok();
+        let old_media_encode_concurrency = std::env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY").ok();
+        let old_concurrency_auto_tune = std::env::var("HARUKI_CONCURRENCY_AUTO_TUNE").ok();
         std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", "auto");
+        std::env::set_var("HARUKI_MEDIA_BACKEND", "cli");
         std::env::set_var(
             "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
             "/tmp/override-native.so",
         );
+        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", "process");
+        std::env::set_var(
+            "HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH",
+            "/tmp/override-native-worker",
+        );
+        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY", "7");
+        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS", "64");
+        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE", "48");
+        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT", "TGA");
+        std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", "9");
+        std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", "true");
 
         let mut file = NamedTempFile::new().unwrap();
         write!(
@@ -883,25 +1352,114 @@ config_version: 2
 tools:
   asset_studio_backend: cli
   asset_studio_native_library_path: /tmp/config-native.so
+  asset_studio_native_call_mode: direct
+  asset_studio_native_worker_path: /tmp/config-native-worker
+  asset_studio_native_process_concurrency: 2
+  asset_studio_native_worker_max_calls: 128
+  asset_studio_native_read_batch_size: 16
+  asset_studio_native_image_format: png
 "#
         )
         .unwrap();
 
         let config = AppConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.tools.asset_studio_backend, AssetStudioBackend::Auto);
+        assert_eq!(config.tools.media_backend, MediaBackend::Cli);
         assert_eq!(
             config.tools.asset_studio_native_library_path.as_deref(),
             Some("/tmp/override-native.so")
         );
+        assert_eq!(
+            config.tools.asset_studio_native_call_mode,
+            AssetStudioNativeCallMode::Process
+        );
+        assert_eq!(
+            config.tools.asset_studio_native_worker_path.as_deref(),
+            Some("/tmp/override-native-worker")
+        );
+        assert_eq!(config.tools.asset_studio_native_process_concurrency, 7);
+        assert_eq!(config.tools.asset_studio_native_worker_max_calls, 64);
+        assert_eq!(config.tools.asset_studio_native_read_batch_size, 48);
+        assert_eq!(
+            config.tools.asset_studio_native_image_format.as_deref(),
+            Some("tga")
+        );
+        assert_eq!(config.concurrency.media_encode, 9);
+        assert!(config.concurrency.auto_tune);
 
         match old_backend {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", value),
             None => std::env::remove_var("HARUKI_ASSET_STUDIO_BACKEND"),
         }
+        match old_media_backend {
+            Some(value) => std::env::set_var("HARUKI_MEDIA_BACKEND", value),
+            None => std::env::remove_var("HARUKI_MEDIA_BACKEND"),
+        }
         match old_native_path {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH", value),
             None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"),
         }
+        match old_call_mode {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE"),
+        }
+        match old_worker_path {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH"),
+        }
+        match old_process_concurrency {
+            Some(value) => {
+                std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY", value)
+            }
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY"),
+        }
+        match old_worker_max_calls {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS"),
+        }
+        match old_read_batch_size {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE"),
+        }
+        match old_image_format {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT"),
+        }
+        match old_media_encode_concurrency {
+            Some(value) => std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", value),
+            None => std::env::remove_var("HARUKI_MEDIA_ENCODE_CONCURRENCY"),
+        }
+        match old_concurrency_auto_tune {
+            Some(value) => std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", value),
+            None => std::env::remove_var("HARUKI_CONCURRENCY_AUTO_TUNE"),
+        }
+    }
+
+    #[test]
+    fn effective_concurrency_auto_tune_respects_configured_caps() {
+        let config = ConcurrencyConfig {
+            auto_tune: true,
+            download: 999,
+            upload: 999,
+            acb: 999,
+            usm: 999,
+            hca: 999,
+            media_encode: 999,
+            images: 999,
+        };
+
+        let effective = config.effective();
+
+        assert!(effective.auto_tune);
+        assert!(effective.download <= config.download);
+        assert!(effective.upload <= config.upload);
+        assert!(effective.acb <= config.acb);
+        assert!(effective.usm <= config.usm);
+        assert!(effective.hca <= config.hca);
+        assert!(effective.media_encode <= config.media_encode);
+        assert!(effective.images <= config.images);
+        assert!(effective.download >= 1);
+        assert!(effective.media_encode >= 1);
     }
 
     #[test]
