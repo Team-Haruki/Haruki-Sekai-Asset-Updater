@@ -72,6 +72,8 @@ pub struct AssetStudioNativeAssetInfo {
     pub asset_type: Option<String>,
     pub type_id: i32,
     pub path_id: i64,
+    #[serde(default)]
+    pub unique_id: Option<String>,
     pub size: i64,
     pub source_file: Option<String>,
 }
@@ -345,7 +347,9 @@ struct NativeUnityPyUnpackOptions<'a> {
     strip_path_prefix: &'a str,
     region: &'a RegionConfig,
     read_kinds: &'a BTreeMap<String, String>,
+    image_format: &'a str,
     read_batch_size: usize,
+    cli_parity_mode: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -678,7 +682,13 @@ async fn run_assetstudio_native_unitypy_unpack(
         strip_path_prefix,
         region,
         read_kinds: &app_config.tools.asset_studio_native_read_kinds,
+        image_format: app_config
+            .tools
+            .asset_studio_native_image_format
+            .as_deref()
+            .unwrap_or(NATIVE_AOT_IMAGE_SURROGATE_FORMAT),
         read_batch_size: app_config.tools.asset_studio_native_read_batch_size,
+        cli_parity_mode: app_config.tools.asset_studio_native_cli_parity_mode,
     };
     let result = pool.unitypy_unpack(&inspect_request, unpack_options).await;
 
@@ -935,136 +945,227 @@ pub fn call_assetstudio_native_raw(
     request_json: Option<&str>,
 ) -> Result<(c_int, String), ExportPipelineError> {
     let _lock = native_call_lock();
-    call_assetstudio_native_raw_locked(native_library_path, operation, request_json)
+    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+    library.call(operation, request_json)
 }
 
-fn call_assetstudio_native_raw_locked(
-    native_library_path: &str,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
-) -> Result<(c_int, String), ExportPipelineError> {
-    let request_json = request_json
-        .map(|value| {
-            CString::new(value).map_err(|source| ExportPipelineError::AssetStudioNative {
-                message: format!(
-                    "native {} request json contains interior nul byte: {source}",
-                    operation.as_str()
-                ),
-            })
-        })
-        .transpose()?;
+pub struct LoadedAssetStudioNativeLibrary {
+    library: libloading::Library,
+    _native_dependency_handles: Vec<libloading::Library>,
+    _env_guard: EnvVarGuard,
+}
 
-    unsafe {
-        let _env_guard = EnvVarGuard::set(
-            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
-            native_library_path,
-        );
-        let _native_dependency_handles =
-            preload_assetstudio_native_dependencies(native_library_path);
-        let library = libloading::Library::new(native_library_path).map_err(|source| {
+impl LoadedAssetStudioNativeLibrary {
+    pub fn load(native_library_path: &str) -> Result<Self, ExportPipelineError> {
+        unsafe {
+            let env_guard = EnvVarGuard::set(
+                "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+                native_library_path,
+            );
+            let native_dependency_handles =
+                preload_assetstudio_native_dependencies(native_library_path);
+            let library = libloading::Library::new(native_library_path).map_err(|source| {
+                ExportPipelineError::AssetStudioNative {
+                    message: format!(
+                        "failed to load native library `{native_library_path}`: {source}"
+                    ),
+                }
+            })?;
+            Ok(Self {
+                library,
+                _native_dependency_handles: native_dependency_handles,
+                _env_guard: env_guard,
+            })
+        }
+    }
+
+    pub fn call(
+        &self,
+        operation: AssetStudioNativeOperation,
+        request_json: Option<&str>,
+    ) -> Result<(c_int, String), ExportPipelineError> {
+        let request_json = request_json
+            .map(|value| {
+                CString::new(value).map_err(|source| ExportPipelineError::AssetStudioNative {
+                    message: format!(
+                        "native {} request json contains interior nul byte: {source}",
+                        operation.as_str()
+                    ),
+                })
+            })
+            .transpose()?;
+
+        unsafe {
+            let free = self
+                .library
+                .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
+                .map_err(|source| ExportPipelineError::AssetStudioNative {
+                    message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
+                })?;
+
+            let mut response_ptr: *mut c_char = ptr::null_mut();
+            let status = match operation {
+                AssetStudioNativeOperation::Version => {
+                    let version = self
+                        .library
+                        .get::<AssetStudioVersionFn>(b"haruki_assetstudio_version")
+                        .map_err(|source| ExportPipelineError::AssetStudioNative {
+                            message: format!("missing haruki_assetstudio_version symbol: {source}"),
+                        })?;
+                    version(&mut response_ptr)
+                }
+                AssetStudioNativeOperation::Inspect => {
+                    let inspect = self
+                        .library
+                        .get::<AssetStudioInspectFn>(b"haruki_assetstudio_inspect")
+                        .map_err(|source| ExportPipelineError::AssetStudioNative {
+                            message: format!("missing haruki_assetstudio_inspect symbol: {source}"),
+                        })?;
+                    let request_json = request_json.as_ref().ok_or_else(|| {
+                        ExportPipelineError::AssetStudioNative {
+                            message: "native inspect requires request json".to_string(),
+                        }
+                    })?;
+                    inspect(request_json.as_ptr(), &mut response_ptr)
+                }
+                AssetStudioNativeOperation::ContextOpen => {
+                    let context_open = self
+                        .library
+                        .get::<AssetStudioContextOpenFn>(b"haruki_assetstudio_context_open")
+                        .map_err(|source| ExportPipelineError::AssetStudioNative {
+                            message: format!(
+                                "missing haruki_assetstudio_context_open symbol: {source}"
+                            ),
+                        })?;
+                    let request_json = request_json.as_ref().ok_or_else(|| {
+                        ExportPipelineError::AssetStudioNative {
+                            message: "native context_open requires request json".to_string(),
+                        }
+                    })?;
+                    context_open(request_json.as_ptr(), &mut response_ptr)
+                }
+                AssetStudioNativeOperation::ContextListObjects => {
+                    let list_objects = self
+                        .library
+                        .get::<AssetStudioContextListObjectsFn>(
+                            b"haruki_assetstudio_context_list_objects",
+                        )
+                        .map_err(|source| ExportPipelineError::AssetStudioNative {
+                            message: format!(
+                                "missing haruki_assetstudio_context_list_objects symbol: {source}"
+                            ),
+                        })?;
+                    let request_json = request_json.as_ref().ok_or_else(|| {
+                        ExportPipelineError::AssetStudioNative {
+                            message: "native context_list_objects requires request json"
+                                .to_string(),
+                        }
+                    })?;
+                    list_objects(request_json.as_ptr(), &mut response_ptr)
+                }
+                AssetStudioNativeOperation::ContextClose => {
+                    let context_close = self
+                        .library
+                        .get::<AssetStudioContextCloseFn>(b"haruki_assetstudio_context_close")
+                        .map_err(|source| ExportPipelineError::AssetStudioNative {
+                            message: format!(
+                                "missing haruki_assetstudio_context_close symbol: {source}"
+                            ),
+                        })?;
+                    let request_json = request_json.as_ref().ok_or_else(|| {
+                        ExportPipelineError::AssetStudioNative {
+                            message: "native context_close requires request json".to_string(),
+                        }
+                    })?;
+                    context_close(request_json.as_ptr(), &mut response_ptr)
+                }
+                AssetStudioNativeOperation::ContextReadObject => {
+                    return Err(ExportPipelineError::AssetStudioNative {
+                        message: "native context_read_object requires payload-aware call path"
+                            .to_string(),
+                    });
+                }
+                AssetStudioNativeOperation::ContextReadObjects => {
+                    return Err(ExportPipelineError::AssetStudioNative {
+                        message: "native context_read_objects requires payload-aware call path"
+                            .to_string(),
+                    });
+                }
+            };
+            let response = take_native_response_string(response_ptr, *free);
+            if status != 0 && response.is_empty() {
+                return Err(ExportPipelineError::AssetStudioNative {
+                    message: format!(
+                        "native {} failed with status {status} and no response",
+                        operation.as_str()
+                    ),
+                });
+            }
+            Ok((status, response))
+        }
+    }
+
+    pub fn call_payload(
+        &self,
+        request_json: &str,
+        symbol: &'static [u8],
+        operation_name: &str,
+    ) -> Result<(c_int, String, Vec<u8>), ExportPipelineError> {
+        let request_json = CString::new(request_json).map_err(|source| {
             ExportPipelineError::AssetStudioNative {
-                message: format!("failed to load native library `{native_library_path}`: {source}"),
+                message: format!(
+                    "native {operation_name} request json contains interior nul byte: {source}"
+                ),
             }
         })?;
-        let free = library
-            .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
-            .map_err(|source| ExportPipelineError::AssetStudioNative {
-                message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
-            })?;
 
-        let mut response_ptr: *mut c_char = ptr::null_mut();
-        let status = match operation {
-            AssetStudioNativeOperation::Version => {
-                let version = library
-                    .get::<AssetStudioVersionFn>(b"haruki_assetstudio_version")
-                    .map_err(|source| ExportPipelineError::AssetStudioNative {
-                        message: format!("missing haruki_assetstudio_version symbol: {source}"),
-                    })?;
-                version(&mut response_ptr)
-            }
-            AssetStudioNativeOperation::Inspect => {
-                let inspect = library
-                    .get::<AssetStudioInspectFn>(b"haruki_assetstudio_inspect")
-                    .map_err(|source| ExportPipelineError::AssetStudioNative {
-                        message: format!("missing haruki_assetstudio_inspect symbol: {source}"),
-                    })?;
-                let request_json = request_json.as_ref().ok_or_else(|| {
-                    ExportPipelineError::AssetStudioNative {
-                        message: "native inspect requires request json".to_string(),
-                    }
+        unsafe {
+            let free_string = self
+                .library
+                .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
+                .map_err(|source| ExportPipelineError::AssetStudioNative {
+                    message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
                 })?;
-                inspect(request_json.as_ptr(), &mut response_ptr)
-            }
-            AssetStudioNativeOperation::ContextOpen => {
-                let context_open = library
-                    .get::<AssetStudioContextOpenFn>(b"haruki_assetstudio_context_open")
-                    .map_err(|source| ExportPipelineError::AssetStudioNative {
-                        message: format!(
-                            "missing haruki_assetstudio_context_open symbol: {source}"
-                        ),
-                    })?;
-                let request_json = request_json.as_ref().ok_or_else(|| {
-                    ExportPipelineError::AssetStudioNative {
-                        message: "native context_open requires request json".to_string(),
-                    }
+            let free_buffer = self
+                .library
+                .get::<AssetStudioFreeBufferFn>(b"haruki_assetstudio_free_buffer")
+                .map_err(|source| ExportPipelineError::AssetStudioNative {
+                    message: format!("missing haruki_assetstudio_free_buffer symbol: {source}"),
                 })?;
-                context_open(request_json.as_ptr(), &mut response_ptr)
-            }
-            AssetStudioNativeOperation::ContextListObjects => {
-                let list_objects = library
-                    .get::<AssetStudioContextListObjectsFn>(
-                        b"haruki_assetstudio_context_list_objects",
-                    )
-                    .map_err(|source| ExportPipelineError::AssetStudioNative {
-                        message: format!(
-                            "missing haruki_assetstudio_context_list_objects symbol: {source}"
-                        ),
-                    })?;
-                let request_json = request_json.as_ref().ok_or_else(|| {
-                    ExportPipelineError::AssetStudioNative {
-                        message: "native context_list_objects requires request json".to_string(),
-                    }
+            let read = self
+                .library
+                .get::<AssetStudioContextReadObjectsFn>(symbol)
+                .map_err(|source| ExportPipelineError::AssetStudioNative {
+                    message: format!("missing {operation_name} symbol: {source}"),
                 })?;
-                list_objects(request_json.as_ptr(), &mut response_ptr)
-            }
-            AssetStudioNativeOperation::ContextClose => {
-                let context_close = library
-                    .get::<AssetStudioContextCloseFn>(b"haruki_assetstudio_context_close")
-                    .map_err(|source| ExportPipelineError::AssetStudioNative {
-                        message: format!(
-                            "missing haruki_assetstudio_context_close symbol: {source}"
-                        ),
-                    })?;
-                let request_json = request_json.as_ref().ok_or_else(|| {
-                    ExportPipelineError::AssetStudioNative {
-                        message: "native context_close requires request json".to_string(),
-                    }
-                })?;
-                context_close(request_json.as_ptr(), &mut response_ptr)
-            }
-            AssetStudioNativeOperation::ContextReadObject => {
+
+            let mut response_ptr: *mut c_char = ptr::null_mut();
+            let mut payload_ptr: *mut c_uchar = ptr::null_mut();
+            let mut payload_len: c_longlong = 0;
+            let status = read(
+                request_json.as_ptr(),
+                &mut response_ptr,
+                &mut payload_ptr,
+                &mut payload_len,
+            );
+            let response = take_native_response_string(response_ptr, *free_string);
+            let payload = if !payload_ptr.is_null() && payload_len > 0 {
+                let payload =
+                    std::slice::from_raw_parts(payload_ptr, payload_len as usize).to_vec();
+                free_buffer(payload_ptr);
+                payload
+            } else {
+                Vec::new()
+            };
+            if status != 0 && response.is_empty() {
                 return Err(ExportPipelineError::AssetStudioNative {
-                    message: "native context_read_object requires payload-aware call path"
-                        .to_string(),
+                    message: format!(
+                        "native {operation_name} failed with status {status} and no response"
+                    ),
                 });
             }
-            AssetStudioNativeOperation::ContextReadObjects => {
-                return Err(ExportPipelineError::AssetStudioNative {
-                    message: "native context_read_objects requires payload-aware call path"
-                        .to_string(),
-                });
-            }
-        };
-        let response = take_native_response_string(response_ptr, *free);
-        if status != 0 && response.is_empty() {
-            return Err(ExportPipelineError::AssetStudioNative {
-                message: format!(
-                    "native {} failed with status {status} and no response",
-                    operation.as_str()
-                ),
-            });
+            Ok((status, response, payload))
         }
-        Ok((status, response))
     }
 }
 
@@ -1099,67 +1200,8 @@ fn call_assetstudio_native_payload_raw(
     operation_name: &str,
 ) -> Result<(c_int, String, Vec<u8>), ExportPipelineError> {
     let _lock = native_call_lock();
-    let request_json =
-        CString::new(request_json).map_err(|source| ExportPipelineError::AssetStudioNative {
-            message: format!(
-                "native {operation_name} request json contains interior nul byte: {source}"
-            ),
-        })?;
-
-    unsafe {
-        let _env_guard = EnvVarGuard::set(
-            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
-            native_library_path,
-        );
-        let _native_dependency_handles =
-            preload_assetstudio_native_dependencies(native_library_path);
-        let library = libloading::Library::new(native_library_path).map_err(|source| {
-            ExportPipelineError::AssetStudioNative {
-                message: format!("failed to load native library `{native_library_path}`: {source}"),
-            }
-        })?;
-        let free_string = library
-            .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
-            .map_err(|source| ExportPipelineError::AssetStudioNative {
-                message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
-            })?;
-        let free_buffer = library
-            .get::<AssetStudioFreeBufferFn>(b"haruki_assetstudio_free_buffer")
-            .map_err(|source| ExportPipelineError::AssetStudioNative {
-                message: format!("missing haruki_assetstudio_free_buffer symbol: {source}"),
-            })?;
-        let read = library
-            .get::<AssetStudioContextReadObjectsFn>(symbol)
-            .map_err(|source| ExportPipelineError::AssetStudioNative {
-                message: format!("missing {operation_name} symbol: {source}"),
-            })?;
-
-        let mut response_ptr: *mut c_char = ptr::null_mut();
-        let mut payload_ptr: *mut c_uchar = ptr::null_mut();
-        let mut payload_len: c_longlong = 0;
-        let status = read(
-            request_json.as_ptr(),
-            &mut response_ptr,
-            &mut payload_ptr,
-            &mut payload_len,
-        );
-        let response = take_native_response_string(response_ptr, *free_string);
-        let payload = if !payload_ptr.is_null() && payload_len > 0 {
-            let payload = std::slice::from_raw_parts(payload_ptr, payload_len as usize).to_vec();
-            free_buffer(payload_ptr);
-            payload
-        } else {
-            Vec::new()
-        };
-        if status != 0 && response.is_empty() {
-            return Err(ExportPipelineError::AssetStudioNative {
-                message: format!(
-                    "native {operation_name} failed with status {status} and no response"
-                ),
-            });
-        }
-        Ok((status, response, payload))
-    }
+    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+    library.call_payload(request_json, symbol, operation_name)
 }
 
 #[allow(dead_code)]
@@ -1316,8 +1358,12 @@ async fn call_assetstudio_native_unitypy_unpack_worker(
             native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
         for asset_chunk in readable_assets.chunks(read_batch_size) {
             summary.object_read_plan.batch_count += 1;
-            let request =
-                native_object_read_batch_request(context_id, asset_chunk, options.read_kinds);
+            let request = native_object_read_batch_request(
+                context_id,
+                asset_chunk,
+                options.read_kinds,
+                options.image_format,
+            );
             let request_json = sonic_rs::to_string(&request)
                 .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
             let output = worker
@@ -1351,6 +1397,7 @@ async fn call_assetstudio_native_unitypy_unpack_worker(
                     options.export_path,
                     options.strip_path_prefix,
                     options.region,
+                    options.cli_parity_mode,
                     asset,
                     &read_output,
                 )?;
@@ -1569,6 +1616,7 @@ fn native_object_read_batch_request(
     context_id: i64,
     asset_chunk: &[&AssetStudioNativeAssetInfo],
     read_kinds: &BTreeMap<String, String>,
+    image_format: &str,
 ) -> AssetStudioNativeContextReadObjectsRequest {
     AssetStudioNativeContextReadObjectsRequest {
         context_id,
@@ -1577,7 +1625,7 @@ fn native_object_read_batch_request(
             .map(|asset| AssetStudioNativeContextReadObjectItemRequest {
                 path_id: asset.path_id,
                 kind: native_read_kind_for_asset(asset, read_kinds),
-                image_format: NATIVE_AOT_IMAGE_SURROGATE_FORMAT.to_string(),
+                image_format: image_format.to_string(),
             })
             .collect(),
     }
@@ -1898,7 +1946,10 @@ fn assetstudio_type_selector_matches(selector: &str, asset_type: &str) -> bool {
 
     match normalized_selector.as_str() {
         "tex2d" | "texture2d" => normalized_asset_type == "texture2d",
-        "tex2darray" | "texture2darray" => normalized_asset_type == "texture2darray",
+        "tex2darray" | "texture2darray" => {
+            normalized_asset_type == "texture2darray"
+                || normalized_asset_type == "texture2darrayimage"
+        }
         "sprite" => normalized_asset_type == "sprite",
         "textasset" => normalized_asset_type == "textasset",
         "monobehaviour" | "monobehavior" => normalized_asset_type == "monobehaviour",
@@ -1944,7 +1995,7 @@ fn normalize_native_read_kind(kind: &str) -> String {
 
 fn default_native_read_kind(asset_type: &str) -> &'static str {
     match normalize_assetstudio_type_name(asset_type).as_str() {
-        "texture2d" | "texture2darray" | "sprite" => "image",
+        "texture2d" | "texture2darray" | "texture2darrayimage" | "sprite" => "image",
         "textasset" => "text_bytes",
         "monobehaviour" | "monobehavior" => "typetree_json",
         "audioclip" => "audio",
@@ -2093,6 +2144,7 @@ fn write_unitypy_object_payload(
     export_path: &str,
     strip_path_prefix: &str,
     region: &RegionConfig,
+    cli_parity_mode: bool,
     asset: &AssetStudioNativeAssetInfo,
     read_output: &AssetStudioNativeObjectReadOutput,
 ) -> Result<(), ExportPipelineError> {
@@ -2111,6 +2163,15 @@ fn write_unitypy_object_payload(
         read_output.response.payload_kind.as_deref(),
         read_output.response.suggested_extension.as_deref(),
     );
+    let target = if cli_parity_mode {
+        assetstudio_cli_parity_output_path(
+            &target,
+            asset,
+            read_output.response.suggested_extension.as_deref(),
+        )
+    } else {
+        target
+    };
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ExportPipelineError::Io {
             path: parent.to_path_buf(),
@@ -2131,12 +2192,7 @@ fn write_unitypy_object_payload(
                 .map(|name| name.trim_end_matches(".bytes").to_string())
                 .unwrap_or_else(|| format!("asset_{}.acb", asset.path_id)),
         );
-        std::fs::write(&acb_target, &read_output.payload).map_err(|source| {
-            ExportPipelineError::Io {
-                path: acb_target,
-                source,
-            }
-        })?;
+        write_unitypy_payload_file(&acb_target, &read_output.payload, cli_parity_mode)?;
         return Ok(());
     }
 
@@ -2145,21 +2201,37 @@ fn write_unitypy_object_payload(
         write_payload_bundle(&target, &read_output.payload)?;
     } else if payload_kind == "image_bmp" {
         let bmp_target = target.with_extension(NATIVE_AOT_IMAGE_SURROGATE_FORMAT);
-        std::fs::write(&bmp_target, &read_output.payload).map_err(|source| {
-            ExportPipelineError::Io {
-                path: bmp_target,
-                source,
-            }
-        })?;
+        write_unitypy_payload_file(&bmp_target, &read_output.payload, cli_parity_mode)?;
     } else {
-        std::fs::write(&target, &read_output.payload).map_err(|source| {
-            ExportPipelineError::Io {
-                path: target,
-                source,
-            }
-        })?;
+        write_unitypy_payload_file(&target, &read_output.payload, cli_parity_mode)?;
     }
     Ok(())
+}
+
+fn write_unitypy_payload_file(
+    target: &Path,
+    payload: &[u8],
+    cli_parity_mode: bool,
+) -> Result<(), ExportPipelineError> {
+    match std::fs::write(target, payload) {
+        Ok(()) => Ok(()),
+        Err(source) if cli_parity_mode && is_assetstudio_cli_skippable_write_error(&source) => {
+            warn!(
+                path = %target.display(),
+                error = %source,
+                "assetstudio native CLI parity skipped an object output that AssetStudio CLI cannot write either"
+            );
+            Ok(())
+        }
+        Err(source) => Err(ExportPipelineError::Io {
+            path: target.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn is_assetstudio_cli_skippable_write_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(63) | Some(36))
 }
 
 fn write_payload_bundle(target: &Path, payload: &[u8]) -> Result<(), ExportPipelineError> {
@@ -2404,6 +2476,8 @@ fn static_known_payload_extension(extension: &str) -> Option<&'static str> {
         "bytes" => Some("bytes"),
         "dat" => Some("dat"),
         "json" => Some("json"),
+        "lua" => Some("lua"),
+        "txt" => Some("txt"),
         "bmp" => Some("bmp"),
         "png" => Some("png"),
         "tga" => Some("tga"),
@@ -2421,6 +2495,117 @@ fn static_known_payload_extension(extension: &str) -> Option<&'static str> {
         "bin" => Some("bin"),
         _ => None,
     }
+}
+
+fn non_overwriting_assetstudio_output_path(
+    path: PathBuf,
+    asset: &AssetStudioNativeAssetInfo,
+) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("asset");
+    let extension = path.extension().and_then(|value| value.to_str());
+    if let Some(unique_id) = asset.unique_id.as_deref().filter(|value| !value.is_empty()) {
+        let candidate = parent.join(match extension {
+            Some(extension) if !extension.is_empty() => format!("{stem}{unique_id}.{extension}"),
+            _ => format!("{stem}{unique_id}"),
+        });
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    for index in 0..1000 {
+        let suffix = if index == 0 {
+            format!("#{}", asset.path_id)
+        } else {
+            format!("#{}_{}", asset.path_id, index)
+        };
+        let file_name = match extension {
+            Some(extension) if !extension.is_empty() => {
+                format!("{stem}_{suffix}.{extension}")
+            }
+            _ => format!("{stem}_{suffix}"),
+        };
+        let candidate = parent.join(file_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path
+}
+
+fn assetstudio_cli_parity_output_path(
+    default_path: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+    suggested_extension: Option<&str>,
+) -> PathBuf {
+    let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
+    let file_name = asset
+        .name
+        .as_deref()
+        .map(assetstudio_fix_file_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("asset_{}", asset.path_id));
+    let extension = assetstudio_cli_parity_extension(asset, suggested_extension);
+    let path = parent.join(format!("{file_name}{extension}"));
+    non_overwriting_assetstudio_output_path(path, asset)
+}
+
+fn assetstudio_cli_parity_extension(
+    asset: &AssetStudioNativeAssetInfo,
+    suggested_extension: Option<&str>,
+) -> String {
+    if asset
+        .asset_type
+        .as_deref()
+        .is_some_and(|asset_type| assetstudio_type_selector_matches("textAsset", asset_type))
+    {
+        if asset
+            .name
+            .as_deref()
+            .is_some_and(|name| Path::new(name).extension().is_some())
+        {
+            return String::new();
+        }
+        if let Some(extension) = asset
+            .container
+            .as_deref()
+            .and_then(|container| Path::new(container).extension())
+            .and_then(|extension| extension.to_str())
+            .filter(|extension| !extension.is_empty())
+        {
+            return format!(".{extension}");
+        }
+        return ".txt".to_string();
+    }
+
+    let extension = suggested_extension
+        .and_then(static_known_payload_extension)
+        .unwrap_or_else(|| default_extension_for_asset(asset));
+    if extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{}", extension.trim_start_matches('.'))
+    }
+}
+
+fn assetstudio_fix_file_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ if ch.is_control() => '_',
+            _ => ch,
+        })
+        .collect()
 }
 
 fn default_extension_for_asset(asset: &AssetStudioNativeAssetInfo) -> &'static str {
@@ -2861,17 +3046,23 @@ impl NativeWorkerPool {
     }
 
     async fn spawn_worker(&self) -> Result<NativePooledWorker, ExportPipelineError> {
-        let mut child = Command::new(&self.worker_path)
+        let worker_program = absolute_command_path(&self.worker_path);
+        let mut command = Command::new(&worker_program);
+        command
             .arg("--server")
             .arg("--native-library")
             .arg(&self.native_library_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        if let Some(native_library_dir) = native_library_working_dir(&self.native_library_path) {
+            command.current_dir(native_library_dir);
+        }
+        let mut child = command
             .spawn()
             .map_err(|source| ExportPipelineError::Spawn {
-                program: self.worker_path.display().to_string(),
+                program: worker_program.display().to_string(),
                 source,
             })?;
         let stdin = child
@@ -3159,7 +3350,9 @@ async fn run_assetstudio_native_worker(
             source,
         })?;
     let response_path = response_file.path().to_path_buf();
-    let mut child = Command::new(worker_path)
+    let worker_program = absolute_command_path(worker_path);
+    let mut command = Command::new(&worker_program);
+    command
         .arg("--operation")
         .arg(operation.as_str())
         .arg("--native-library")
@@ -3168,10 +3361,14 @@ async fn run_assetstudio_native_worker(
         .arg(&response_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(native_library_dir) = native_library_working_dir(native_library_path) {
+        command.current_dir(native_library_dir);
+    }
+    let mut child = command
         .spawn()
         .map_err(|source| ExportPipelineError::Spawn {
-            program: worker_path.display().to_string(),
+            program: worker_program.display().to_string(),
             source,
         })?;
 
@@ -3289,6 +3486,14 @@ unsafe fn take_native_response_string(
         free(response_ptr);
         response
     }
+}
+
+fn native_library_working_dir(native_library_path: &str) -> Option<&Path> {
+    Path::new(native_library_path).parent()
+}
+
+fn absolute_command_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn preload_assetstudio_native_dependencies(native_library_path: &str) -> Vec<libloading::Library> {

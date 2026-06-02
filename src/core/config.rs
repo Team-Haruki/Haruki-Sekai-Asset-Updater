@@ -174,6 +174,10 @@ impl AppConfig {
             self.tools.asset_studio_native_unitypy_mode =
                 parse_bool_env("tools.asset_studio_native_unitypy_mode", &value)?;
         }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_CLI_PARITY_MODE") {
+            self.tools.asset_studio_native_cli_parity_mode =
+                parse_bool_env("tools.asset_studio_native_cli_parity_mode", &value)?;
+        }
         if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
             self.concurrency.media_encode =
                 parse_positive_usize("concurrency.media_encode", &value)?;
@@ -468,6 +472,7 @@ pub struct ToolsConfig {
     pub asset_studio_native_image_format: Option<String>,
     pub asset_studio_native_read_kinds: BTreeMap<String, String>,
     pub asset_studio_native_unitypy_mode: bool,
+    pub asset_studio_native_cli_parity_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -607,6 +612,7 @@ impl Default for ToolsConfig {
             asset_studio_native_image_format: None,
             asset_studio_native_read_kinds: BTreeMap::new(),
             asset_studio_native_unitypy_mode: true,
+            asset_studio_native_cli_parity_mode: false,
         }
     }
 }

@@ -8,8 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::export_pipeline::{
-    call_assetstudio_native_raw, call_assetstudio_native_read_object_raw,
-    call_assetstudio_native_read_objects_raw, AssetStudioNativeOperation,
+    call_assetstudio_native_raw, AssetStudioNativeOperation, LoadedAssetStudioNativeLibrary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +141,14 @@ struct ServerResponse {
 
 fn run_server(native_library: &str) -> ExitCode {
     write_process_trace("server_start", native_library);
+    let library = match LoadedAssetStudioNativeLibrary::load(native_library) {
+        Ok(library) => library,
+        Err(error) => {
+            write_process_trace("server_library_load_error", &error.to_string());
+            eprintln!("{error}");
+            return ExitCode::from(101);
+        }
+    };
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
 
@@ -172,7 +179,7 @@ fn run_server(native_library: &str) -> ExitCode {
             Some(&format!("id={}", request.id)),
         );
         let response = match call_native_with_stdout_suppressed(
-            native_library,
+            &library,
             operation,
             request.request_json.as_deref(),
         ) {
@@ -251,7 +258,7 @@ impl ServerResponse {
 }
 
 fn call_native_with_stdout_suppressed(
-    native_library: &str,
+    native_library: &LoadedAssetStudioNativeLibrary,
     operation: AssetStudioNativeOperation,
     request_json: Option<&str>,
 ) -> Result<
@@ -271,7 +278,7 @@ fn call_native_with_stdout_suppressed(
 }
 
 fn call_native_operation(
-    native_library: &str,
+    native_library: &LoadedAssetStudioNativeLibrary,
     operation: AssetStudioNativeOperation,
     request_json: Option<&str>,
 ) -> Result<
@@ -286,9 +293,13 @@ fn call_native_operation(
                 },
             )
         })?;
-        let (status, response_json, payload) =
-            call_assetstudio_native_read_object_raw(native_library, request_json)
-                .map_err(Box::new)?;
+        let (status, response_json, payload) = native_library
+            .call_payload(
+                request_json,
+                b"haruki_assetstudio_context_read_object",
+                "context_read_object",
+            )
+            .map_err(Box::new)?;
         Ok((status, response_json, payload))
     } else if operation == AssetStudioNativeOperation::ContextReadObjects {
         let request_json = request_json.ok_or_else(|| {
@@ -298,14 +309,18 @@ fn call_native_operation(
                 },
             )
         })?;
-        let (status, response_json, payload) =
-            call_assetstudio_native_read_objects_raw(native_library, request_json)
-                .map_err(Box::new)?;
+        let (status, response_json, payload) = native_library
+            .call_payload(
+                request_json,
+                b"haruki_assetstudio_context_read_objects",
+                "context_read_objects",
+            )
+            .map_err(Box::new)?;
         Ok((status, response_json, payload))
     } else {
-        let (status, response_json) =
-            call_assetstudio_native_raw(native_library, operation, request_json)
-                .map_err(Box::new)?;
+        let (status, response_json) = native_library
+            .call(operation, request_json)
+            .map_err(Box::new)?;
         Ok((status, response_json, Vec::new()))
     }
 }

@@ -73,6 +73,18 @@ impl BenchBackend {
     }
 }
 
+fn start_app_rules(args: &Args) -> Vec<String> {
+    if args.start_app_rule.is_empty() {
+        vec!["^character/".to_string()]
+    } else {
+        args.start_app_rule.clone()
+    }
+}
+
+fn on_demand_rules(args: &Args) -> Vec<String> {
+    args.on_demand_rule.clone()
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "asset_region_bench")]
 #[command(about = "Benchmark a real region update through the Rust execution pipeline")]
@@ -81,8 +93,10 @@ struct Args {
     config: PathBuf,
     #[arg(long, default_value = "cn")]
     region: String,
-    #[arg(long = "start-app-rule", default_value = "^character/")]
-    start_app_rule: String,
+    #[arg(long = "start-app-rule")]
+    start_app_rule: Vec<String>,
+    #[arg(long = "on-demand-rule")]
+    on_demand_rule: Vec<String>,
     #[arg(long = "cli-path")]
     cli_path: Option<String>,
     #[arg(long = "native-library")]
@@ -99,6 +113,8 @@ struct Args {
     native_read_batch_size: Option<usize>,
     #[arg(long = "native-image-format")]
     native_image_format: Option<String>,
+    #[arg(long = "native-cli-parity")]
+    native_cli_parity: bool,
     #[arg(long = "media-backend", value_enum)]
     media_backend: Option<BenchMediaBackend>,
     #[arg(long, value_enum, value_delimiter = ',', default_value = "native")]
@@ -220,8 +236,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "config": args.config.display().to_string(),
         "region": args.region,
         "rules": {
-            "start_app": [args.start_app_rule],
-            "on_demand": Vec::<String>::new(),
+            "start_app": start_app_rules(&args),
+            "on_demand": on_demand_rules(&args),
         },
         "backends": reports,
     });
@@ -388,6 +404,26 @@ fn benchmark_config(
     if let Some(native_image_format) = &args.native_image_format {
         config.tools.asset_studio_native_image_format = Some(native_image_format.clone());
     }
+    if args.native_cli_parity {
+        config.tools.asset_studio_native_cli_parity_mode = true;
+        config.tools.asset_studio_native_image_format = Some("png".to_string());
+        config
+            .tools
+            .asset_studio_native_read_kinds
+            .insert("Texture2D".to_string(), "image".to_string());
+        config
+            .tools
+            .asset_studio_native_read_kinds
+            .insert("Sprite".to_string(), "image".to_string());
+        config
+            .tools
+            .asset_studio_native_read_kinds
+            .insert("TextAsset".to_string(), "text_bytes".to_string());
+        config
+            .tools
+            .asset_studio_native_read_kinds
+            .insert("MonoBehaviour".to_string(), "typetree_json".to_string());
+    }
     if let Some(media_backend) = args.media_backend {
         config.tools.media_backend = media_backend.into();
     }
@@ -425,8 +461,8 @@ fn benchmark_config(
     let temp_record_file = temp_dir.path().join("downloaded_assets.json");
     region.paths.asset_save_dir = Some(temp_asset_save_dir.display().to_string());
     region.paths.downloaded_asset_record_file = Some(temp_record_file.display().to_string());
-    region.filters.start_app = vec![args.start_app_rule.clone()];
-    region.filters.on_demand.clear();
+    region.filters.start_app = start_app_rules(args);
+    region.filters.on_demand = on_demand_rules(args);
     region.upload.enabled = false;
     region.upload.remove_local_after_upload = false;
 
