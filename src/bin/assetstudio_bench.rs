@@ -276,8 +276,8 @@ fn benchmark_config(backend: BenchBackend, args: &Args) -> AppConfig {
             asset_studio_native_worker_path: args.native_worker_path.clone(),
             asset_studio_native_process_concurrency: args
                 .native_process_concurrency
-                .unwrap_or_else(|| ToolsConfig::default().asset_studio_native_process_concurrency)
-                .max(1),
+                .map(|value| value.max(1))
+                .unwrap_or_else(|| ToolsConfig::default().asset_studio_native_process_concurrency),
             asset_studio_native_worker_max_calls: ToolsConfig::default()
                 .asset_studio_native_worker_max_calls,
             asset_studio_native_read_batch_size: args
@@ -288,6 +288,7 @@ fn benchmark_config(backend: BenchBackend, args: &Args) -> AppConfig {
                 .asset_studio_native_image_format,
             asset_studio_native_read_kinds: ToolsConfig::default().asset_studio_native_read_kinds,
             asset_studio_native_unitypy_mode: args.native_unitypy_mode,
+            asset_studio_native_cli_parity_mode: false,
         },
         storage: StorageConfig {
             providers: Vec::new(),

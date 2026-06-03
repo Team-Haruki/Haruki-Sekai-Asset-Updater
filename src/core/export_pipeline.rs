@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_longlong, c_uchar};
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageFormat, ImageReader};
@@ -18,8 +19,8 @@ use tracing::{debug, info, warn};
 
 use crate::core::codec;
 use crate::core::config::{
-    AppConfig, AssetStudioBackend, AssetStudioNativeCallMode, MediaBackend, RegionConfig,
-    DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
+    AppConfig, AssetStudioBackend, AssetStudioNativeCallMode, ConcurrencyConfig, MediaBackend,
+    RegionConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
 };
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
@@ -446,6 +447,7 @@ pub async fn export_unity_asset_bundle_payloads(
     output_dir: &Path,
     category: &str,
 ) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
+    configure_cpu_budget_throttle(&app_config.concurrency, app_config.effective_cpu_budget());
     let exclude_path_prefix = if region.export.by_category {
         "assets/sekai/assetbundle/resources".to_string()
     } else if export_path.starts_with("mysekai") {
@@ -660,8 +662,9 @@ async fn run_assetstudio_native_unitypy_unpack(
     let pool = native_worker_pool(
         &worker_path,
         native_library_path,
-        app_config.tools.asset_studio_native_process_concurrency,
+        app_config.effective_asset_studio_native_process_concurrency(),
         app_config.tools.asset_studio_native_worker_max_calls,
+        app_config.effective_cpu_budget(),
     );
     let inspect_request = AssetStudioNativeInspectRequest {
         input_path: asset_bundle_file.to_string_lossy().to_string(),
@@ -696,7 +699,7 @@ async fn run_assetstudio_native_unitypy_unpack(
         Ok(summary) => Ok(summary),
         Err(error) if is_native_worker_signal_failure(&error) => {
             warn!(
-                process_concurrency = app_config.tools.asset_studio_native_process_concurrency,
+                process_concurrency = app_config.effective_asset_studio_native_process_concurrency(),
                 error = %error,
                 "assetstudio native unitypy worker crashed; retrying bundle once with an exclusive fresh worker"
             );
@@ -2169,6 +2172,8 @@ fn write_unitypy_object_payload(
             asset,
             read_output.response.suggested_extension.as_deref(),
         )
+    } else if should_route_character_sprite_object(asset) {
+        character_sprite_object_output_path(&target, asset)
     } else {
         target
     };
@@ -2424,6 +2429,50 @@ fn unitypy_object_output_path(
         path.set_extension(extension.trim_start_matches('.'));
     }
     path
+}
+
+fn should_route_character_sprite_object(asset: &AssetStudioNativeAssetInfo) -> bool {
+    if !asset
+        .asset_type
+        .as_deref()
+        .is_some_and(|asset_type| assetstudio_type_selector_matches("sprite", asset_type))
+    {
+        return false;
+    }
+
+    let Some(container) = asset.container.as_deref() else {
+        return false;
+    };
+    let relative =
+        strip_container_prefix(container, "assets/sekai/assetbundle/resources/startapp/");
+    relative.starts_with("character/")
+}
+
+fn character_sprite_object_output_path(
+    default_path: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+) -> PathBuf {
+    let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = default_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("asset");
+    let sprite_dir = parent.join(format!("{stem}_sprites"));
+    let file_stem = asset
+        .name
+        .as_deref()
+        .map(assetstudio_fix_file_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("sprite_{}", asset.path_id));
+    let extension = default_path.extension().and_then(|value| value.to_str());
+    let path = match extension {
+        Some(extension) if !extension.is_empty() => {
+            sprite_dir.join(format!("{file_stem}.{extension}"))
+        }
+        _ => sprite_dir.join(file_stem),
+    };
+    non_overwriting_assetstudio_output_path(path, asset)
 }
 
 fn unitypy_object_output_extension(
@@ -2735,6 +2784,7 @@ async fn run_assetstudio_native_worker_limited(
     process_concurrency: usize,
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let _permit = acquire_native_process_permit(process_concurrency).await?;
+    let _cpu_permit = acquire_cpu_budget_permit(process_concurrency).await?;
     run_assetstudio_native_worker(worker_path, native_library_path, operation, request_json).await
 }
 
@@ -2748,6 +2798,7 @@ async fn run_assetstudio_native_worker_isolated(
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let _recovery_guard = native_process_recovery_lock().await;
     let _permits = acquire_all_native_process_permits(process_concurrency).await?;
+    let _cpu_permit = acquire_cpu_budget_permit(process_concurrency).await?;
     run_assetstudio_native_worker(worker_path, native_library_path, operation, request_json).await
 }
 
@@ -2764,6 +2815,7 @@ async fn run_assetstudio_native_worker_pool(
         native_library_path,
         process_concurrency,
         NATIVE_AOT_WORKER_MAX_CALLS_DEFAULT,
+        process_concurrency,
     );
     pool.call(operation, request_json).await
 }
@@ -2778,6 +2830,257 @@ fn is_native_worker_signal_failure(error: &ExportPipelineError) -> bool {
         } if program.contains("assetstudio_native_worker")
             && (status.contains("signal:") || status.contains("SIGSEGV"))
     )
+}
+
+#[allow(dead_code)]
+struct CpuBudgetAcquire {
+    permit: CpuBudgetPermit,
+    wait_ms: u64,
+}
+
+#[allow(dead_code)]
+async fn acquire_cpu_budget_permit(
+    cpu_budget: usize,
+) -> Result<CpuBudgetAcquire, ExportPipelineError> {
+    tokio::task::spawn_blocking(move || acquire_cpu_budget_permit_blocking(cpu_budget))
+        .await
+        .map_err(|source| ExportPipelineError::WorkerPanic {
+            worker: "CPU budget limiter".to_string(),
+            message: source.to_string(),
+        })?
+}
+
+fn acquire_cpu_budget_permit_blocking(
+    cpu_budget: usize,
+) -> Result<CpuBudgetAcquire, ExportPipelineError> {
+    let limiter = cpu_budget_limiter(cpu_budget);
+    let wait_started = Instant::now();
+    if !cpu_budget_hard_cap_enabled() {
+        wait_for_process_cpu_throttle()?;
+        return Ok(CpuBudgetAcquire {
+            permit: CpuBudgetPermit {
+                limiter,
+                active: false,
+            },
+            wait_ms: wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        });
+    }
+    let mut active = limiter.state.lock().unwrap();
+    while *active >= limiter.max {
+        active = limiter.available.wait(active).unwrap();
+    }
+    drop(active);
+    wait_for_process_cpu_throttle()?;
+    active = limiter.state.lock().unwrap();
+    while *active >= limiter.max {
+        active = limiter.available.wait(active).unwrap();
+    }
+    *active += 1;
+    drop(active);
+    Ok(CpuBudgetAcquire {
+        permit: CpuBudgetPermit {
+            limiter,
+            active: true,
+        },
+        wait_ms: wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+    })
+}
+
+struct CpuBudgetLimiter {
+    max: usize,
+    state: Mutex<usize>,
+    available: Condvar,
+}
+
+struct CpuBudgetPermit {
+    limiter: Arc<CpuBudgetLimiter>,
+    active: bool,
+}
+
+impl Drop for CpuBudgetPermit {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut active = self.limiter.state.lock().unwrap();
+        *active = active.saturating_sub(1);
+        self.limiter.available.notify_one();
+    }
+}
+
+fn cpu_budget_limiter(cpu_budget: usize) -> Arc<CpuBudgetLimiter> {
+    let cpu_budget = cpu_budget.max(1);
+    static LIMITERS: OnceLock<Mutex<HashMap<usize, Arc<CpuBudgetLimiter>>>> = OnceLock::new();
+    let mut limiters = LIMITERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    limiters
+        .entry(cpu_budget)
+        .or_insert_with(|| {
+            Arc::new(CpuBudgetLimiter {
+                max: cpu_budget,
+                state: Mutex::new(0),
+                available: Condvar::new(),
+            })
+        })
+        .clone()
+}
+
+#[derive(Debug, Clone)]
+struct CpuThrottleSettings {
+    enabled: bool,
+    target_percent: f64,
+    sample_ms: u64,
+}
+
+impl Default for CpuThrottleSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_percent: f64::INFINITY,
+            sample_ms: 250,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CpuThrottleState {
+    settings: CpuThrottleSettings,
+    last_sample: Option<Instant>,
+    last_process_cpu_percent: f64,
+}
+
+impl Default for CpuThrottleState {
+    fn default() -> Self {
+        Self {
+            settings: CpuThrottleSettings::default(),
+            last_sample: None,
+            last_process_cpu_percent: 0.0,
+        }
+    }
+}
+
+fn configure_cpu_budget_throttle(concurrency: &ConcurrencyConfig, cpu_budget: usize) {
+    let state = cpu_throttle_state();
+    let mut state = state.lock().unwrap();
+    state.settings = CpuThrottleSettings {
+        enabled: concurrency.cpu_throttle_enabled,
+        target_percent: (cpu_budget.max(1) * 100) as f64,
+        sample_ms: concurrency.cpu_throttle_sample_ms.max(1),
+    };
+}
+
+fn cpu_throttle_state() -> &'static Mutex<CpuThrottleState> {
+    static STATE: OnceLock<Mutex<CpuThrottleState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(CpuThrottleState::default()))
+}
+
+fn cpu_budget_hard_cap_enabled() -> bool {
+    let state = cpu_throttle_state().lock().unwrap();
+    !state.settings.enabled
+}
+
+fn wait_for_process_cpu_throttle() -> Result<(), ExportPipelineError> {
+    loop {
+        let settings = {
+            let state = cpu_throttle_state().lock().unwrap();
+            state.settings.clone()
+        };
+        if !settings.enabled {
+            return Ok(());
+        }
+
+        let process_cpu_percent = sample_process_tree_cpu_percent(&settings)?;
+        if process_cpu_percent < settings.target_percent.max(1.0) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(settings.sample_ms.max(1)));
+    }
+}
+
+fn sample_process_tree_cpu_percent(
+    settings: &CpuThrottleSettings,
+) -> Result<f64, ExportPipelineError> {
+    let state = cpu_throttle_state();
+    let mut state = state.lock().unwrap();
+    let now = Instant::now();
+    let sample_interval = Duration::from_millis(settings.sample_ms.max(1));
+    if state
+        .last_sample
+        .is_some_and(|last_sample| now.duration_since(last_sample) < sample_interval)
+    {
+        return Ok(state.last_process_cpu_percent);
+    }
+    let sampled = current_process_tree_cpu_percent()?;
+    state.last_sample = Some(now);
+    state.last_process_cpu_percent = sampled;
+    Ok(sampled)
+}
+
+fn current_process_tree_cpu_percent() -> Result<f64, ExportPipelineError> {
+    #[cfg(unix)]
+    {
+        let output = StdCommand::new("ps")
+            .args(["-axo", "pid=,ppid=,pcpu="])
+            .output()
+            .map_err(|source| ExportPipelineError::Spawn {
+                program: "ps".to_string(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(ExportPipelineError::CommandFailed {
+                program: "ps".to_string(),
+                status: output.status.to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(sum_process_tree_cpu_percent(
+            std::process::id(),
+            &String::from_utf8_lossy(&output.stdout),
+        ))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(0.0)
+    }
+}
+
+#[cfg(unix)]
+fn sum_process_tree_cpu_percent(root_pid: u32, ps_output: &str) -> f64 {
+    let mut rows = Vec::new();
+    for line in ps_output.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(ppid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(cpu_percent) = fields.next().and_then(|value| value.parse::<f64>().ok()) else {
+            continue;
+        };
+        rows.push((pid, ppid, cpu_percent));
+    }
+
+    let mut stack = vec![root_pid];
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0.0;
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        for (row_pid, row_ppid, cpu_percent) in &rows {
+            if *row_pid == pid {
+                total += cpu_percent;
+            }
+            if *row_ppid == pid {
+                stack.push(*row_pid);
+            }
+        }
+    }
+    total
 }
 
 #[allow(dead_code)]
@@ -2848,6 +3151,7 @@ struct NativeWorkerPool {
     worker_path: PathBuf,
     native_library_path: String,
     process_concurrency: usize,
+    cpu_budget: usize,
     max_calls_per_worker: usize,
     semaphore: Arc<Semaphore>,
     available: TokioMutex<Vec<NativePooledWorker>>,
@@ -2925,6 +3229,7 @@ impl NativeWorkerPool {
             .map_err(|source| ExportPipelineError::AssetStudioNative {
                 message: format!("native worker pool limiter closed: {source}"),
             })?;
+        let _cpu_permit = acquire_cpu_budget_permit(self.cpu_budget).await?;
         let mut worker = match self.available.lock().await.pop() {
             Some(worker) => worker,
             None => self.spawn_worker().await?,
@@ -2965,12 +3270,19 @@ impl NativeWorkerPool {
                 message: format!("native worker pool limiter closed: {source}"),
             })?;
         let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let cpu_budget_slot = acquire_cpu_budget_permit(self.cpu_budget).await?;
         let call = NativeUnityPyPoolCallOptions {
             inspect_request,
             unpack,
         };
-        self.unitypy_unpack_with_permit(_permit, wait_ms, call)
-            .await
+        self.unitypy_unpack_with_permit(
+            _permit,
+            cpu_budget_slot.permit,
+            wait_ms,
+            cpu_budget_slot.wait_ms,
+            call,
+        )
+        .await
     }
 
     async fn unitypy_unpack_exclusive(
@@ -2988,18 +3300,27 @@ impl NativeWorkerPool {
                 message: format!("native worker pool exclusive limiter closed: {source}"),
             })?;
         let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let cpu_budget_slot = acquire_cpu_budget_permit(self.cpu_budget).await?;
         let call = NativeUnityPyPoolCallOptions {
             inspect_request,
             unpack,
         };
-        self.unitypy_unpack_with_permit(permits, wait_ms, call)
-            .await
+        self.unitypy_unpack_with_permit(
+            permits,
+            cpu_budget_slot.permit,
+            wait_ms,
+            cpu_budget_slot.wait_ms,
+            call,
+        )
+        .await
     }
 
     async fn unitypy_unpack_with_permit(
         &self,
         _permit: OwnedSemaphorePermit,
+        _cpu_permit: CpuBudgetPermit,
         wait_ms: u64,
+        cpu_budget_wait_ms: u64,
         call: NativeUnityPyPoolCallOptions<'_>,
     ) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
         let mut worker = match self.available.lock().await.pop() {
@@ -3020,6 +3341,13 @@ impl NativeWorkerPool {
                 summary
                     .phase_ms
                     .insert("worker_pool.wait".to_string(), wait_ms);
+                summary.phase_ms.insert(
+                    "worker_pool.cpu_budget_wait".to_string(),
+                    cpu_budget_wait_ms,
+                );
+                summary
+                    .phase_ms
+                    .insert("cpu_budget.wait".to_string(), cpu_budget_wait_ms);
                 summary
                     .phase_ms
                     .insert("worker_pool.worker_id".to_string(), worker.worker_id);
@@ -3264,11 +3592,14 @@ fn native_worker_pool(
     native_library_path: &str,
     process_concurrency: usize,
     max_calls_per_worker: usize,
+    cpu_budget: usize,
 ) -> Arc<NativeWorkerPool> {
     let process_concurrency = process_concurrency.max(1);
+    let cpu_budget = cpu_budget.max(1);
     let key = format!(
-        "{}\0{}\0{}\0{}",
+        "{}\0{}\0{}\0{}\0{}",
         process_concurrency,
+        cpu_budget,
         max_calls_per_worker,
         worker_path.display(),
         native_library_path
@@ -3285,6 +3616,7 @@ fn native_worker_pool(
                 worker_path: worker_path.to_path_buf(),
                 native_library_path: native_library_path.to_string(),
                 process_concurrency,
+                cpu_budget,
                 max_calls_per_worker,
                 semaphore: Arc::new(Semaphore::new(process_concurrency)),
                 available: TokioMutex::new(Vec::with_capacity(process_concurrency)),
@@ -3570,6 +3902,7 @@ pub async fn post_process_exported_files(
     export_path: &Path,
     upload_root: &Path,
 ) -> Result<PostProcessSummary, ExportPipelineError> {
+    configure_cpu_budget_throttle(&app_config.concurrency, app_config.effective_cpu_budget());
     if !export_path.exists() {
         return Ok(PostProcessSummary {
             export_root: export_path.to_path_buf(),
@@ -3582,6 +3915,7 @@ pub async fn post_process_exported_files(
         ..PostProcessSummary::default()
     };
     let concurrency = app_config.effective_concurrency();
+    let cpu_budget = app_config.effective_cpu_budget();
     summary.post_process_phase_ms.insert(
         "media_scheduler.auto_tune".to_string(),
         u64::from(concurrency.auto_tune),
@@ -3610,6 +3944,17 @@ pub async fn post_process_exported_files(
         "media_scheduler.image_concurrency".to_string(),
         concurrency.images as u64,
     );
+    summary
+        .post_process_phase_ms
+        .insert("media_scheduler.cpu_budget".to_string(), cpu_budget as u64);
+    summary.post_process_phase_ms.insert(
+        "media_scheduler.cpu_throttle_enabled".to_string(),
+        u64::from(concurrency.cpu_throttle_enabled),
+    );
+    summary.post_process_phase_ms.insert(
+        "media_scheduler.cpu_throttle_target_percent".to_string(),
+        (cpu_budget * 100) as u64,
+    );
 
     let phase_started = Instant::now();
     summary
@@ -3617,6 +3962,7 @@ pub async fn post_process_exported_files(
         .extend(convert_native_surrogate_images_to_png(
             export_path,
             concurrency.images,
+            cpu_budget,
         )?);
     record_phase_ms(
         &mut summary.post_process_phase_ms,
@@ -3651,6 +3997,7 @@ pub async fn post_process_exported_files(
         retry: &app_config.execution.retry,
         hca_concurrency: concurrency.hca,
         media_encode_concurrency: concurrency.media_encode,
+        cpu_budget,
     };
     let acb_output = handle_acb_files(&acb_options, concurrency.acb);
     let acb_output = acb_output.await?;
@@ -3665,7 +4012,7 @@ pub async fn post_process_exported_files(
     let phase_started = Instant::now();
     summary
         .generated_files
-        .extend(handle_png_conversion(export_path, region, concurrency.images).await?);
+        .extend(handle_png_conversion(export_path, region, concurrency.images, cpu_budget).await?);
     record_phase_ms(
         &mut summary.post_process_phase_ms,
         "post_process.png_conversion",
@@ -3741,11 +4088,16 @@ impl Drop for MediaEncodePermit {
 
 struct MediaEncodeAcquire {
     permit: MediaEncodePermit,
+    cpu_permit: CpuBudgetPermit,
     wait_ms: u64,
+    cpu_budget_wait_ms: u64,
     active: usize,
 }
 
-fn acquire_media_encode_permit(concurrency: usize) -> MediaEncodeAcquire {
+fn acquire_media_encode_permit(
+    concurrency: usize,
+    cpu_budget: usize,
+) -> Result<MediaEncodeAcquire, ExportPipelineError> {
     let limiter = media_encode_limiter(concurrency);
     let wait_started = Instant::now();
     let mut active = limiter.state.lock().unwrap();
@@ -3755,11 +4107,14 @@ fn acquire_media_encode_permit(concurrency: usize) -> MediaEncodeAcquire {
     *active += 1;
     let active_count = *active;
     drop(active);
-    MediaEncodeAcquire {
+    let cpu_slot = acquire_cpu_budget_permit_blocking(cpu_budget)?;
+    Ok(MediaEncodeAcquire {
         permit: MediaEncodePermit { limiter },
+        cpu_permit: cpu_slot.permit,
         wait_ms: wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        cpu_budget_wait_ms: cpu_slot.wait_ms,
         active: active_count,
-    }
+    })
 }
 
 fn media_encode_limiter(concurrency: usize) -> Arc<MediaEncodeLimiter> {
@@ -3923,6 +4278,7 @@ async fn handle_acb_files(
     let media_backend = options.media_backend;
     let hca_concurrency = options.hca_concurrency;
     let media_encode_concurrency = options.media_encode_concurrency;
+    let cpu_budget = options.cpu_budget;
     let extracted = run_tasks(acb_files, acb_concurrency, move |acb_file| {
         let options = AcbPostProcessOptions {
             output_dir: &output_dir,
@@ -3932,6 +4288,7 @@ async fn handle_acb_files(
             retry: &retry,
             hca_concurrency,
             media_encode_concurrency,
+            cpu_budget,
         };
         extract_acb_tracks_from_file(&acb_file, &options)
     })?;
@@ -3992,6 +4349,7 @@ struct AcbPostProcessOptions<'a> {
     retry: &'a crate::core::config::RetryConfig,
     hca_concurrency: usize,
     media_encode_concurrency: usize,
+    cpu_budget: usize,
 }
 
 #[derive(Debug, Default)]
@@ -4070,15 +4428,16 @@ fn process_hca_tracks(
             .phase_ms
             .insert("media_scheduler.hca_worker_count".to_string(), 1);
         let track = hca_tracks.pop().expect("single track is present");
-        let track_output = process_hca_track(
-            track,
-            options.output_dir,
-            options.region,
-            options.ffmpeg_path,
-            options.media_backend,
-            options.retry,
-            options.media_encode_concurrency,
-        )?;
+        let track_options = HcaTrackProcessOptions {
+            output_dir: options.output_dir,
+            region: options.region,
+            ffmpeg_path: options.ffmpeg_path,
+            media_backend: options.media_backend,
+            retry: options.retry,
+            media_encode_concurrency: options.media_encode_concurrency,
+            cpu_budget: options.cpu_budget,
+        };
+        let track_output = process_hca_track(track, &track_options)?;
         output.generated_files.extend(track_output.generated_files);
         merge_raw_phase_ms(&mut output.phase_ms, &track_output.phase_ms);
         return Ok(output);
@@ -4107,6 +4466,7 @@ fn process_hca_tracks(
         let media_backend = options.media_backend;
         let retry = options.retry.clone();
         let media_encode_concurrency = options.media_encode_concurrency;
+        let cpu_budget = options.cpu_budget;
         let handle = std::thread::Builder::new()
             .name("hca-memory-export".to_string())
             .stack_size(32 * 1024 * 1024)
@@ -4120,15 +4480,16 @@ fn process_hca_tracks(
                     break;
                 };
 
-                match process_hca_track(
-                    track,
-                    &worker_output_dir,
-                    &region,
-                    &ffmpeg_path,
+                let track_options = HcaTrackProcessOptions {
+                    output_dir: &worker_output_dir,
+                    region: &region,
+                    ffmpeg_path: &ffmpeg_path,
                     media_backend,
-                    &retry,
+                    retry: &retry,
                     media_encode_concurrency,
-                ) {
+                    cpu_budget,
+                };
+                match process_hca_track(track, &track_options) {
                     Ok(track_output) => {
                         results.lock().unwrap().extend(track_output.generated_files);
                         merge_raw_phase_ms(&mut phase_ms.lock().unwrap(), &track_output.phase_ms);
@@ -4169,20 +4530,25 @@ struct HcaTrackProcessOutput {
     phase_ms: HashMap<String, u64>,
 }
 
+struct HcaTrackProcessOptions<'a> {
+    output_dir: &'a Path,
+    region: &'a RegionConfig,
+    ffmpeg_path: &'a str,
+    media_backend: MediaBackend,
+    retry: &'a crate::core::config::RetryConfig,
+    media_encode_concurrency: usize,
+    cpu_budget: usize,
+}
+
 fn process_hca_track(
     track: cridecoder::ExtractedAcbTrack,
-    output_dir: &Path,
-    region: &RegionConfig,
-    ffmpeg_path: &str,
-    media_backend: MediaBackend,
-    retry: &crate::core::config::RetryConfig,
-    media_encode_concurrency: usize,
+    options: &HcaTrackProcessOptions<'_>,
 ) -> Result<HcaTrackProcessOutput, ExportPipelineError> {
     let mut output = HcaTrackProcessOutput::default();
     let hca_name = format!("{}.{}", track.name, track.extension);
     if !track.extension.eq_ignore_ascii_case("hca") {
         let phase_started = Instant::now();
-        let output_path = output_dir.join(hca_name);
+        let output_path = options.output_dir.join(hca_name);
         std::fs::write(&output_path, track.data).map_err(|source| ExportPipelineError::Io {
             path: output_path.clone(),
             source,
@@ -4196,11 +4562,20 @@ fn process_hca_track(
         return Ok(output);
     }
 
-    let wav_file = output_dir.join(format!("{}.wav", track.name));
-    let needs_wav_bytes = region.export.audio.convert_to_mp3 || region.export.audio.convert_to_flac;
-    if !needs_wav_bytes && !region.export.audio.remove_wav {
+    let wav_file = options.output_dir.join(format!("{}.wav", track.name));
+    let needs_wav_bytes =
+        options.region.export.audio.convert_to_mp3 || options.region.export.audio.convert_to_flac;
+    if !needs_wav_bytes && !options.region.export.audio.remove_wav {
+        let cpu_slot = acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
+        add_phase_ms(
+            &mut output.phase_ms,
+            "post_process.hca.cpu_budget_wait",
+            cpu_slot.wait_ms,
+        );
+        add_phase_ms(&mut output.phase_ms, "cpu_budget.wait", cpu_slot.wait_ms);
         let phase_started = Instant::now();
         codec::decode_hca_bytes_to_wav(&track.data, &wav_file)?;
+        drop(cpu_slot.permit);
         add_elapsed_phase_ms(
             &mut output.phase_ms,
             "post_process.hca.decode_write_wav",
@@ -4213,11 +4588,19 @@ fn process_hca_track(
         return Ok(output);
     }
 
-    let wav_bytes = if region.export.audio.remove_wav {
+    let wav_bytes = if options.region.export.audio.remove_wav {
         None
     } else {
+        let cpu_slot = acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
+        add_phase_ms(
+            &mut output.phase_ms,
+            "post_process.hca.cpu_budget_wait",
+            cpu_slot.wait_ms,
+        );
+        add_phase_ms(&mut output.phase_ms, "cpu_budget.wait", cpu_slot.wait_ms);
         let phase_started = Instant::now();
         let wav_bytes = codec::decode_hca_bytes_to_wav_bytes(&track.data)?;
+        drop(cpu_slot.permit);
         add_elapsed_phase_ms(
             &mut output.phase_ms,
             "post_process.hca.decode_wav",
@@ -4238,9 +4621,10 @@ fn process_hca_track(
         Some(wav_bytes)
     };
 
-    if region.export.audio.convert_to_mp3 {
-        let mp3 = output_dir.join(format!("{}.mp3", track.name));
-        let encode_slot = acquire_media_encode_permit(media_encode_concurrency);
+    if options.region.export.audio.convert_to_mp3 {
+        let mp3 = options.output_dir.join(format!("{}.mp3", track.name));
+        let encode_slot =
+            acquire_media_encode_permit(options.media_encode_concurrency, options.cpu_budget)?;
         add_phase_ms(
             &mut output.phase_ms,
             "post_process.hca.media_pool_wait",
@@ -4256,24 +4640,35 @@ fn process_hca_track(
             "media_scheduler.media_encode_active_peak",
             encode_slot.active as u64,
         );
+        add_phase_ms(
+            &mut output.phase_ms,
+            "media_scheduler.cpu_budget_wait",
+            encode_slot.cpu_budget_wait_ms,
+        );
+        add_phase_ms(
+            &mut output.phase_ms,
+            "cpu_budget.wait",
+            encode_slot.cpu_budget_wait_ms,
+        );
         let phase_started = Instant::now();
         if let Some(wav_bytes) = wav_bytes.as_deref() {
             convert_wav_bytes_to_mp3_with_backend(
                 wav_bytes,
                 &mp3,
-                ffmpeg_path,
-                media_backend,
-                retry,
+                options.ffmpeg_path,
+                options.media_backend,
+                options.retry,
             )?;
         } else {
             convert_hca_bytes_to_mp3_with_backend(
                 &track.data,
                 &mp3,
-                ffmpeg_path,
-                media_backend,
-                retry,
+                options.ffmpeg_path,
+                options.media_backend,
+                options.retry,
             )?;
         }
+        drop(encode_slot.cpu_permit);
         drop(encode_slot.permit);
         add_elapsed_phase_ms(
             &mut output.phase_ms,
@@ -4281,9 +4676,10 @@ fn process_hca_track(
             phase_started,
         );
         output.generated_files.push(mp3);
-    } else if region.export.audio.convert_to_flac {
-        let flac = output_dir.join(format!("{}.flac", track.name));
-        let encode_slot = acquire_media_encode_permit(media_encode_concurrency);
+    } else if options.region.export.audio.convert_to_flac {
+        let flac = options.output_dir.join(format!("{}.flac", track.name));
+        let encode_slot =
+            acquire_media_encode_permit(options.media_encode_concurrency, options.cpu_budget)?;
         add_phase_ms(
             &mut output.phase_ms,
             "post_process.hca.media_pool_wait",
@@ -4299,24 +4695,35 @@ fn process_hca_track(
             "media_scheduler.media_encode_active_peak",
             encode_slot.active as u64,
         );
+        add_phase_ms(
+            &mut output.phase_ms,
+            "media_scheduler.cpu_budget_wait",
+            encode_slot.cpu_budget_wait_ms,
+        );
+        add_phase_ms(
+            &mut output.phase_ms,
+            "cpu_budget.wait",
+            encode_slot.cpu_budget_wait_ms,
+        );
         let phase_started = Instant::now();
         if let Some(wav_bytes) = wav_bytes.as_deref() {
             convert_wav_bytes_to_flac_with_backend(
                 wav_bytes,
                 &flac,
-                ffmpeg_path,
-                media_backend,
-                retry,
+                options.ffmpeg_path,
+                options.media_backend,
+                options.retry,
             )?;
         } else {
             convert_hca_bytes_to_flac_with_backend(
                 &track.data,
                 &flac,
-                ffmpeg_path,
-                media_backend,
-                retry,
+                options.ffmpeg_path,
+                options.media_backend,
+                options.retry,
             )?;
         }
+        drop(encode_slot.cpu_permit);
         drop(encode_slot.permit);
         add_elapsed_phase_ms(
             &mut output.phase_ms,
@@ -4333,6 +4740,7 @@ async fn handle_png_conversion(
     export_path: &Path,
     region: &RegionConfig,
     image_concurrency: usize,
+    cpu_budget: usize,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     if !region.export.images.convert_to_webp {
         return Ok(Vec::new());
@@ -4341,6 +4749,7 @@ async fn handle_png_conversion(
     let png_files = find_files_by_extension(export_path, "png")?;
     let remove_png = region.export.images.remove_png;
     run_path_tasks(png_files, image_concurrency, move |png_file| {
+        let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
         let webp = png_file.with_extension("webp");
         convert_png_to_webp(&png_file, &webp)?;
         if remove_png {
@@ -4353,6 +4762,7 @@ async fn handle_png_conversion(
 fn convert_native_surrogate_images_to_png(
     export_path: &Path,
     image_concurrency: usize,
+    cpu_budget: usize,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     if !export_path.exists() {
         return Ok(Vec::new());
@@ -4360,6 +4770,7 @@ fn convert_native_surrogate_images_to_png(
 
     let surrogate_files = find_files_by_extension(export_path, NATIVE_AOT_IMAGE_SURROGATE_FORMAT)?;
     run_path_tasks(surrogate_files, image_concurrency, move |surrogate_file| {
+        let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
         let png_file = surrogate_file.with_extension("png");
         convert_image_to_png(&surrogate_file, &png_file)?;
         remove_file_if_exists(&surrogate_file)?;
@@ -4746,11 +5157,15 @@ fn remove_file_if_exists(path: &Path) -> Result<(), ExportPipelineError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::sum_process_tree_cpu_percent;
+
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{mpsc, Arc, Mutex, OnceLock};
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
@@ -4762,20 +5177,21 @@ mod tests {
     use crate::core::errors::ExportPipelineError;
 
     use super::{
-        assetstudio_cli_export_type_name, assetstudio_object_mode_supported_type,
-        assetstudio_type_selector_matches, build_assetstudio_export_args,
-        close_assetstudio_native_context, convert_native_surrogate_images_to_png,
-        extract_unity_asset_bundle, get_export_group, handle_png_conversion,
-        inspect_assetstudio_native_bundle, merge_usm_files, native_read_batch_size_for_assets,
-        native_read_kind_for_asset, native_skipped_unsupported_asset,
-        open_assetstudio_native_context,
+        acquire_cpu_budget_permit_blocking, assetstudio_cli_export_type_name,
+        assetstudio_object_mode_supported_type, assetstudio_type_selector_matches,
+        build_assetstudio_export_args, close_assetstudio_native_context,
+        convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
+        handle_png_conversion, inspect_assetstudio_native_bundle, merge_usm_files,
+        native_read_batch_size_for_assets, native_read_kind_for_asset,
+        native_skipped_unsupported_asset, open_assetstudio_native_context,
         parse_assetstudio_native_context_list_objects_worker_output,
         parse_assetstudio_native_object_read_batch_worker_output_recoverable,
         parse_assetstudio_native_object_read_worker_output_recoverable, parse_payload_bundle,
         parse_payload_bundle_borrowed, post_process_exported_files, process_usm_file,
         query_assetstudio_native_version, record_native_object_read_batch_diagnostics,
-        run_path_tasks, safe_payload_bundle_path, scan_all_files, unitypy_object_output_extension,
-        AssetStudioCliCapabilities, AssetStudioNativeAssetInfo,
+        run_path_tasks, safe_payload_bundle_path, scan_all_files,
+        should_route_character_sprite_object, unitypy_object_output_extension,
+        unitypy_object_output_path, AssetStudioCliCapabilities, AssetStudioNativeAssetInfo,
         AssetStudioNativeContextCloseRequest, AssetStudioNativeInspectRequest,
         NativeBatchPhaseStats, NativeObjectReadBatchParseOutput, NativeObjectReadParseResult,
         NativeObjectReadPlanStats, NativeUnityPyUnpackSummary, NativeWorkerOutput,
@@ -5407,7 +5823,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let generated = runtime
-            .block_on(handle_png_conversion(dir.path(), &region, 2))
+            .block_on(handle_png_conversion(dir.path(), &region, 2, 2))
             .unwrap();
 
         let webp = dir.path().join("sample.webp");
@@ -5429,7 +5845,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             .save_with_format(&bmp, image::ImageFormat::Bmp)
             .unwrap();
 
-        let generated = convert_native_surrogate_images_to_png(dir.path(), 2).unwrap();
+        let generated = convert_native_surrogate_images_to_png(dir.path(), 2, 2).unwrap();
 
         let png = dir.path().join("sample.png");
         assert_eq!(generated, vec![png.clone()]);
@@ -5471,6 +5887,37 @@ printf fallback > "$OUT/fallback/path/done.txt"
         .unwrap_err();
 
         assert!(matches!(err, ExportPipelineError::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn cpu_budget_permit_limits_blocking_work() {
+        let budget = 97;
+        let permits = (0..budget)
+            .map(|_| acquire_cpu_budget_permit_blocking(budget).unwrap().permit)
+            .collect::<Vec<_>>();
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _permit = acquire_cpu_budget_permit_blocking(budget).unwrap().permit;
+            tx.send(()).unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(permits);
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sums_process_tree_cpu_percent() {
+        let output = "\
+            100     1   1.0\n\
+            101   100  20.5\n\
+            102   101  30.0\n\
+            103     1  99.0\n\
+        ";
+
+        assert_eq!(sum_process_tree_cpu_percent(100, output), 51.5);
     }
 
     #[test]
@@ -5597,6 +6044,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("AnimatorController".to_string()),
             type_id: 91,
             path_id: 7,
+            unique_id: None,
             size: 42,
             source_file: None,
         };
@@ -5619,6 +6067,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("Sprite".to_string()),
             type_id: 213,
             path_id: 7,
+            unique_id: None,
             size: 42,
             source_file: None,
         };
@@ -5651,6 +6100,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("MonoBehaviour".to_string()),
             type_id: 114,
             path_id: 7,
+            unique_id: None,
             size: 42,
             source_file: None,
         };
@@ -5670,6 +6120,104 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
+    fn character_sprite_objects_route_under_container_sprite_directory() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("deck".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/character/member_cutout/res001_no001/normal.png"
+                    .to_string(),
+            ),
+            asset_type: Some("Sprite".to_string()),
+            type_id: 213,
+            path_id: 42,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "character/member_cutout/res001_no001",
+            "assets/sekai/assetbundle/resources/startapp/",
+            true,
+            &asset,
+            Some("image_png"),
+            Some(".png"),
+        );
+
+        assert!(should_route_character_sprite_object(&asset));
+        assert_eq!(
+            super::character_sprite_object_output_path(&target, &asset),
+            PathBuf::from("/tmp/out/character/member_cutout/res001_no001/normal_sprites/deck.png")
+        );
+    }
+
+    #[test]
+    fn character_texture_objects_keep_container_path() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("normal".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/character/member_cutout/res001_no001/normal.png"
+                    .to_string(),
+            ),
+            asset_type: Some("Texture2D".to_string()),
+            type_id: 28,
+            path_id: 43,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "character/member_cutout/res001_no001",
+            "assets/sekai/assetbundle/resources/startapp/",
+            true,
+            &asset,
+            Some("image_png"),
+            Some(".png"),
+        );
+
+        assert!(!should_route_character_sprite_object(&asset));
+        assert_eq!(
+            target,
+            PathBuf::from("/tmp/out/character/member_cutout/res001_no001/normal.png")
+        );
+    }
+
+    #[test]
+    fn non_character_sprite_objects_keep_container_path() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("deck".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/event/foo/normal.png".to_string(),
+            ),
+            asset_type: Some("Sprite".to_string()),
+            type_id: 213,
+            path_id: 44,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "event/foo",
+            "assets/sekai/assetbundle/resources/startapp/",
+            true,
+            &asset,
+            Some("image_png"),
+            Some(".png"),
+        );
+
+        assert!(!should_route_character_sprite_object(&asset));
+        assert_eq!(target, PathBuf::from("/tmp/out/event/foo/normal.png"));
+    }
+
+    #[test]
     fn native_object_mode_records_known_unreadable_types() {
         let asset = AssetStudioNativeAssetInfo {
             index: 0,
@@ -5678,6 +6226,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("ShaderVariantCollection".to_string()),
             type_id: 200,
             path_id: 7,
+            unique_id: None,
             size: 42,
             source_file: None,
         };
@@ -5700,6 +6249,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("CustomRenderThing".to_string()),
             type_id: 114514,
             path_id: 9,
+            unique_id: None,
             size: 128,
             source_file: None,
         };
@@ -5828,6 +6378,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("Texture2D".to_string()),
             type_id: 28,
             path_id: 1,
+            unique_id: None,
             size: 0,
             source_file: None,
         };
@@ -5893,6 +6444,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("Shader".to_string()),
             type_id: 48,
             path_id: 42,
+            unique_id: None,
             size: 0,
             source_file: None,
         };
@@ -5925,6 +6477,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("TextAsset".to_string()),
             type_id: 49,
             path_id: 7,
+            unique_id: None,
             size: 3,
             source_file: None,
         };
@@ -5955,6 +6508,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("TextAsset".to_string()),
             type_id: 49,
             path_id: 7,
+            unique_id: None,
             size: 3,
             source_file: None,
         };
@@ -5965,6 +6519,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("Shader".to_string()),
             type_id: 48,
             path_id: 8,
+            unique_id: None,
             size: 0,
             source_file: None,
         };
@@ -6024,6 +6579,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
             asset_type: Some("TextAsset".to_string()),
             type_id: 49,
             path_id: 7,
+            unique_id: None,
             size: 3,
             source_file: None,
         };

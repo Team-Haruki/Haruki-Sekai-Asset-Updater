@@ -81,11 +81,13 @@ impl AppConfig {
                 return Err(ConfigError::InvalidRegionName(region_name.clone()));
             }
         }
-        if self.tools.asset_studio_native_process_concurrency == 0 {
+        if !(0.0..=1.0).contains(&self.concurrency.cpu_budget_ratio)
+            || self.concurrency.cpu_budget_ratio == 0.0
+        {
             return Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_native_process_concurrency".to_string(),
-                value: "0".to_string(),
-                expected: "a positive integer".to_string(),
+                field: "concurrency.cpu_budget_ratio".to_string(),
+                value: self.concurrency.cpu_budget_ratio.to_string(),
+                expected: "a number greater than 0 and less than or equal to 1".to_string(),
             });
         }
         if self.tools.asset_studio_native_read_batch_size == 0 {
@@ -113,6 +115,29 @@ impl AppConfig {
 
     pub fn effective_concurrency(&self) -> ConcurrencyConfig {
         self.concurrency.effective()
+    }
+
+    pub fn effective_cpu_budget(&self) -> usize {
+        self.concurrency.effective_cpu_budget()
+    }
+
+    pub fn effective_asset_studio_native_process_concurrency(&self) -> usize {
+        self.effective_asset_studio_native_process_concurrency_for_cpus(available_cpu_count())
+    }
+
+    pub fn effective_asset_studio_native_process_concurrency_for_cpus(&self, cpus: usize) -> usize {
+        let configured = self.tools.asset_studio_native_process_concurrency;
+        if configured > 0 {
+            return configured;
+        }
+        let cpus = cpus.max(1);
+        let cpu_budget = self.concurrency.effective_cpu_budget_for_cpus(cpus);
+        if self.concurrency.cpu_throttle_enabled {
+            return cpus
+                .min(cpu_budget.saturating_mul(2).max(cpu_budget))
+                .max(1);
+        }
+        cpu_budget
     }
 
     pub fn enabled_regions(&self) -> Vec<String> {
@@ -156,7 +181,7 @@ impl AppConfig {
         }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY") {
             self.tools.asset_studio_native_process_concurrency =
-                parse_positive_usize("tools.asset_studio_native_process_concurrency", &value)?;
+                parse_usize_env("tools.asset_studio_native_process_concurrency", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS") {
             self.tools.asset_studio_native_worker_max_calls =
@@ -184,6 +209,25 @@ impl AppConfig {
         }
         if let Ok(value) = env::var("HARUKI_CONCURRENCY_AUTO_TUNE") {
             self.concurrency.auto_tune = parse_bool_env("concurrency.auto_tune", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_CPU_BUDGET_AUTO") {
+            self.concurrency.cpu_budget_auto =
+                parse_bool_env("concurrency.cpu_budget_auto", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_CPU_BUDGET_RATIO") {
+            self.concurrency.cpu_budget_ratio =
+                parse_cpu_ratio_env("concurrency.cpu_budget_ratio", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_CPU_RESERVED") {
+            self.concurrency.cpu_reserved = parse_usize_env("concurrency.cpu_reserved", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_ENABLED") {
+            self.concurrency.cpu_throttle_enabled =
+                parse_bool_env("concurrency.cpu_throttle_enabled", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS") {
+            self.concurrency.cpu_throttle_sample_ms =
+                parse_positive_usize("concurrency.cpu_throttle_sample_ms", &value)? as u64;
         }
         resolve_secret_env(
             "git_sync.chart_hashes.password",
@@ -273,6 +317,17 @@ fn parse_usize_env(field: &str, value: &str) -> Result<usize, ConfigError> {
             field: field.to_string(),
             value: trimmed.to_string(),
             expected: "a non-negative integer".to_string(),
+        })
+}
+
+fn parse_cpu_ratio_env(field: &str, value: &str) -> Result<f64, ConfigError> {
+    let trimmed = value.trim();
+    trimmed
+        .parse::<f64>()
+        .map_err(|_| ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: trimmed.to_string(),
+            expected: "a number greater than 0 and less than or equal to 1".to_string(),
         })
 }
 
@@ -606,7 +661,7 @@ impl Default for ToolsConfig {
             asset_studio_native_library_path: None,
             asset_studio_native_call_mode: AssetStudioNativeCallMode::Pool,
             asset_studio_native_worker_path: None,
-            asset_studio_native_process_concurrency: 3,
+            asset_studio_native_process_concurrency: 0,
             asset_studio_native_worker_max_calls: 256,
             asset_studio_native_read_batch_size: 32,
             asset_studio_native_image_format: None,
@@ -621,6 +676,11 @@ impl Default for ToolsConfig {
 #[serde(default)]
 pub struct ConcurrencyConfig {
     pub auto_tune: bool,
+    pub cpu_budget_auto: bool,
+    pub cpu_budget_ratio: f64,
+    pub cpu_reserved: usize,
+    pub cpu_throttle_enabled: bool,
+    pub cpu_throttle_sample_ms: u64,
     pub download: usize,
     pub upload: usize,
     pub acb: usize,
@@ -634,6 +694,11 @@ impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
             auto_tune: false,
+            cpu_budget_auto: true,
+            cpu_budget_ratio: 0.75,
+            cpu_reserved: 1,
+            cpu_throttle_enabled: false,
+            cpu_throttle_sample_ms: 250,
             download: 4,
             upload: 4,
             acb: 8,
@@ -650,21 +715,60 @@ impl ConcurrencyConfig {
         if !self.auto_tune {
             return self.clone();
         }
-        let cpus = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(4)
-            .max(1);
+        self.effective_for_cpus(available_cpu_count())
+    }
+
+    pub fn effective_for_cpus(&self, cpus: usize) -> Self {
+        if !self.auto_tune {
+            return self.clone();
+        }
+        let cpus = cpus.max(1);
+        let cpu_budget = self.effective_cpu_budget_for_cpus(cpus);
         Self {
             auto_tune: true,
+            cpu_budget_auto: self.cpu_budget_auto,
+            cpu_budget_ratio: self.cpu_budget_ratio,
+            cpu_reserved: self.cpu_reserved,
+            cpu_throttle_enabled: self.cpu_throttle_enabled,
+            cpu_throttle_sample_ms: self.cpu_throttle_sample_ms,
             download: self.download.min(cpus.saturating_mul(2).max(2)).max(1),
             upload: self.upload.min(cpus.max(2)).max(1),
-            acb: self.acb.min(cpus.max(2)).max(1),
+            acb: self.acb.min(cpus.max(2)).min(cpu_budget).max(1),
             usm: self.usm.min((cpus / 2).max(1)).max(1),
-            hca: self.hca.min(cpus.saturating_mul(2).max(2)).max(1),
-            media_encode: self.media_encode.min(cpus.saturating_sub(1).max(1)).max(1),
-            images: self.images.min(cpus.max(2)).max(1),
+            hca: self
+                .hca
+                .min(cpus.saturating_mul(2).max(2))
+                .min(cpu_budget)
+                .max(1),
+            media_encode: self
+                .media_encode
+                .min(cpus.saturating_sub(1).max(1))
+                .min(cpu_budget)
+                .max(1),
+            images: self.images.min(cpus.max(2)).min(cpu_budget).max(1),
         }
     }
+
+    pub fn effective_cpu_budget(&self) -> usize {
+        self.effective_cpu_budget_for_cpus(available_cpu_count())
+    }
+
+    pub fn effective_cpu_budget_for_cpus(&self, cpus: usize) -> usize {
+        let cpus = cpus.max(1);
+        if !self.cpu_budget_auto {
+            return cpus;
+        }
+        ((cpus as f64 * self.cpu_budget_ratio).floor() as usize)
+            .saturating_sub(self.cpu_reserved)
+            .max(1)
+    }
+}
+
+fn available_cpu_count() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .max(1)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1041,7 +1145,7 @@ regions:
             tools.asset_studio_native_call_mode,
             AssetStudioNativeCallMode::Pool
         );
-        assert_eq!(tools.asset_studio_native_process_concurrency, 3);
+        assert_eq!(tools.asset_studio_native_process_concurrency, 0);
         assert_eq!(tools.asset_studio_native_worker_max_calls, 256);
         assert_eq!(tools.asset_studio_native_read_batch_size, 32);
         assert_eq!(tools.asset_studio_native_image_format, None);
@@ -1050,6 +1154,11 @@ regions:
         assert_eq!(AppConfig::default().concurrency.images, 4);
         assert_eq!(AppConfig::default().concurrency.media_encode, 12);
         assert!(!AppConfig::default().concurrency.auto_tune);
+        assert!(AppConfig::default().concurrency.cpu_budget_auto);
+        assert_eq!(AppConfig::default().concurrency.cpu_budget_ratio, 0.75);
+        assert_eq!(AppConfig::default().concurrency.cpu_reserved, 1);
+        assert!(!AppConfig::default().concurrency.cpu_throttle_enabled);
+        assert_eq!(AppConfig::default().concurrency.cpu_throttle_sample_ms, 250);
     }
 
     #[test]
@@ -1147,15 +1256,11 @@ asset_studio_backend: auto
     }
 
     #[test]
-    fn rejects_zero_asset_studio_native_process_concurrency() {
+    fn accepts_zero_asset_studio_native_process_concurrency_as_auto() {
         let mut config = AppConfig::default();
         config.tools.asset_studio_native_process_concurrency = 0;
-        let err = config.validate().unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_native_process_concurrency" && value == "0"
-        ));
+        config.validate().unwrap();
+        assert!(config.effective_asset_studio_native_process_concurrency() >= 1);
     }
 
     #[test]
@@ -1332,6 +1437,11 @@ regions:
         let old_image_format = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT").ok();
         let old_media_encode_concurrency = std::env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY").ok();
         let old_concurrency_auto_tune = std::env::var("HARUKI_CONCURRENCY_AUTO_TUNE").ok();
+        let old_cpu_budget_auto = std::env::var("HARUKI_CPU_BUDGET_AUTO").ok();
+        let old_cpu_budget_ratio = std::env::var("HARUKI_CPU_BUDGET_RATIO").ok();
+        let old_cpu_reserved = std::env::var("HARUKI_CPU_RESERVED").ok();
+        let old_cpu_throttle_enabled = std::env::var("HARUKI_CPU_THROTTLE_ENABLED").ok();
+        let old_cpu_throttle_sample_ms = std::env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS").ok();
         std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", "auto");
         std::env::set_var("HARUKI_MEDIA_BACKEND", "cli");
         std::env::set_var(
@@ -1349,6 +1459,11 @@ regions:
         std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT", "TGA");
         std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", "9");
         std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", "true");
+        std::env::set_var("HARUKI_CPU_BUDGET_AUTO", "true");
+        std::env::set_var("HARUKI_CPU_BUDGET_RATIO", "0.5");
+        std::env::set_var("HARUKI_CPU_RESERVED", "2");
+        std::env::set_var("HARUKI_CPU_THROTTLE_ENABLED", "true");
+        std::env::set_var("HARUKI_CPU_THROTTLE_SAMPLE_MS", "500");
 
         let mut file = NamedTempFile::new().unwrap();
         write!(
@@ -1392,6 +1507,11 @@ tools:
         );
         assert_eq!(config.concurrency.media_encode, 9);
         assert!(config.concurrency.auto_tune);
+        assert!(config.concurrency.cpu_budget_auto);
+        assert_eq!(config.concurrency.cpu_budget_ratio, 0.5);
+        assert_eq!(config.concurrency.cpu_reserved, 2);
+        assert!(config.concurrency.cpu_throttle_enabled);
+        assert_eq!(config.concurrency.cpu_throttle_sample_ms, 500);
 
         match old_backend {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", value),
@@ -1439,12 +1559,37 @@ tools:
             Some(value) => std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", value),
             None => std::env::remove_var("HARUKI_CONCURRENCY_AUTO_TUNE"),
         }
+        match old_cpu_budget_auto {
+            Some(value) => std::env::set_var("HARUKI_CPU_BUDGET_AUTO", value),
+            None => std::env::remove_var("HARUKI_CPU_BUDGET_AUTO"),
+        }
+        match old_cpu_budget_ratio {
+            Some(value) => std::env::set_var("HARUKI_CPU_BUDGET_RATIO", value),
+            None => std::env::remove_var("HARUKI_CPU_BUDGET_RATIO"),
+        }
+        match old_cpu_reserved {
+            Some(value) => std::env::set_var("HARUKI_CPU_RESERVED", value),
+            None => std::env::remove_var("HARUKI_CPU_RESERVED"),
+        }
+        match old_cpu_throttle_enabled {
+            Some(value) => std::env::set_var("HARUKI_CPU_THROTTLE_ENABLED", value),
+            None => std::env::remove_var("HARUKI_CPU_THROTTLE_ENABLED"),
+        }
+        match old_cpu_throttle_sample_ms {
+            Some(value) => std::env::set_var("HARUKI_CPU_THROTTLE_SAMPLE_MS", value),
+            None => std::env::remove_var("HARUKI_CPU_THROTTLE_SAMPLE_MS"),
+        }
     }
 
     #[test]
     fn effective_concurrency_auto_tune_respects_configured_caps() {
         let config = ConcurrencyConfig {
             auto_tune: true,
+            cpu_budget_auto: true,
+            cpu_budget_ratio: 0.75,
+            cpu_reserved: 1,
+            cpu_throttle_enabled: false,
+            cpu_throttle_sample_ms: 250,
             download: 999,
             upload: 999,
             acb: 999,
@@ -1466,6 +1611,72 @@ tools:
         assert!(effective.images <= config.images);
         assert!(effective.download >= 1);
         assert!(effective.media_encode >= 1);
+    }
+
+    #[test]
+    fn effective_cpu_budget_and_native_auto_scale_by_cpu_count() {
+        let config = AppConfig::default();
+        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(4), 2);
+        assert_eq!(
+            config.effective_asset_studio_native_process_concurrency_for_cpus(4),
+            2
+        );
+        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(8), 5);
+        assert_eq!(
+            config.effective_asset_studio_native_process_concurrency_for_cpus(8),
+            5
+        );
+        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(10), 6);
+        assert_eq!(
+            config.effective_asset_studio_native_process_concurrency_for_cpus(10),
+            6
+        );
+        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(64), 47);
+        assert_eq!(
+            config.effective_asset_studio_native_process_concurrency_for_cpus(64),
+            47
+        );
+    }
+
+    #[test]
+    fn explicit_native_concurrency_overrides_auto() {
+        let mut config = AppConfig::default();
+        config.tools.asset_studio_native_process_concurrency = 56;
+        assert_eq!(
+            config.effective_asset_studio_native_process_concurrency_for_cpus(8),
+            56
+        );
+    }
+
+    #[test]
+    fn native_auto_oversubscribes_when_cpu_throttle_is_enabled() {
+        let mut config = AppConfig::default();
+        config.concurrency.cpu_throttle_enabled = true;
+
+        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(10), 6);
+        assert_eq!(
+            config.effective_asset_studio_native_process_concurrency_for_cpus(10),
+            10
+        );
+        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(64), 47);
+        assert_eq!(
+            config.effective_asset_studio_native_process_concurrency_for_cpus(64),
+            64
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_cpu_budget_ratio() {
+        for ratio in [0.0, -0.5, 1.5] {
+            let mut config = AppConfig::default();
+            config.concurrency.cpu_budget_ratio = ratio;
+            let err = config.validate().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidValue { ref field, .. }
+                    if field == "concurrency.cpu_budget_ratio"
+            ));
+        }
     }
 
     #[test]

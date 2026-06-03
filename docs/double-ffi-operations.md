@@ -59,19 +59,30 @@ Media backend:
 Useful environment variables:
 
 ```bash
-export HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=3
+export HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=0
 export HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS=256
 export HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE=32
 export HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT=bmp
+export HARUKI_CPU_BUDGET_AUTO=true
+export HARUKI_CPU_BUDGET_RATIO=0.75
+export HARUKI_CPU_RESERVED=1
 ```
 
 General guidance:
 
 - Keep `asset_studio_native_read_batch_size=32` as the default.
 - Try `64` for image-heavy rules such as `character/member`.
-- Tune `asset_studio_native_process_concurrency` per host. Small Docker
-  allocations may prefer `8`; high-core servers have tested well around
-  `56` to `64` for broad CN workloads.
+- Use `asset_studio_native_process_concurrency=0` for the shared-host default.
+  Without CPU throttle it auto-scales to the CPU budget. With CPU throttle
+  enabled it can oversubscribe workers up to the CPU count while the throttle
+  controls actual process CPU. `cpu_budget_ratio` and `cpu_reserved` remain the
+  single CPU budget control.
+- Enable `concurrency.cpu_throttle_enabled` when the process tree itself should
+  stay near the same CPU budget. This throttle samples the updater and its
+  native workers, then delays new CPU-heavy permits while usage is above
+  `effective_cpu_budget * 100%`.
+  Explicit values are still useful for benchmark-only runs; high-core servers
+  have tested well around `56` to `64` for broad CN workloads.
 - Do not use unrestricted direct NativeAOT concurrency as the production path.
 
 ## Media Scheduler Tuning

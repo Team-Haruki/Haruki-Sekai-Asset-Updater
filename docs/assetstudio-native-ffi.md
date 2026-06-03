@@ -39,9 +39,19 @@ Configure it with `tools.asset_studio_native_call_mode` or
 to the current executable. Process and pool mode are limited by
 `tools.asset_studio_native_process_concurrency` or
 `HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY`; the default call mode is
-`pool`, and the default process concurrency is `3`. This keeps NativeAOT workers
-isolated while avoiding the SIGSEGVs seen with unrestricted in-process parallel
-exports.
+`pool`, and the default process concurrency is `0`, meaning auto. Without CPU
+throttle, auto uses the shared CPU budget as a hard worker cap. With CPU
+throttle enabled, auto intentionally oversubscribes workers up to the CPU count
+so the throttle can keep actual process CPU near the same budget. This keeps
+NativeAOT workers isolated while avoiding the SIGSEGVs seen with unrestricted
+in-process parallel exports.
+
+The CPU performance control is intentionally centered on the shared CPU budget:
+`concurrency.cpu_budget_ratio` and `concurrency.cpu_reserved` determine the
+effective budget. For shared machines that need this program itself to stay near
+the budget, enable `concurrency.cpu_throttle_enabled`; the throttle samples this
+process tree, including native workers, and delays new CPU-heavy work when
+sampled usage is above `effective_cpu_budget * 100%`.
 
 The native backend uses a JSON C ABI:
 
@@ -324,9 +334,11 @@ diagnostics. It also calls `haruki_assetstudio_version` before native
 benchmarking so ABI loading failures are separated from export failures.
 
 For full region-rule benchmarks, use `asset_region_bench`. Keep the production
-default `tools.asset_studio_native_process_concurrency=3`, but `music/short`
-has recently benchmarked best with `native_process=16` and `media_encode=12`;
-`native_process=20` showed over-concurrency on the same machine.
+default `tools.asset_studio_native_process_concurrency=0` for shared hosts, but
+`music/short` has recently benchmarked best with `native_process=16` and
+`media_encode=12`; `native_process=20` showed over-concurrency on the same
+machine. The benchmark summary reports effective native process concurrency,
+CPU budget, and CPU throttle target percent.
 
 ```bash
 cargo run --release --features media-ffi --bin asset_region_bench -- \
