@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -243,6 +244,7 @@ impl AssetExecutionContext {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(180))
             .pool_max_idle_per_host(100)
+            .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
             .tcp_keepalive(Duration::from_secs(30));
 
         if let Some(proxy) = &app_config.server.proxy {
