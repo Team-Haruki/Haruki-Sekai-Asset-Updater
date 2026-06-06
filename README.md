@@ -8,7 +8,7 @@
 
 ## Scope
 
-- Loads v2 YAML config
+- Loads v3 YAML config
 - Exposes `GET /healthz`
 - Exposes `POST /v2/assets/update`
 - Exposes `GET /v2/jobs/{id}`
@@ -35,7 +35,7 @@
 ## Secret Config
 
 - Sensitive config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
-- The main service only accepts the current v2 config shape. Migrate older
+- The main service only accepts the current v3 config shape. Migrate older
   config files explicitly with:
   `cargo run --bin config_migrate -- --input old.yaml --output haruki-asset-configs.yaml --check`.
 - The loader resolves this syntax for:

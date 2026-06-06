@@ -28,8 +28,8 @@ Status legend:
 
 | Area | Go v1 | Rust v2 | Status | Notes |
 | --- | --- | --- | --- | --- |
-| YAML config loader | `haruki-asset-configs.yaml` | `haruki-asset-configs.yaml` | `intentional-diff` | Rust keeps the filename but uses the v2 schema internally. |
-| Config schema | flat v1 sections | reorganized v2 sections | `intentional-diff` | Mapping documented in `config-v1-to-v2.md`. |
+| YAML config loader | `haruki-asset-configs.yaml` | `haruki-asset-configs.yaml` | `intentional-diff` | Rust keeps the filename but uses the v3 schema internally. |
+| Config schema | flat v1 sections | reorganized v3 sections | `intentional-diff` | Mapping documented in `config-to-v3.md`. |
 | Execution controls | none | `execution.timeout_seconds`, `execution.allow_cancel`, `execution.retry.*` | `intentional-diff` | Rust adds timeout, cancel, and retry policy controls. |
 | Main log file | supported | supported | `implemented` | Rust writes file-backed main logs. |
 | Access log file | supported | supported | `implemented` | Rust middleware writes formatted access logs. |
@@ -95,7 +95,7 @@ Status legend:
 
 ## Highest-Priority Remaining Gaps
 
-1. TLS serving is still not wired in the Rust runtime even though the v2 config models it.
+1. TLS serving is still not wired in the Rust runtime even though the v3 config models it.
 2. Rust does not provide a v1 compatibility route for `/update_asset`; migration requires callers to switch to `/v2/assets/update`.
 3. Generic ordered-msgpack utility behavior is not carried over as a reusable Rust module; only concrete asset-info decode is covered.
 

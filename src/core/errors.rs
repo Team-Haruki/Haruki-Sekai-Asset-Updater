@@ -38,9 +38,9 @@ pub enum ConfigError {
         #[source]
         source: std::string::FromUtf8Error,
     },
-    #[error("config_version must be 2, got {0}")]
+    #[error("config_version must be 3, got {0}")]
     UnsupportedVersion(u32),
-    #[error("no v2 config file found; tried: {0}")]
+    #[error("no v3 config file found; tried: {0}")]
     MissingConfigFile(String),
     #[error("invalid region key `{0}`; region keys must be lowercase")]
     InvalidRegionName(String),

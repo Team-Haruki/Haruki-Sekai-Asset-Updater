@@ -39,7 +39,7 @@ fn binary_path() -> PathBuf {
 fn write_config(path: &Path, port: u16, main_log: &Path, access_log: &Path) {
     let yaml = format!(
         r#"
-config_version: 2
+config_version: 3
 server:
   host: "127.0.0.1"
   port: {port}

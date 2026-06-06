@@ -15,6 +15,7 @@ const CONFIG_OPENDAL_SCHEME_ENV: &str = "HARUKI_CONFIG_OPENDAL_SCHEME";
 const CONFIG_OPENDAL_ROOT_ENV: &str = "HARUKI_CONFIG_OPENDAL_ROOT";
 const CONFIG_OPENDAL_OPTION_PREFIX: &str = "HARUKI_CONFIG_OPENDAL_OPTION_";
 const CONFIG_OPENDAL_URI_PREFIX: &str = "opendal://";
+pub const CURRENT_CONFIG_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConfigStorageUri {
@@ -40,7 +41,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            config_version: 2,
+            config_version: CURRENT_CONFIG_VERSION,
             server: ServerConfig::default(),
             logging: LoggingConfig::default(),
             execution: ExecutionConfig::default(),
@@ -133,7 +134,7 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.config_version != 2 {
+        if self.config_version != CURRENT_CONFIG_VERSION {
             return Err(ConfigError::UnsupportedVersion(self.config_version));
         }
 
@@ -1493,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_v2_config_version() {
+    fn rejects_non_v3_config_version() {
         let config = AppConfig {
             config_version: 1,
             ..AppConfig::default()
@@ -1503,9 +1504,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_v2_yaml_structure() {
+    fn parses_v3_yaml_structure() {
         let yaml = r#"
-config_version: 2
+config_version: 3
 server:
   host: 127.0.0.1
   port: 18080
@@ -1747,7 +1748,7 @@ asset_studio_types:
         write!(
             file,
             r#"
-config_version: 2
+config_version: 3
 server:
   auth:
     bearer_token: "${{env:HARUKI_TEST_BEARER_TOKEN}}"
@@ -1853,7 +1854,7 @@ regions:
         write!(
             file,
             r#"
-config_version: 2
+config_version: 3
 backends:
   asset_studio:
     library_path: /tmp/config-native.so
@@ -1986,7 +1987,7 @@ backends:
         write!(
             file,
             r#"
-config_version: 2
+config_version: 3
 backends:
   asset_studio:
     library_path: /tmp/config-ffi.so
@@ -2031,7 +2032,7 @@ backends:
         std::fs::write(
             dir.path().join("haruki-asset-configs.yaml"),
             r#"
-config_version: 2
+config_version: 3
 server:
   port: 19090
 regions:
@@ -2084,7 +2085,7 @@ regions:
         write!(
             file,
             r#"
-config_version: 2
+config_version: 3
 storage:
   providers:
     - name: assets
@@ -2223,7 +2224,7 @@ regions:
         write!(
             file,
             r#"
-config_version: 2
+config_version: 3
 regions:
   jp:
     enabled: true

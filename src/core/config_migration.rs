@@ -5,6 +5,10 @@ pub fn migrate_legacy_config_shape(root: &mut Value) {
         return;
     };
 
+    map.insert(
+        Value::String("config_version".to_string()),
+        Value::Number(3.into()),
+    );
     migrate_legacy_tools_config(map);
     migrate_legacy_resource_config(map);
 }
@@ -254,6 +258,7 @@ concurrency:
         migrate_legacy_config_shape(&mut value);
 
         let migrated = yaml_serde::to_string(&value).unwrap();
+        assert!(migrated.contains("config_version: 3"));
         assert!(!migrated.contains("tools:"));
         assert!(!migrated.contains("asset_studio_ffi_"));
         assert!(!migrated.contains("cpu_budget_"));

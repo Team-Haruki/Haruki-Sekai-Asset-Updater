@@ -153,6 +153,7 @@ execution:
 
     assert!(output.status.success(), "{output:?}");
     let migrated = fs::read_to_string(output_path).unwrap();
+    assert!(migrated.contains("config_version: 3"));
     assert!(migrated.contains("backends:"));
     assert!(migrated.contains("asset_studio:"));
     assert!(migrated.contains("library_path: /tmp/libHarukiAssetStudioFFI.dylib"));

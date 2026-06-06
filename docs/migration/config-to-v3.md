@@ -1,10 +1,12 @@
-# Config Migration: v1 to v2
+# Config Migration: legacy configs to v3
 
-The Rust v2 service keeps YAML but reorganizes the file around responsibilities instead of mirroring Go package structs.
+The original Rust rewrite used config v2 for the Go-to-Rust migration. The
+current service schema is config v3, which keeps YAML but reorganizes the file
+around responsibilities instead of mirroring legacy package structs.
 
 ## Top-level mapping
 
-| v1 key | v2 key | Notes |
+| legacy key | v3 key | Notes |
 | --- | --- | --- |
 | `proxy` | `server.proxy` | Moves under server/network concerns. |
 | `concurrents` | `concurrency` + `resources.cpu` | Worker counts stay under `concurrency`; CPU budget/throttle lives under `resources.cpu`. |
@@ -17,7 +19,7 @@ The Rust v2 service keeps YAML but reorganizes the file around responsibilities 
 
 ## Backend and logging
 
-| v1 key | v2 key | Default / change |
+| legacy key | v3 key | Default / change |
 | --- | --- | --- |
 | `backend.host` | `server.host` | Default stays `0.0.0.0`. |
 | `backend.port` | `server.port` | Default changes to `8080` for the Rust service. |
@@ -34,7 +36,7 @@ The Rust v2 service keeps YAML but reorganizes the file around responsibilities 
 
 ## Backends, storage, and Git sync
 
-| v1 key | v2 key | Notes |
+| legacy key | v3 key | Notes |
 | --- | --- | --- |
 | `tool.ffmpeg_path` | `backends.media.ffmpeg_path` | Pure move. |
 | `tool.media_backend` | `backends.media.backend` | `ffi` is the default; `cli`/`auto` remain available for platform fallback and tests. |
@@ -65,7 +67,7 @@ The Rust v2 service keeps YAML but reorganizes the file around responsibilities 
 
 ## Concurrency
 
-| v1 key | v2 key |
+| legacy key | v3 key |
 | --- | --- |
 | `concurrents.concurrent_download` | `concurrency.download` |
 | `concurrents.concurrent_upload` | `concurrency.upload` |
@@ -92,7 +94,7 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 
 ### Provider and crypto
 
-| v1 key | v2 key | Notes |
+| legacy key | v3 key | Notes |
 | --- | --- | --- |
 | `enabled` | `enabled` | Same behavior. |
 | `asset_info_url_template` | `provider.asset_info_url_template` | Same behavior. |
@@ -107,7 +109,7 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 
 ### Paths and filters
 
-| v1 key | v2 key |
+| legacy key | v3 key |
 | --- | --- |
 | `asset_save_dir` | `paths.asset_save_dir` |
 | `downloaded_asset_record_file` | `paths.downloaded_asset_record_file` |
@@ -118,7 +120,7 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 
 ### Export and upload
 
-| v1 key | v2 key |
+| legacy key | v3 key |
 | --- | --- |
 | `export_by_category` | `export.by_category` |
 | `export_usm_files` | `export.usm.export` |
@@ -137,9 +139,9 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 | `upload_to_cloud` | `upload.enabled` |
 | `remove_local_after_upload` | `upload.remove_local_after_upload` |
 
-## Explicit defaults in v2
+## Explicit defaults in v3
 
-- `config_version` is required and must be `2`.
+- `config_version` is required and must be `3`.
 - `server.port` defaults to `8080`.
 - `logging.level` defaults to `INFO`.
 - `execution.retry.attempts` defaults to `4`.
@@ -156,9 +158,9 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 - `resources.cpu.budget_ratio` defaults to `0.75`.
 - `resources.cpu.throttle.enabled` defaults to `false`.
 
-## Migrating existing Rust v2 draft configs
+## Migrating older Rust config drafts
 
-The main service loader only accepts the current v2 schema. Run the standalone
+The main service loader only accepts the current v3 schema. Run the standalone
 migration CLI for older Rust draft configs that still use `tools.*`,
 `asset_studio_native_*`, `asset_studio_ffi_*`, or CPU fields embedded under
 `concurrency`:
@@ -167,9 +169,10 @@ migration CLI for older Rust draft configs that still use `tools.*`,
 cargo run --bin config_migrate -- --input old.yaml --output haruki-asset-configs.yaml --check
 ```
 
-## Removed or intentionally deferred in v2
+## Removed or intentionally deferred in v3
 
 - Direct reuse of the old `/update_asset` endpoint is removed in favor of `/v2/assets/update`.
 - Go-embedded codec implementations are not part of the Rust service plan.
 - Any temporary Go-to-Rust codec bridge is intentionally out of scope.
-- `execution.retry.*` is a Rust v2-only addition; there is no direct v1 field mapping.
+- `execution.retry.*` was added during the Rust migration; there is no direct
+  legacy Go field mapping.
