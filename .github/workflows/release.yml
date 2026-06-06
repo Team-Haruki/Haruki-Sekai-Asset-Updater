@@ -16,6 +16,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: haruki-sekai-asset-updater
+  ASSETSTUDIO_REPOSITORY: https://github.com/Team-Haruki/AssetStudio.git
+  ASSETSTUDIO_BRANCH: sekai-modified
 
 jobs:
   build:
@@ -71,9 +73,161 @@ jobs:
           path: dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.${{ matrix.archive }}
           if-no-files-found: error
 
+  assetstudio-revision:
+    name: Check AssetStudio revision
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+      short_sha: ${{ steps.revision.outputs.short_sha }}
+    steps:
+      - name: Resolve AssetStudio branch head
+        id: revision
+        run: |
+          sha="$(git ls-remote --heads "${ASSETSTUDIO_REPOSITORY}" "${ASSETSTUDIO_BRANCH}" | awk '{print $1}')"
+          if [ -z "${sha}" ]; then
+            echo "AssetStudio branch ${ASSETSTUDIO_BRANCH} was not found in ${ASSETSTUDIO_REPOSITORY}" >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "AssetStudio ${ASSETSTUDIO_BRANCH}: ${sha}"
+
+  assetstudio-ffi:
+    name: AssetStudioFFI ${{ matrix.name }}
+    needs: assetstudio-revision
+    runs-on: ${{ matrix.os }}
+    env:
+      FFI_PACKAGE_NAME: assetstudio-ffi-${{ matrix.name }}-${{ needs.assetstudio-revision.outputs.short_sha }}
+      FFI_ARCHIVE_PATH: assetstudio-cache/assetstudio-ffi-${{ matrix.name }}-${{ needs.assetstudio-revision.outputs.short_sha }}.${{ matrix.archive }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: win-x64
+            rid: win-x64
+            archive: zip
+          - os: ubuntu-latest
+            name: linux-x64
+            rid: linux-x64
+            archive: tar.gz
+          - os: ubuntu-latest
+            name: linux-amd64
+            rid: linux-x64
+            archive: tar.gz
+          - os: macos-latest
+            name: macos-arm64
+            rid: osx-arm64
+            archive: tar.gz
+    steps:
+      - name: Restore packaged AssetStudioFFI
+        id: ffi-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FFI_ARCHIVE_PATH }}
+          key: assetstudio-ffi-${{ matrix.name }}-${{ needs.assetstudio-revision.outputs.sha }}-v1
+
+      - name: Reuse AssetStudioFFI from previous release
+        id: previous-ffi
+        if: steps.ffi-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assetstudio-cache
+          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName // ""')"
+          if [ -z "${previous_tag}" ]; then
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          package_file="$(basename "${FFI_ARCHIVE_PATH}")"
+          if gh release download "${previous_tag}" --pattern "${package_file}" --dir assetstudio-cache --clobber; then
+            echo "Reused ${package_file} from release ${previous_tag}"
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No reusable AssetStudioFFI archive named ${package_file} in release ${previous_tag}"
+            rm -f "${FFI_ARCHIVE_PATH}"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout AssetStudio
+        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: Team-Haruki/AssetStudio
+          ref: ${{ needs.assetstudio-revision.outputs.sha }}
+          path: AssetStudio
+
+      - name: Install .NET SDK
+        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Install Linux NativeAOT dependencies
+        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang zlib1g-dev binutils
+
+      - name: Publish AssetStudioFFI
+        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
+        shell: bash
+        run: |
+          dotnet publish AssetStudio/AssetStudioFFI/AssetStudioFFI.csproj \
+            -c Release \
+            -r "${{ matrix.rid }}" \
+            -f net9.0 \
+            --self-contained true \
+            -o assetstudio-publish \
+            -p:TargetFrameworks=net9.0 \
+            -p:PublishAot=true \
+            -p:InvariantGlobalization=true
+
+      - name: Write AssetStudioFFI build metadata
+        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
+        shell: bash
+        run: |
+          {
+            echo "repository=${ASSETSTUDIO_REPOSITORY}"
+            echo "branch=${ASSETSTUDIO_BRANCH}"
+            echo "commit=${{ needs.assetstudio-revision.outputs.sha }}"
+            echo "runtime=${{ matrix.rid }}"
+            echo "archive=${{ matrix.name }}"
+          } > assetstudio-publish/ASSETSTUDIO_FFI_BUILD.txt
+
+      - name: Package AssetStudioFFI (Unix)
+        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true' && runner.os != 'Windows'
+        run: |
+          mkdir -p assetstudio-cache dist
+          package_dir="${FFI_PACKAGE_NAME}"
+          mkdir -p "dist/${package_dir}"
+          cp -R assetstudio-publish/. "dist/${package_dir}/"
+          tar -czf "${FFI_ARCHIVE_PATH}" -C dist "${package_dir}"
+
+      - name: Package AssetStudioFFI (Windows)
+        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path assetstudio-cache, dist | Out-Null
+          $packageDir = $env:FFI_PACKAGE_NAME
+          New-Item -ItemType Directory -Force -Path "dist/$packageDir" | Out-Null
+          Copy-Item -Path assetstudio-publish/* -Destination "dist/$packageDir" -Recurse -Force
+          Compress-Archive -Path "dist/$packageDir" -DestinationPath $env:FFI_ARCHIVE_PATH -Force
+
+      - name: Upload AssetStudioFFI artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.FFI_PACKAGE_NAME }}
+          path: ${{ env.FFI_ARCHIVE_PATH }}
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs:
+      - build
+      - assetstudio-ffi
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
