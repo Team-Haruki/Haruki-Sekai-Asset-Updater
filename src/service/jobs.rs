@@ -390,10 +390,22 @@ async fn progress_consumer(
             }
             match update {
                 ExecutionProgressUpdate::Phase { phase, message } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        phase = ?phase,
+                        message = %message,
+                        "job phase advanced"
+                    );
                     push_progress_event(job, phase, message);
                 }
                 ExecutionProgressUpdate::DownloadsPlanned { total } => {
                     job.progress.total_downloads = total;
+                    tracing::info!(
+                        job_id = %id,
+                        region = %job.region,
+                        total,
+                        "asset bundle downloads planned"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::PlanningDownloads,
@@ -401,6 +413,12 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::BundleStarted { bundle } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        "bundle processing started"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -412,6 +430,14 @@ async fn progress_consumer(
                     bytes,
                     elapsed_ms,
                 } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        bytes,
+                        elapsed_ms,
+                        "bundle downloaded"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -421,6 +447,13 @@ async fn progress_consumer(
                 ExecutionProgressUpdate::BundleFetchDetails { .. }
                 | ExecutionProgressUpdate::BundleDeobfuscated { .. } => {}
                 ExecutionProgressUpdate::BundleTempWritten { bundle, elapsed_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        elapsed_ms,
+                        "bundle temp file written"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -428,6 +461,13 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::BundleExported { bundle, elapsed_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        elapsed_ms,
+                        "bundle exported"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -435,6 +475,13 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::BundleNativeExportPhases { bundle, phase_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        phases = %format_native_export_phases(&phase_ms),
+                        "native export phases"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -445,6 +492,13 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::BundleNativeSkippedObjectReads { bundle, count } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        count,
+                        "native skipped object reads"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -452,6 +506,17 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::BundleNativeObjectReadPlan { bundle, plan } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        planned = plan.planned_objects,
+                        read = plan.successful_reads,
+                        skipped = plan.skipped_reads,
+                        batches = plan.batch_count,
+                        payload_bytes = plan.payload_bundle_bytes,
+                        "native object read plan"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -475,6 +540,14 @@ async fn progress_consumer(
                 }
                 ExecutionProgressUpdate::BundleCompleted { bundle } => {
                     job.progress.completed_downloads += 1;
+                    tracing::info!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        completed = job.progress.completed_downloads,
+                        total = job.progress.total_downloads,
+                        "bundle completed"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -483,6 +556,15 @@ async fn progress_consumer(
                 }
                 ExecutionProgressUpdate::BundleFailed { bundle, error } => {
                     job.progress.failed_downloads += 1;
+                    tracing::warn!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        failed = job.progress.failed_downloads,
+                        total = job.progress.total_downloads,
+                        error = %error,
+                        "bundle failed"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -490,6 +572,12 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::RecordSaved { entries } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        entries,
+                        "download record saved"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::PersistingState,
@@ -502,6 +590,12 @@ async fn progress_consumer(
                     } else {
                         "chart hash sync skipped".to_string()
                     };
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        performed,
+                        "chart hash sync finished"
+                    );
                     push_progress_event(job, JobPhase::SyncingChartHashes, message);
                 }
             }
