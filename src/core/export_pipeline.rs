@@ -6591,34 +6591,32 @@ async fn handle_usm_files(
         return Ok(output);
     }
 
-    let usm_inputs = prepare_usm_processing_inputs(usm_files)?;
-    let usm_files = usm_inputs.files;
+    let prepared_usm_inputs = prepare_usm_processing_inputs(usm_files)?;
+    let merged_count = prepared_usm_inputs.merged_count;
+    let usm_inputs = prepared_usm_inputs.files;
 
     if scoped_post_process {
         output.phase_ms.insert(
             "media_scheduler.usm_merged_count".to_string(),
-            usm_inputs.merged_count as u64,
+            merged_count as u64,
         );
         output.phase_ms.insert(
             "media_scheduler.usm_configured_concurrency".to_string(),
             usm_concurrency.max(1) as u64,
         );
-        let worker_count = usm_concurrency.max(1).min(usm_files.len());
+        let worker_count = usm_concurrency.max(1).min(usm_inputs.len());
         output.phase_ms.insert(
             "media_scheduler.usm_worker_count".to_string(),
             worker_count as u64,
         );
-        if usm_files.len() == 1 {
-            let usm_file = usm_files
+        if usm_inputs.len() == 1 {
+            let usm_input = usm_inputs
                 .into_iter()
                 .next()
                 .expect("single scoped USM is present");
-            let output_dir = usm_file
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            let file_output = process_usm_file_with_metrics(
-                &usm_file,
+            let output_dir = usm_input.output_dir();
+            let file_output = process_usm_input_with_metrics(
+                &usm_input,
                 &output_dir,
                 region,
                 ffmpeg_path,
@@ -6633,19 +6631,16 @@ async fn handle_usm_files(
         let region = region.clone();
         let ffmpeg_path = ffmpeg_path.to_string();
         let retry = retry.clone();
-        let outputs = run_tasks(usm_files, worker_count, move |usm_file| {
-            let output_dir = usm_file
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
+        let outputs = run_tasks(usm_inputs, worker_count, move |usm_input| {
+            let output_dir = usm_input.output_dir();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|source| ExportPipelineError::AssetStudioFfi {
                     message: format!("failed to create USM post-process runtime: {source}"),
                 })?;
-            runtime.block_on(process_usm_file_with_metrics(
-                &usm_file,
+            runtime.block_on(process_usm_input_with_metrics(
+                &usm_input,
                 &output_dir,
                 &region,
                 &ffmpeg_path,
@@ -6660,18 +6655,21 @@ async fn handle_usm_files(
         return Ok(output);
     }
 
-    let usm_input = if usm_files.len() == 1 {
+    let usm_input = if usm_inputs.len() == 1 {
         output.phase_ms.insert(
             "media_scheduler.usm_merged_count".to_string(),
-            usm_inputs.merged_count as u64,
+            merged_count as u64,
         );
-        usm_files[0].clone()
+        usm_inputs
+            .into_iter()
+            .next()
+            .expect("single USM is present")
     } else {
         output.phase_ms.insert(
             "media_scheduler.usm_merged_count".to_string(),
-            (usm_inputs.merged_count + usm_files.len()) as u64,
+            (merged_count + usm_inputs.len()) as u64,
         );
-        merge_usm_files(export_path, &usm_files)?
+        UsmProcessingInput::Path(merge_usm_inputs(export_path, usm_inputs)?)
     };
     output
         .phase_ms
@@ -6681,7 +6679,7 @@ async fn handle_usm_files(
         usm_concurrency.max(1) as u64,
     );
 
-    let file_output = process_usm_file_with_metrics(
+    let file_output = process_usm_input_with_metrics(
         &usm_input,
         export_path,
         region,
@@ -6704,8 +6702,8 @@ async fn process_usm_file(
     media_backend: MediaBackend,
     retry: &crate::core::config::RetryConfig,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
-    Ok(process_usm_file_with_metrics(
-        usm_file,
+    Ok(process_usm_input_with_metrics(
+        &UsmProcessingInput::Path(usm_file.to_path_buf()),
         export_path,
         region,
         ffmpeg_path,
@@ -6722,8 +6720,8 @@ struct UsmPostProcessOutput {
     phase_ms: HashMap<String, u64>,
 }
 
-async fn process_usm_file_with_metrics(
-    usm_file: &Path,
+async fn process_usm_input_with_metrics(
+    usm_input: &UsmProcessingInput,
     export_path: &Path,
     region: &RegionConfig,
     ffmpeg_path: &str,
@@ -6731,47 +6729,38 @@ async fn process_usm_file_with_metrics(
     retry: &crate::core::config::RetryConfig,
 ) -> Result<UsmPostProcessOutput, ExportPipelineError> {
     let mut output = UsmPostProcessOutput::default();
-    let output_name = usm_file
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| ExportPipelineError::Io {
-            path: usm_file.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid usm file name"),
-        })?
-        .to_string();
+    let output_name = usm_input.output_name()?;
 
-    if region.export.video.convert_to_mp4 && region.export.video.direct_usm_to_mp4_with_ffmpeg {
-        let mp4 = export_path.join(format!("{output_name}.mp4"));
-        let phase_started = Instant::now();
-        convert_usm_to_mp4_with_backend(usm_file, &mp4, ffmpeg_path, media_backend, retry).await?;
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.usm.convert_mp4",
-            phase_started,
-        );
-        remove_export_file_if_exists(usm_file)?;
-        output.generated_files.push(mp4);
-        return Ok(output);
+    if let Some(usm_file) = usm_input.path() {
+        if region.export.video.convert_to_mp4 && region.export.video.direct_usm_to_mp4_with_ffmpeg {
+            let mp4 = export_path.join(format!("{output_name}.mp4"));
+            let phase_started = Instant::now();
+            convert_usm_to_mp4_with_backend(usm_file, &mp4, ffmpeg_path, media_backend, retry)
+                .await?;
+            add_elapsed_phase_ms(
+                &mut output.phase_ms,
+                "post_process.usm.convert_mp4",
+                phase_started,
+            );
+            usm_input.cleanup_sources()?;
+            output.generated_files.push(mp4);
+            return Ok(output);
+        }
     }
 
-    let metadata = codec::read_usm_metadata(usm_file).ok();
-    let frame_rate = metadata
-        .as_ref()
-        .and_then(|metadata| metadata.video_frame_rate())
-        .filter(|(_, denominator)| *denominator > 0)
-        .map(FrameRate::from_tuple);
+    let frame_rate = match usm_input {
+        UsmProcessingInput::Path(usm_file) => codec::read_usm_metadata(usm_file)
+            .ok()
+            .as_ref()
+            .and_then(|metadata| metadata.video_frame_rate())
+            .filter(|(_, denominator)| *denominator > 0)
+            .map(FrameRate::from_tuple),
+        UsmProcessingInput::Bytes { .. } => None,
+    };
 
     if region.export.video.convert_to_mp4 && region.export.video.remove_m2v {
-        let usm_bytes = std::fs::read(usm_file).map_err(|source| ExportPipelineError::Io {
-            path: usm_file.to_path_buf(),
-            source,
-        })?;
-        let fallback_name = usm_file
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("input.usm");
         let phase_started = Instant::now();
-        let streams = codec::export_usm_to_memory(&usm_bytes, fallback_name.as_bytes(), false)?;
+        let streams = export_usm_input_to_memory(usm_input, false)?;
         add_elapsed_phase_ms(
             &mut output.phase_ms,
             "post_process.usm.extract",
@@ -6797,11 +6786,69 @@ async fn process_usm_file_with_metrics(
                 "post_process.usm.convert_mp4",
                 phase_started,
             );
-            remove_export_file_if_exists(usm_file)?;
+            usm_input.cleanup_sources()?;
             output.generated_files.push(mp4);
             return Ok(output);
         }
     }
+
+    if matches!(usm_input, UsmProcessingInput::Bytes { .. }) {
+        let phase_started = Instant::now();
+        let streams = export_usm_input_to_memory(usm_input, true)?;
+        let mut generated = write_usm_streams(export_path, &streams)?;
+        add_elapsed_phase_ms(
+            &mut output.phase_ms,
+            "post_process.usm.extract",
+            phase_started,
+        );
+
+        if region.export.video.convert_to_mp4 {
+            if let Some(video) = streams
+                .iter()
+                .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
+            {
+                let mp4 = export_path.join(format!("{output_name}.mp4"));
+                let phase_started = Instant::now();
+                convert_m2v_bytes_to_mp4_with_backend(
+                    &video.data,
+                    &mp4,
+                    ffmpeg_path,
+                    media_backend,
+                    frame_rate,
+                    retry,
+                )
+                .await?;
+                add_elapsed_phase_ms(
+                    &mut output.phase_ms,
+                    "post_process.usm.convert_mp4",
+                    phase_started,
+                );
+                generated.push(mp4);
+                if region.export.video.remove_m2v {
+                    generated.retain(|path| {
+                        !path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .map(|ext| ext.eq_ignore_ascii_case("m2v"))
+                            .unwrap_or(false)
+                    });
+                    remove_file_if_exists(&export_path.join(format!("{}.m2v", video.name)))
+                        .map_err(|source| ExportPipelineError::Io {
+                            path: export_path.join(format!("{}.m2v", video.name)),
+                            source,
+                        })?;
+                }
+            }
+        }
+
+        usm_input.cleanup_sources()?;
+        output.generated_files = generated;
+        return Ok(output);
+    }
+
+    let usm_file = usm_input
+        .path()
+        .expect("non-memory USM processing requires a path");
 
     let phase_started = Instant::now();
     let extracted = codec::export_usm(usm_file, export_path)?;
@@ -6845,9 +6892,71 @@ async fn process_usm_file_with_metrics(
         }
     }
 
-    remove_export_file_if_exists(usm_file)?;
+    usm_input.cleanup_sources()?;
     output.generated_files = generated;
     Ok(output)
+}
+
+fn export_usm_input_to_memory(
+    usm_input: &UsmProcessingInput,
+    export_audio: bool,
+) -> Result<Vec<cridecoder::ExtractedUsmStream>, ExportPipelineError> {
+    match usm_input {
+        UsmProcessingInput::Path(usm_file) => {
+            let usm_bytes = std::fs::read(usm_file).map_err(|source| ExportPipelineError::Io {
+                path: usm_file.to_path_buf(),
+                source,
+            })?;
+            let fallback_name = usm_file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("input.usm");
+            codec::export_usm_to_memory(&usm_bytes, fallback_name.as_bytes(), export_audio)
+                .map_err(ExportPipelineError::from)
+        }
+        UsmProcessingInput::Bytes {
+            fallback_name,
+            data,
+            ..
+        } => codec::export_usm_to_memory(data, fallback_name.as_bytes(), export_audio)
+            .map_err(ExportPipelineError::from),
+    }
+}
+
+fn write_usm_streams(
+    export_path: &Path,
+    streams: &[cridecoder::ExtractedUsmStream],
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let mut generated = Vec::with_capacity(streams.len());
+    for stream in streams {
+        let path = export_path.join(format!("{}.{}", stream.name, stream.extension));
+        std::fs::write(&path, &stream.data).map_err(|source| ExportPipelineError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        generated.push(path);
+    }
+    Ok(generated)
+}
+
+#[allow(dead_code)]
+async fn process_usm_file_with_metrics(
+    usm_file: &Path,
+    export_path: &Path,
+    region: &RegionConfig,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    retry: &crate::core::config::RetryConfig,
+) -> Result<UsmPostProcessOutput, ExportPipelineError> {
+    process_usm_input_with_metrics(
+        &UsmProcessingInput::Path(usm_file.to_path_buf()),
+        export_path,
+        region,
+        ffmpeg_path,
+        media_backend,
+        retry,
+    )
+    .await
 }
 
 fn handle_acb_files_owned(
@@ -8141,41 +8250,84 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-fn merge_usm_files(dir: &Path, usm_files: &[PathBuf]) -> Result<PathBuf, ExportPipelineError> {
-    let dir_name = dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("merged");
-    let merged_file = dir.join(format!("{dir_name}.usm"));
-    let mut target =
-        std::fs::File::create(&merged_file).map_err(|source| ExportPipelineError::Io {
-            path: merged_file.clone(),
-            source,
-        })?;
-
-    for source_path in usm_files {
-        if *source_path == merged_file {
-            continue;
-        }
-        let mut source =
-            std::fs::File::open(source_path).map_err(|source| ExportPipelineError::Io {
-                path: source_path.clone(),
-                source,
-            })?;
-        std::io::copy(&mut source, &mut target).map_err(|source| ExportPipelineError::Io {
-            path: source_path.clone(),
-            source,
-        })?;
-        remove_export_file_if_exists(source_path)?;
-    }
-
-    Ok(merged_file)
-}
-
 #[derive(Debug, Default)]
 struct UsmProcessingInputs {
-    files: Vec<PathBuf>,
+    files: Vec<UsmProcessingInput>,
     merged_count: usize,
+}
+
+type UsmSegmentGroupKey = Option<(PathBuf, String)>;
+type UsmSegmentGroupEntry = (usize, usize, PathBuf);
+
+#[derive(Debug, PartialEq, Eq)]
+enum UsmProcessingInput {
+    Path(PathBuf),
+    Bytes {
+        output_dir: PathBuf,
+        output_name: String,
+        fallback_name: String,
+        data: Vec<u8>,
+        source_files: Vec<PathBuf>,
+    },
+}
+
+impl UsmProcessingInput {
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Bytes { .. } => None,
+        }
+    }
+
+    fn output_dir(&self) -> PathBuf {
+        match self {
+            Self::Path(path) => path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+            Self::Bytes { output_dir, .. } => output_dir.clone(),
+        }
+    }
+
+    fn output_name(&self) -> Result<String, ExportPipelineError> {
+        match self {
+            Self::Path(path) => path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string)
+                .ok_or_else(|| ExportPipelineError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid usm file name",
+                    ),
+                }),
+            Self::Bytes { output_name, .. } => Ok(output_name.clone()),
+        }
+    }
+
+    fn cleanup_sources(&self) -> Result<(), ExportPipelineError> {
+        match self {
+            Self::Path(path) => remove_export_file_if_exists(path),
+            Self::Bytes { source_files, .. } => {
+                for source_file in source_files {
+                    remove_export_file_if_exists(source_file)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn output_sort_key(&self) -> PathBuf {
+        match self {
+            Self::Path(path) => path.clone(),
+            Self::Bytes {
+                output_dir,
+                output_name,
+                ..
+            } => output_dir.join(format!("{output_name}.usm")),
+        }
+    }
 }
 
 fn prepare_usm_processing_inputs(
@@ -8183,7 +8335,10 @@ fn prepare_usm_processing_inputs(
 ) -> Result<UsmProcessingInputs, ExportPipelineError> {
     if usm_files.len() <= 1 {
         return Ok(UsmProcessingInputs {
-            files: usm_files,
+            files: usm_files
+                .into_iter()
+                .map(UsmProcessingInput::Path)
+                .collect(),
             merged_count: 0,
         });
     }
@@ -8193,8 +8348,7 @@ fn prepare_usm_processing_inputs(
         indexed.push((usm_segment_key(path), index, path.clone()));
     }
 
-    let mut groups: BTreeMap<Option<(PathBuf, String)>, Vec<(usize, usize, PathBuf)>> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<UsmSegmentGroupKey, Vec<UsmSegmentGroupEntry>> = BTreeMap::new();
     for (key, index, path) in indexed {
         if let Some((dir, stem, segment)) = key {
             groups
@@ -8224,17 +8378,21 @@ fn prepare_usm_processing_inputs(
                     .into_iter()
                     .map(|(_, _, path)| path)
                     .collect::<Vec<_>>();
-                let merged = merge_usm_segment_files(&dir, &stem, &sources)?;
+                let merged = read_usm_segment_files_to_memory(&dir, &stem, &sources)?;
                 merged_count += sources.len();
                 prepared.push(merged);
                 continue;
             }
         }
 
-        prepared.extend(group.into_iter().map(|(_, _, path)| path));
+        prepared.extend(
+            group
+                .into_iter()
+                .map(|(_, _, path)| UsmProcessingInput::Path(path)),
+        );
     }
 
-    prepared.sort();
+    prepared.sort_by_key(UsmProcessingInput::output_sort_key);
     Ok(UsmProcessingInputs {
         files: prepared,
         merged_count,
@@ -8261,32 +8419,82 @@ fn usm_segment_key(path: &Path) -> Option<(PathBuf, String, usize)> {
     ))
 }
 
-fn merge_usm_segment_files(
+fn read_usm_segment_files_to_memory(
     dir: &Path,
     stem: &str,
     usm_files: &[PathBuf],
+) -> Result<UsmProcessingInput, ExportPipelineError> {
+    let mut data = Vec::new();
+    for source_path in usm_files {
+        let mut source =
+            std::fs::File::open(source_path).map_err(|source| ExportPipelineError::Io {
+                path: source_path.clone(),
+                source,
+            })?;
+        std::io::copy(&mut source, &mut data).map_err(|source| ExportPipelineError::Io {
+            path: source_path.clone(),
+            source,
+        })?;
+    }
+
+    Ok(UsmProcessingInput::Bytes {
+        output_dir: dir.to_path_buf(),
+        output_name: stem.to_string(),
+        fallback_name: format!("{stem}.usm"),
+        data,
+        source_files: usm_files.to_vec(),
+    })
+}
+
+fn merge_usm_inputs(
+    dir: &Path,
+    usm_inputs: Vec<UsmProcessingInput>,
 ) -> Result<PathBuf, ExportPipelineError> {
-    let merged_file = dir.join(format!("{stem}.usm"));
+    let dir_name = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("merged");
+    let merged_file = dir.join(format!("{dir_name}.usm"));
     let mut target =
         std::fs::File::create(&merged_file).map_err(|source| ExportPipelineError::Io {
             path: merged_file.clone(),
             source,
         })?;
 
-    for source_path in usm_files {
-        if *source_path == merged_file {
-            continue;
+    for input in usm_inputs {
+        match input {
+            UsmProcessingInput::Path(source_path) => {
+                if source_path == merged_file {
+                    continue;
+                }
+                let mut source = std::fs::File::open(&source_path).map_err(|source| {
+                    ExportPipelineError::Io {
+                        path: source_path.clone(),
+                        source,
+                    }
+                })?;
+                std::io::copy(&mut source, &mut target).map_err(|source| {
+                    ExportPipelineError::Io {
+                        path: source_path.clone(),
+                        source,
+                    }
+                })?;
+                remove_export_file_if_exists(&source_path)?;
+            }
+            UsmProcessingInput::Bytes {
+                data, source_files, ..
+            } => {
+                std::io::copy(&mut data.as_slice(), &mut target).map_err(|source| {
+                    ExportPipelineError::Io {
+                        path: merged_file.clone(),
+                        source,
+                    }
+                })?;
+                for source_file in source_files {
+                    remove_export_file_if_exists(&source_file)?;
+                }
+            }
         }
-        let mut source =
-            std::fs::File::open(source_path).map_err(|source| ExportPipelineError::Io {
-                path: source_path.clone(),
-                source,
-            })?;
-        std::io::copy(&mut source, &mut target).map_err(|source| ExportPipelineError::Io {
-            path: source_path.clone(),
-            source,
-        })?;
-        remove_export_file_if_exists(source_path)?;
     }
 
     Ok(merged_file)
@@ -8396,26 +8604,27 @@ mod tests {
         assetstudio_type_selector_matches, close_assetstudio_ffi_context,
         convert_native_surrogate_images_to_png, extract_unity_asset_bundle,
         flush_pending_native_image_writes, get_export_group, handle_png_conversion,
-        inspect_assetstudio_ffi_bundle, merge_usm_files, native_object_output_extension,
-        native_object_output_path, native_read_batch_size_for_assets, native_read_kind_for_asset,
+        inspect_assetstudio_ffi_bundle, native_object_output_extension, native_object_output_path,
+        native_read_batch_size_for_assets, native_read_kind_for_asset,
         native_skipped_unsupported_asset, open_assetstudio_ffi_context,
         parse_assetstudio_ffi_context_list_objects_worker_output,
         parse_assetstudio_ffi_object_read_batch_worker_output_recoverable,
         parse_assetstudio_ffi_object_read_worker_output_recoverable, parse_payload_bundle,
         parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
-        prepare_usm_processing_inputs, process_usm_file, query_assetstudio_ffi_version,
-        record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
-        scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
-        text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
-        write_native_image_payload_final_files,
+        prepare_usm_processing_inputs, process_usm_file, process_usm_input_with_metrics,
+        query_assetstudio_ffi_version, record_native_object_read_batch_diagnostics, run_path_tasks,
+        safe_payload_bundle_path, scan_all_files, select_native_object_readable_assets,
+        should_keep_music_long_hca_track, text_asset_public_bytes_target,
+        write_assetstudio_export_manifest_entry, write_native_image_payload_final_files,
         write_native_image_payload_final_files_with_backend, write_native_object_payload,
         AssetStudioFfiAssetInfo, AssetStudioFfiContextCloseRequest, AssetStudioFfiInspectRequest,
         AssetStudioFfiObjectReadOutput, AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse,
         AssetStudioFfiVersion, NativeBatchPhaseStats, NativeObjectExportOptions,
         NativeObjectExportSummary, NativeObjectReadBatchParseOutput, NativeObjectReadParseResult,
         NativeObjectReadPlanStats, NativeSemanticExportPathState, NativeWorkerOutput,
-        ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, NATIVE_AOT_DEFAULT_IMAGE_FORMAT,
-        NATIVE_AOT_FAST_IMAGE_FORMAT, NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+        UsmProcessingInput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+        NATIVE_AOT_DEFAULT_IMAGE_FORMAT, NATIVE_AOT_FAST_IMAGE_FORMAT,
+        NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
     };
 
     fn repo_root() -> PathBuf {
@@ -9111,20 +9320,6 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
     }
 
     #[test]
-    fn merge_usm_files_matches_go_behavior() {
-        let dir = tempdir().unwrap();
-        let a = dir.path().join("a.usm");
-        let b = dir.path().join("b.usm");
-        fs::write(&a, b"A").unwrap();
-        fs::write(&b, b"BC").unwrap();
-
-        let merged = merge_usm_files(dir.path(), &[a.clone(), b.clone()]).unwrap();
-        assert_eq!(fs::read(&merged).unwrap(), b"ABC");
-        assert!(!a.exists());
-        assert!(!b.exists());
-    }
-
-    #[test]
     fn prepare_usm_processing_inputs_merges_numbered_segments() {
         let dir = tempdir().unwrap();
         let a = dir.path().join("traffic_jam-001.usm");
@@ -9138,12 +9333,28 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             prepare_usm_processing_inputs(vec![c.clone(), a.clone(), b.clone()]).unwrap();
 
         let merged = dir.path().join("traffic_jam.usm");
-        assert_eq!(prepared.files, vec![merged.clone()]);
+        assert_eq!(prepared.files.len(), 1);
         assert_eq!(prepared.merged_count, 3);
-        assert_eq!(fs::read(&merged).unwrap(), b"CRIDPAYLD");
-        assert!(!a.exists());
-        assert!(!b.exists());
-        assert!(!c.exists());
+        match &prepared.files[0] {
+            UsmProcessingInput::Bytes {
+                output_dir,
+                output_name,
+                fallback_name,
+                data,
+                source_files,
+            } => {
+                assert_eq!(output_dir, dir.path());
+                assert_eq!(output_name, "traffic_jam");
+                assert_eq!(fallback_name, "traffic_jam.usm");
+                assert_eq!(data, b"CRIDPAYLD");
+                assert_eq!(source_files, &vec![a.clone(), b.clone(), c.clone()]);
+            }
+            other => panic!("expected in-memory segmented USM input, got {other:?}"),
+        }
+        assert!(!merged.exists());
+        assert!(a.exists());
+        assert!(b.exists());
+        assert!(c.exists());
     }
 
     #[test]
@@ -9156,10 +9367,72 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
 
         let prepared = prepare_usm_processing_inputs(vec![c.clone(), a.clone()]).unwrap();
 
-        assert_eq!(prepared.files, vec![a.clone(), c.clone()]);
+        assert_eq!(
+            prepared.files,
+            vec![
+                UsmProcessingInput::Path(a.clone()),
+                UsmProcessingInput::Path(c.clone())
+            ]
+        );
         assert_eq!(prepared.merged_count, 0);
         assert!(a.exists());
         assert!(c.exists());
+    }
+
+    #[test]
+    fn segmented_usm_post_process_uses_memory_without_merged_file() {
+        std::thread::Builder::new()
+            .name("segmented-usm-memory".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let source_usm = sample_path("0703.usm");
+                if !source_usm.exists() {
+                    return;
+                }
+
+                let dir = tempdir().unwrap();
+                let bytes = fs::read(&source_usm).unwrap();
+                let split_at = bytes.len() / 2;
+                let a = dir.path().join("sample-001.usm");
+                let b = dir.path().join("sample-002.usm");
+                fs::write(&a, &bytes[..split_at]).unwrap();
+                fs::write(&b, &bytes[split_at..]).unwrap();
+
+                let prepared = prepare_usm_processing_inputs(vec![b.clone(), a.clone()]).unwrap();
+                assert_eq!(prepared.files.len(), 1);
+                assert!(matches!(
+                    prepared.files[0],
+                    UsmProcessingInput::Bytes { .. }
+                ));
+                assert!(!dir.path().join("sample.usm").exists());
+
+                let (_, region) = processing_config();
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let output = runtime
+                    .block_on(process_usm_input_with_metrics(
+                        &prepared.files[0],
+                        dir.path(),
+                        &region,
+                        "ffmpeg",
+                        MediaBackend::Auto,
+                        &RetryConfig::default(),
+                    ))
+                    .unwrap();
+
+                assert!(!dir.path().join("sample.usm").exists());
+                assert!(!a.exists());
+                assert!(!b.exists());
+                assert!(output.generated_files.iter().any(|path| {
+                    path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.eq_ignore_ascii_case("m2v"))
+                        .unwrap_or(false)
+                        && path.exists()
+                }));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
