@@ -3629,7 +3629,7 @@ fn write_unitypy_object_payload(
     } else {
         target
     };
-    let target = text_asset_media_bytes_target(&target, asset).unwrap_or(target);
+    let target = text_asset_public_bytes_target(&target, asset).unwrap_or(target);
     let target = assetbundle_typetree_output_path(
         options.output_dir,
         options.export_path,
@@ -3966,7 +3966,7 @@ fn manifest_lock_index(path: &Path) -> usize {
     hash % ASSETSTUDIO_MANIFEST_LOCKS
 }
 
-fn text_asset_media_bytes_target(
+fn text_asset_public_bytes_target(
     target: &Path,
     asset: &AssetStudioNativeAssetInfo,
 ) -> Option<PathBuf> {
@@ -3974,15 +3974,30 @@ fn text_asset_media_bytes_target(
         return None;
     }
     let file_name = target.file_name()?.to_str()?;
-    let media_name = file_name
+    if let Some(media_name) = file_name
         .strip_suffix(".acb.bytes")
         .map(|stem| format!("{stem}.acb"))
         .or_else(|| {
             file_name
                 .strip_suffix(".usm.bytes")
                 .map(|stem| format!("{stem}.usm"))
-        })?;
-    Some(target.with_file_name(media_name))
+        })
+    {
+        return Some(target.with_file_name(media_name));
+    }
+
+    let stem = file_name.strip_suffix(".bytes")?;
+    if text_asset_is_music_score(target, asset) {
+        Some(target.with_file_name(format!("{stem}.txt")))
+    } else {
+        Some(target.with_file_name(stem))
+    }
+}
+
+fn text_asset_is_music_score(target: &Path, asset: &AssetStudioNativeAssetInfo) -> bool {
+    let target_path = target.to_string_lossy().replace('\\', "/");
+    let container_path = asset.container.as_deref().unwrap_or("").replace('\\', "/");
+    target_path.contains("/music/music_score/") || container_path.contains("/music/music_score/")
 }
 
 fn is_text_asset_acb_target(asset: &AssetStudioNativeAssetInfo, target: &Path) -> bool {
@@ -8313,9 +8328,10 @@ mod tests {
         process_usm_file, query_assetstudio_native_version,
         record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
         scan_all_files, select_native_unitypy_readable_assets, should_keep_music_long_hca_track,
-        text_asset_media_bytes_target, unitypy_object_output_extension, unitypy_object_output_path,
-        write_assetstudio_export_manifest_entry, write_native_image_payload_final_files,
-        write_unitypy_object_payload, AssetStudioCliCapabilities, AssetStudioNativeAssetInfo,
+        text_asset_public_bytes_target, unitypy_object_output_extension,
+        unitypy_object_output_path, write_assetstudio_export_manifest_entry,
+        write_native_image_payload_final_files, write_unitypy_object_payload,
+        AssetStudioCliCapabilities, AssetStudioNativeAssetInfo,
         AssetStudioNativeContextCloseRequest, AssetStudioNativeInspectRequest,
         AssetStudioNativeObjectReadOutput, AssetStudioNativeObjectReadResponse,
         AssetStudioNativeResponse, AssetStudioNativeVersion, NativeBatchPhaseStats,
@@ -10197,7 +10213,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
-    fn text_asset_media_bytes_target_strips_known_media_suffixes() {
+    fn text_asset_public_bytes_target_strips_bytes_suffixes() {
         let mut asset = AssetStudioNativeAssetInfo {
             index: 0,
             name: Some("asset".to_string()),
@@ -10211,17 +10227,37 @@ printf fallback > "$OUT/fallback/path/done.txt"
         };
 
         assert_eq!(
-            text_asset_media_bytes_target(Path::new("out/foo.acb.bytes"), &asset).unwrap(),
+            text_asset_public_bytes_target(Path::new("out/foo.acb.bytes"), &asset).unwrap(),
             PathBuf::from("out/foo.acb")
         );
         assert_eq!(
-            text_asset_media_bytes_target(Path::new("out/foo.usm.bytes"), &asset).unwrap(),
+            text_asset_public_bytes_target(Path::new("out/foo.usm.bytes"), &asset).unwrap(),
             PathBuf::from("out/foo.usm")
         );
-        assert!(text_asset_media_bytes_target(Path::new("out/foo.bytes"), &asset).is_none());
+        assert_eq!(
+            text_asset_public_bytes_target(Path::new("out/foo.bytes"), &asset).unwrap(),
+            PathBuf::from("out/foo")
+        );
+        assert_eq!(
+            text_asset_public_bytes_target(Path::new("out/banner.jpg.bytes"), &asset).unwrap(),
+            PathBuf::from("out/banner.jpg")
+        );
+
+        asset.container = Some(
+            "assets/sekai/assetbundle/resources/ondemand/music/music_score/001/append.bytes"
+                .to_string(),
+        );
+        assert_eq!(
+            text_asset_public_bytes_target(
+                Path::new("out/ondemand/music/music_score/001/append.bytes"),
+                &asset
+            )
+            .unwrap(),
+            PathBuf::from("out/ondemand/music/music_score/001/append.txt")
+        );
 
         asset.asset_type = Some("MonoBehaviour".to_string());
-        assert!(text_asset_media_bytes_target(Path::new("out/foo.usm.bytes"), &asset).is_none());
+        assert!(text_asset_public_bytes_target(Path::new("out/foo.usm.bytes"), &asset).is_none());
     }
 
     #[test]
