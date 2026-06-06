@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -960,7 +961,14 @@ impl AssetExecutionContext {
             &self.retry,
             "cookie bootstrap",
             |_| async {
-                let response = self.client.post(&url).send().await?;
+                let response = self.client.post(&url).send().await.map_err(|err| {
+                    tracing::warn!(
+                        url,
+                        error = %format_reqwest_error_chain(&err),
+                        "HTTP request failed"
+                    );
+                    AssetExecutionError::Http(err)
+                })?;
                 if response.status().is_success() {
                     Ok(response
                         .headers()
@@ -1120,7 +1128,14 @@ impl AssetExecutionContext {
                         url: url.to_string(),
                         status: response.status().as_u16(),
                     }),
-                    Err(err) => Err(AssetExecutionError::Http(err)),
+                    Err(err) => {
+                        tracing::warn!(
+                            url,
+                            error = %format_reqwest_error_chain(&err),
+                            "HTTP request failed"
+                        );
+                        Err(AssetExecutionError::Http(err))
+                    }
                 }
             },
             is_retryable_http_error,
@@ -1486,6 +1501,17 @@ fn is_retryable_http_error(err: &AssetExecutionError) -> bool {
         AssetExecutionError::HttpStatus { status, .. } => *status >= 500,
         _ => false,
     }
+}
+
+fn format_reqwest_error_chain(err: &reqwest::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(err) = source {
+        message.push_str(": ");
+        message.push_str(&err.to_string());
+        source = err.source();
+    }
+    message
 }
 
 pub fn decrypt_asset_bundle_info(
