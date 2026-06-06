@@ -10,7 +10,6 @@ Recommended production settings:
 ```yaml
 tools:
   asset_studio_native_call_mode: "pool"
-  asset_studio_native_unitypy_mode: true
   asset_studio_native_read_batch_size: 32
   media_backend: "ffi"
 ```
@@ -24,7 +23,7 @@ cargo build --release --features media-ffi
 Required paths:
 
 ```bash
-export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioNative.so
+export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so
 export HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/app/assetstudio_native_worker
 ```
 

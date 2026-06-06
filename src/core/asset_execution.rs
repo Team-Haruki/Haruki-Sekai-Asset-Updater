@@ -20,8 +20,8 @@ use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::{
-    export_unity_asset_bundle_payloads, extract_unity_asset_bundle, post_process_exported_files,
-    NativeObjectReadPlanStats, UnityAssetBundlePayloadExport,
+    export_unity_asset_bundle_payloads, post_process_exported_files, NativeObjectReadPlanStats,
+    UnityAssetBundlePayloadExport,
 };
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
@@ -207,7 +207,6 @@ struct NativeBundlePostProcessJob {
 }
 
 enum BundleWorkOutput {
-    Completed,
     NativePostProcess(Box<NativeBundlePostProcessJob>),
 }
 
@@ -347,7 +346,6 @@ impl AssetExecutionContext {
         let mut joins = JoinSet::new();
         let mut post_process_joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
-        let use_native_pipeline = app_config.tools.asset_studio_native_unitypy_mode;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::Phase {
@@ -398,29 +396,23 @@ impl AssetExecutionContext {
                 );
                 let bundle_path = task.bundle_path.clone();
                 let bundle_hash = task.bundle_hash.clone();
-                let result = if use_native_pipeline {
-                    match ctx
-                        .download_and_export_bundle_payloads(&app_config, &task, &progress)
-                        .await
-                    {
-                        Ok(mut job) => {
-                            let backlog_wait_started = Instant::now();
-                            let backlog_permit = post_process_backlog_semaphore
-                                .acquire_owned()
-                                .await
-                                .expect("post-process backlog semaphore closed");
-                            let backlog_wait_ms = backlog_wait_started.elapsed().as_millis();
-                            job.backlog_wait_ms = backlog_wait_ms;
-                            job._backlog_permit = Some(backlog_permit);
-                            job._memory_permit = memory_permit.take();
-                            Ok(BundleWorkOutput::NativePostProcess(Box::new(job)))
-                        }
-                        Err(error) => Err(error),
+                let result = match ctx
+                    .download_and_export_bundle_payloads(&app_config, &task, &progress)
+                    .await
+                {
+                    Ok(mut job) => {
+                        let backlog_wait_started = Instant::now();
+                        let backlog_permit = post_process_backlog_semaphore
+                            .acquire_owned()
+                            .await
+                            .expect("post-process backlog semaphore closed");
+                        let backlog_wait_ms = backlog_wait_started.elapsed().as_millis();
+                        job.backlog_wait_ms = backlog_wait_ms;
+                        job._backlog_permit = Some(backlog_permit);
+                        job._memory_permit = memory_permit.take();
+                        Ok(BundleWorkOutput::NativePostProcess(Box::new(job)))
                     }
-                } else {
-                    ctx.download_and_export_bundle(&app_config, &task, &progress)
-                        .await
-                        .map(|()| BundleWorkOutput::Completed)
+                    Err(error) => Err(error),
                 };
                 let mut phase_ms = HashMap::new();
                 phase_ms.insert(
@@ -445,21 +437,8 @@ impl AssetExecutionContext {
         while !joins.is_empty() || !post_process_joins.is_empty() {
             tokio::select! {
                 Some(result) = joins.join_next(), if !joins.is_empty() => {
-                    let (bundle_path, bundle_hash, result) = result.expect("bundle task panicked");
+                    let (bundle_path, _bundle_hash, result) = result.expect("bundle task panicked");
                     match result {
-                        Ok(BundleWorkOutput::Completed) => {
-                            Self::record_completed_bundle(
-                                &progress,
-                                &record_path,
-                                &mut downloaded_assets,
-                                &mut completed,
-                                &mut pending_save_count,
-                                batch_save_size,
-                                &self.region_name,
-                                bundle_path,
-                                bundle_hash,
-                            );
-                        }
                         Ok(BundleWorkOutput::NativePostProcess(job)) => {
                             let app_config = app_config_cloned.clone();
                             let region = self.region.clone();
@@ -1175,145 +1154,6 @@ impl AssetExecutionContext {
                 .then_with(|| a.bundle_path.cmp(&b.bundle_path))
         });
         tasks
-    }
-
-    async fn download_and_export_bundle(
-        &self,
-        app_config: &AppConfig,
-        task: &DownloadTask,
-        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
-    ) -> Result<(), AssetExecutionError> {
-        let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
-            AssetExecutionError::MissingAssetSaveDir {
-                region: self.region_name.clone(),
-            }
-        })?;
-        let bundle_url = self.render_bundle_url(task)?;
-        let download_started = Instant::now();
-        let fetch = if let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) {
-            self.get_bundle_with_cache(&bundle_url, task, &cache_dir)
-                .await?
-        } else {
-            let network_started = Instant::now();
-            let body = self.get_with_retry(&bundle_url).await?;
-            BundleFetch {
-                body,
-                source: BundleFetchSource::Network,
-                cache_read_ms: None,
-                network_download_ms: Some(network_started.elapsed().as_millis()),
-                cache_write_ms: None,
-            }
-        };
-        Self::send_progress(
-            progress,
-            ExecutionProgressUpdate::BundleDownloaded {
-                bundle: task.bundle_path.clone(),
-                bytes: fetch.body.len(),
-                elapsed_ms: download_started.elapsed().as_millis(),
-            },
-        );
-        Self::send_progress(
-            progress,
-            ExecutionProgressUpdate::BundleFetchDetails {
-                bundle: task.bundle_path.clone(),
-                source: fetch.source.as_str().to_string(),
-                cache_read_ms: fetch.cache_read_ms,
-                network_download_ms: fetch.network_download_ms,
-                cache_write_ms: fetch.cache_write_ms,
-            },
-        );
-        let deobfuscate_started = Instant::now();
-        let deobfuscated = deobfuscate(&fetch.body);
-        Self::send_progress(
-            progress,
-            ExecutionProgressUpdate::BundleDeobfuscated {
-                bundle: task.bundle_path.clone(),
-                elapsed_ms: deobfuscate_started.elapsed().as_millis(),
-            },
-        );
-
-        let write_started = Instant::now();
-        let temp_file = std::env::temp_dir()
-            .join(&self.region_name)
-            .join(&task.bundle_path);
-        if let Some(parent) = temp_file.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| {
-                AssetExecutionError::CreateTempDir {
-                    path: parent.to_path_buf(),
-                    source,
-                }
-            })?;
-        }
-        std::fs::write(&temp_file, deobfuscated).map_err(|source| {
-            AssetExecutionError::WriteTempFile {
-                path: temp_file.clone(),
-                source,
-            }
-        })?;
-        Self::send_progress(
-            progress,
-            ExecutionProgressUpdate::BundleTempWritten {
-                bundle: task.bundle_path.clone(),
-                elapsed_ms: write_started.elapsed().as_millis(),
-            },
-        );
-
-        let category = match task.category {
-            AssetCategory::StartApp => "StartApp",
-            AssetCategory::OnDemand => "OnDemand",
-            AssetCategory::Other(_) => "OnDemand",
-        };
-        let export_started = Instant::now();
-        let export_result = extract_unity_asset_bundle(
-            app_config,
-            &self.region_name,
-            &self.region,
-            &temp_file,
-            &task.bundle_path,
-            Path::new(&asset_save_dir),
-            category,
-        )
-        .await;
-        if let Ok(summary) = &export_result {
-            let mut export_phase_ms = summary.native_export_phase_ms.clone();
-            export_phase_ms.extend(summary.post_process_phase_ms.clone());
-            if !export_phase_ms.is_empty() {
-                Self::send_progress(
-                    progress,
-                    ExecutionProgressUpdate::BundleNativeExportPhases {
-                        bundle: task.bundle_path.clone(),
-                        phase_ms: export_phase_ms,
-                    },
-                );
-            }
-            if !summary.native_skipped_object_reads.is_empty() {
-                Self::send_progress(
-                    progress,
-                    ExecutionProgressUpdate::BundleNativeSkippedObjectReads {
-                        bundle: task.bundle_path.clone(),
-                        count: summary.native_skipped_object_reads.len(),
-                    },
-                );
-            }
-            if !summary.native_object_read_plan.is_empty() {
-                Self::send_progress(
-                    progress,
-                    ExecutionProgressUpdate::BundleNativeObjectReadPlan {
-                        bundle: task.bundle_path.clone(),
-                        plan: summary.native_object_read_plan.clone(),
-                    },
-                );
-            }
-            Self::send_progress(
-                progress,
-                ExecutionProgressUpdate::BundleExported {
-                    bundle: task.bundle_path.clone(),
-                    elapsed_ms: export_started.elapsed().as_millis(),
-                },
-            );
-        }
-        let _ = remove_file_if_exists(&temp_file);
-        export_result.map(|_| ()).map_err(Into::into)
     }
 
     async fn download_and_export_bundle_payloads(

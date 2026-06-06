@@ -1,17 +1,11 @@
 # AssetStudio NativeAOT FFI
 
 This branch adds a NativeAOT backend for AssetStudio. The production pipeline
-now defaults to the NativeAOT object flow plus media FFI; CLI/export-mode paths
-remain as legacy compatibility and test entry points.
+now defaults to the AssetStudioFFI object flow plus media FFI. Rust controls
+object selection, output paths, post-processing, upload, and records; C# keeps
+Unity bundle parsing and object payload extraction behind the FFI boundary.
 
-## Backends
-
-Configure the backend with `tools.asset_studio_backend` or
-`HARUKI_ASSET_STUDIO_BACKEND`.
-
-- `cli`: run `AssetStudioModCLI` as a child process.
-- `native`: load the NativeAOT shared library with `libloading`.
-- `auto`: try `native`, then fall back to `cli` with a warning.
+## Call Modes
 
 The native backend has three call modes:
 
@@ -23,14 +17,15 @@ The native backend has three call modes:
   Rust can run multiple exports concurrently without sharing AssetStudio's
   static process state.
 - `pool`: keep a bounded pool of `assetstudio_native_worker` sidecars alive and
-  send FFI calls over a length-prefixed JSON protocol. This keeps the process
-  isolation from `process` mode while avoiding per-bundle NativeAOT startup
-  cost. Native export requests BMP surrogate output by default, then Rust
-  converts it to PNG in parallel. This avoids the NativeAOT + ImageSharp PNG
-  encoder bottleneck. Set `tools.asset_studio_native_image_format` or
-  `HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT` only when you need to force another
-  first-stage format such as `png`, `tga`, `jpeg`, or `webp`. Pool mode is the
-  recommended export mode.
+  send operation/result frames over a length-prefixed JSON protocol. The worker
+  IPC remains JSON, but the worker calls AssetStudioFFI through typed C structs,
+  not Native JSON request/response strings. Pool mode is the recommended export
+  mode.
+
+Image reads use the raw RGBA IR by default. Rust encodes the final PNG/WebP
+outputs, which avoids the NativeAOT + ImageSharp PNG encoder path and keeps
+alpha handling consistent. `tools.asset_studio_native_image_format` is retained
+only as an override surface and currently accepts `raw_rgba`.
 
 Configure it with `tools.asset_studio_native_call_mode` or
 `HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE`. Set
@@ -53,41 +48,29 @@ the budget, enable `concurrency.cpu_throttle_enabled`; the throttle samples this
 process tree, including native workers, and delays new CPU-heavy work when
 sampled usage is above `effective_cpu_budget * 100%`.
 
-The native backend uses a JSON C ABI:
+The AssetStudioFFI boundary uses typed C structs. Rust loads and validates the
+native ABI layout before calling:
 
 ```c
-int haruki_assetstudio_version(char** response_json);
-int haruki_assetstudio_inspect(const char* request_json, char** response_json);
-int haruki_assetstudio_context_open(const char* request_json, char** response_json);
-int haruki_assetstudio_context_list_objects(const char* request_json, char** response_json);
-int haruki_assetstudio_context_read_object(
-    const char* request_json,
-    char** response_json,
-    uint8_t** payload_ptr,
-    int64_t* payload_len);
-int haruki_assetstudio_context_read_objects(
-    const char* request_json,
-    char** response_json,
-    uint8_t** payload_ptr,
-    int64_t* payload_len);
-int haruki_assetstudio_context_close(const char* request_json, char** response_json);
-void haruki_assetstudio_free_string(char* ptr);
-void haruki_assetstudio_free_buffer(uint8_t* ptr);
+int haruki_assetstudio_abi_layout_v1(...);
+int haruki_assetstudio_limits_v1(...);
+int haruki_assetstudio_capabilities_v1(...);
+int haruki_assetstudio_context_open_v1(...);
+int haruki_assetstudio_context_list_objects_size_v1(...);
+int haruki_assetstudio_context_list_objects_into_v1(...);
+int haruki_assetstudio_read_objects_direct_retry_v1(...);
+int haruki_assetstudio_context_close_v1(...);
+void haruki_assetstudio_result_free(...);
 ```
 
-Rust still owns request/response parsing with `sonic-rs`. The C# adapter
-serializes ordinary operations with a process gate because the AssetStudio export
-path uses static process state. Context operations hold that gate from
-`context_open` until `context_close`, so they should be used through one worker
-process and closed promptly.
+The exact struct definitions live in Rust and the AssetStudioFFI project. Any
+struct size or version mismatch is treated as a load-time failure.
 
 The production path now prefers the double-FFI object flow:
 
 ```yaml
 tools:
-  asset_studio_backend: "native"
   asset_studio_native_call_mode: "pool"
-  asset_studio_native_unitypy_mode: true
   asset_studio_native_read_batch_size: 32
   asset_studio_native_read_kinds:
     Texture2D: image
@@ -100,10 +83,8 @@ tools:
   media_backend: "ffi"
 ```
 
-The Rust pipeline keeps control of object selection, output paths,
-ACB/HCA/image handling, uploads, and records. CLI paths remain available only as
-explicit legacy compatibility and benchmark fallbacks; NativeAOT export-mode
-entry points have been removed in favor of object-level context reads.
+NativeAOT export-mode entry points have been removed in favor of object-level
+context reads.
 
 Build the Rust service with the media FFI feature for the production path:
 
@@ -125,11 +106,11 @@ export HARUKI_ASSET_STUDIO_NATIVE_MAX_EXPORT_TASKS=4
 Each NativeAOT operation records an operation id, CLI-equivalent arguments,
 captured console output, duration, and managed exception stack traces.
 
-## Inspect ABI
+## Inspect Flow
 
-`haruki_assetstudio_inspect` is the first higher-integration API beyond export.
-It lets Rust load a bundle, parse assets, and receive metadata before deciding
-what to export.
+Rust implements inspection through `context_open`, paged
+`context_list_objects`, and `context_close`. There is no separate production
+JSON inspect ABI.
 
 Request fields:
 
@@ -156,7 +137,7 @@ Rust has a helper CLI for local inspection:
 
 ```bash
 cargo run --bin assetstudio_inspect -- \
-  --native-library /path/to/HarukiAssetStudioNative.dylib \
+  --native-library /path/to/HarukiAssetStudioFFI.dylib \
   --bundle /path/to/bundle.unityfs \
   --unity-version 2022.3.21f1 \
   --asset-types tex2d,textAsset \
@@ -173,7 +154,7 @@ use haruki_sekai_asset_updater::{
     AssetStudioReadKind,
 };
 
-let client = AssetStudioNativeClient::new("/path/to/HarukiAssetStudioNative.dylib");
+let client = AssetStudioNativeClient::new("/path/to/HarukiAssetStudioFFI.dylib");
 let options = AssetStudioInspectOptions::new("/path/to/bundle.unityfs")
     .asset_types(["tex2d"])
     .unity_version("2022.3.21f1")
@@ -187,7 +168,7 @@ if let Some(asset) = assets.first() {
     let read = context.read_object(
         &AssetStudioObjectReadOptions::new(asset.path_id)
             .kind(AssetStudioReadKind::Image)
-            .image_format("bmp"),
+            .image_format("raw_rgba"),
     )?;
     println!("read {} bytes", read.payload.len());
 }
@@ -195,7 +176,7 @@ context.close()?;
 # Ok::<(), haruki_sekai_asset_updater::core::errors::ExportPipelineError>(())
 ```
 
-## Context ABI
+## Context Flow
 
 `haruki_assetstudio_context_open`,
 `haruki_assetstudio_context_list_objects`,
@@ -231,13 +212,13 @@ player resource files. `context_read_object` accepts:
   `audio`, `video`, `font`, `shader`, `text`, `text_bytes`, `mesh`, `obj`,
   `animator`, or `fbx`. Rust chooses defaults by AssetStudio type and can
   override them with `tools.asset_studio_native_read_kinds`.
-- `image_format`: currently `bmp` or `png`; `bmp` is the fast default.
+- `image_format`: currently `raw_rgba`; Rust encodes final image files.
 
-The response JSON contains object metadata, payload kind, payload length,
-warnings, timing, and errors. Object bytes are returned through `payload_ptr` and
-must be released with `haruki_assetstudio_free_buffer`. In worker-pool mode the
-Rust worker returns the response JSON and binary payload as separate length
-prefixed frames. `tools.asset_studio_native_read_batch_size` or
+The typed response contains object metadata, payload kind, payload length,
+warnings, timing, and errors. Object bytes are returned through typed payload
+buffers and must be released with `haruki_assetstudio_result_free`. In
+worker-pool mode the Rust worker returns a JSON operation/result frame and a
+binary payload frame over its private process IPC. `tools.asset_studio_native_read_batch_size` or
 `HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE` controls how many object reads Rust
 packs into one `context_read_objects` request; the default is `32`.
 Batch responses include diagnostics used by Rust benchmarks:
@@ -258,7 +239,7 @@ have recently favored `32`.
 Worker-pool logs include worker spawn, recycle, kill, protocol error, request
 id, operation, elapsed time, and completed-call counters when `RUST_LOG` enables
 debug logs for the updater. Signal/protocol failures still trigger isolated
-worker recovery, but the recovery path is now observable instead of silent.
+worker recovery, but the recovery path is observable instead of silent.
 
 Rust derives output extensions from `payload_kind` first, then from the adapter
 suggestion, and finally from the AssetStudio type. Important object-flow
@@ -281,7 +262,7 @@ referenced AssetStudio projects can fall back to their `net472` target during
 publish.
 
 ```bash
-dotnet publish AssetStudioNative/AssetStudioNative.csproj \
+dotnet publish AssetStudioFFI/AssetStudioFFI.csproj \
   -c Release -f net9.0 -r linux-x64 --self-contained true \
   /p:TargetFrameworks=net9.0 \
   /p:PublishAot=true \
@@ -291,9 +272,9 @@ dotnet publish AssetStudioNative/AssetStudioNative.csproj \
 
 Keep the NativeAOT adapter and the texture decoder native library together:
 
-- Linux: `HarukiAssetStudioNative.so`, `libTexture2DDecoderNative.so`
-- macOS: `HarukiAssetStudioNative.dylib`, `libTexture2DDecoderNative.dylib`
-- Windows: `HarukiAssetStudioNative.dll`, `Texture2DDecoderNative.dll`
+- Linux: `HarukiAssetStudioFFI.so`, `libTexture2DDecoderNative.so`
+- macOS: `HarukiAssetStudioFFI.dylib`, `libTexture2DDecoderNative.dylib`
+- Windows: `HarukiAssetStudioFFI.dll`, `Texture2DDecoderNative.dll`
 
 Set `HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH` to the adapter library path. Rust
 also forwards that path to the adapter before calling it so the C# P/Invoke
@@ -315,14 +296,12 @@ large part of total latency. Larger exports still benefit, but Rust-side
 post-processing reduces the visible backend delta.
 
 You can repeat a local native-backend run with the Rust benchmark helper. The
-helper defaults to the production NativeAOT FFI backend; pass
-`--backend cli,native` only when you explicitly want a legacy CLI comparison.
+helper defaults to the production NativeAOT FFI backend.
 
 ```bash
 cargo run --release --bin assetstudio_bench -- \
   --bundle /path/to/bundle.unityfs \
-  --cli-path /path/to/AssetStudioModCLI \
-  --native-library /path/to/HarukiAssetStudioNative.dylib \
+  --native-library /path/to/HarukiAssetStudioFFI.dylib \
   --warmup 1 \
   --iterations 5 \
   --expected-file music/jacket/jacket_s_712/jacket_s_712.png
@@ -330,7 +309,7 @@ cargo run --release --bin assetstudio_bench -- \
 
 The helper prints JSON with per-backend mean, median, min, max, exported file
 counts, native phase timings, skipped object-read details, and object-read plan
-diagnostics. It also calls `haruki_assetstudio_version` before native
+diagnostics. It also queries typed capabilities before native
 benchmarking so ABI loading failures are separated from export failures.
 
 For full region-rule benchmarks, use `asset_region_bench`. Keep the production

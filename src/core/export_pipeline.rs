@@ -629,7 +629,6 @@ pub async fn export_unity_asset_bundle_payloads(
     .ok_or_else(|| ExportPipelineError::AssetStudioNative {
         message: "tools.asset_studio_native_library_path is required".to_string(),
     })?;
-    warn_ignored_native_unitypy_mode(app_config);
     let native_unitypy_summary = run_assetstudio_native_unitypy_unpack(
         app_config,
         region,
@@ -658,14 +657,6 @@ pub async fn export_unity_asset_bundle_payloads(
 
 fn configured_path(path: Option<&str>) -> Option<&str> {
     path.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn warn_ignored_native_unitypy_mode(app_config: &AppConfig) {
-    if !app_config.tools.asset_studio_native_unitypy_mode {
-        warn!(
-            "tools.asset_studio_native_unitypy_mode=false is ignored; native backend now always uses object-level context_read_objects"
-        );
-    }
 }
 
 async fn run_assetstudio_native_unitypy_unpack(

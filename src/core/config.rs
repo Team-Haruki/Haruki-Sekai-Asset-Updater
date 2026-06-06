@@ -235,10 +235,6 @@ impl AppConfig {
             self.tools.asset_studio_native_image_format =
                 non_empty_option(normalize_asset_studio_native_image_format(&value)?);
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_UNITYPY_MODE") {
-            self.tools.asset_studio_native_unitypy_mode =
-                parse_bool_env("tools.asset_studio_native_unitypy_mode", &value)?;
-        }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_CLI_PARITY_MODE") {
             self.tools.asset_studio_native_cli_parity_mode =
                 parse_bool_env("tools.asset_studio_native_cli_parity_mode", &value)?;
@@ -852,7 +848,6 @@ pub struct ToolsConfig {
     pub asset_studio_native_read_batch_size: usize,
     pub asset_studio_native_image_format: Option<String>,
     pub asset_studio_native_read_kinds: BTreeMap<String, String>,
-    pub asset_studio_native_unitypy_mode: bool,
     pub asset_studio_native_cli_parity_mode: bool,
 }
 
@@ -969,7 +964,6 @@ impl Default for ToolsConfig {
             asset_studio_native_read_batch_size: 32,
             asset_studio_native_image_format: None,
             asset_studio_native_read_kinds: BTreeMap::new(),
-            asset_studio_native_unitypy_mode: true,
             asset_studio_native_cli_parity_mode: false,
         }
     }
@@ -1498,7 +1492,6 @@ regions:
         assert_eq!(tools.asset_studio_native_read_batch_size, 32);
         assert_eq!(tools.asset_studio_native_image_format, None);
         assert!(tools.asset_studio_native_read_kinds.is_empty());
-        assert!(tools.asset_studio_native_unitypy_mode);
         assert_eq!(AppConfig::default().concurrency.images, 4);
         assert_eq!(AppConfig::default().concurrency.media_encode, 12);
         assert!(!AppConfig::default().concurrency.auto_tune);

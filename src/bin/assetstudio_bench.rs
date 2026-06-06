@@ -56,8 +56,6 @@ struct Args {
     native_process_concurrency: Option<usize>,
     #[arg(long = "native-read-batch-size")]
     native_read_batch_size: Option<usize>,
-    #[arg(long = "native-unitypy-mode")]
-    native_unitypy_mode: bool,
     #[arg(long = "image-concurrency")]
     image_concurrency: Option<usize>,
     #[arg(long = "acb-concurrency")]
@@ -258,7 +256,6 @@ fn benchmark_config(args: &Args) -> AppConfig {
             asset_studio_native_image_format: ToolsConfig::default()
                 .asset_studio_native_image_format,
             asset_studio_native_read_kinds: ToolsConfig::default().asset_studio_native_read_kinds,
-            asset_studio_native_unitypy_mode: args.native_unitypy_mode,
             asset_studio_native_cli_parity_mode: false,
         },
         storage: StorageConfig {

@@ -26,19 +26,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils && \
     rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --single-branch --branch codex/native-aot-ffi https://github.com/Team-Haruki/AssetStudio.git
-RUN cd AssetStudio/AssetStudioCLI && \
-    dotnet publish -c Release -r linux-x64 -f net9.0 --self-contained true -o /app/assetstudio \
-    -p:PublishTrimmed=false \
-    -p:PublishSingleFile=true \
-    -p:IncludeNativeLibrariesForSelfExtract=true
 # Force dependency projects away from their net472 targets during NativeAOT publish.
 RUN cd AssetStudio/AssetStudioFFI && \
     dotnet publish -c Release -r linux-x64 -f net9.0 --self-contained true -o /app/assetstudio-native \
     -p:TargetFrameworks=net9.0 \
     -p:PublishAot=true \
-    -p:InvariantGlobalization=false && \
-    cp /app/assetstudio-native/HarukiAssetStudioFFI.so /app/assetstudio/ && \
-    cp /app/assetstudio-native/libTexture2DDecoderNative.so /app/assetstudio/
+    -p:InvariantGlobalization=false
 
 FROM mwader/static-ffmpeg:8.1.1 AS ffmpeg-builder
 
@@ -62,23 +55,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
 COPY --from=builder /app/target/release/assetstudio_native_worker /app/assetstudio_native_worker
-COPY --from=assetstudio-builder /app/assetstudio /app/assetstudio
+COPY --from=assetstudio-builder /app/assetstudio-native /app/assetstudio
 COPY --from=ffmpeg-builder /ffmpeg /usr/local/bin/ffmpeg
-RUN ln -sf /app/assetstudio/AssetStudioModCLI /app/assetstudio/AssetStudioCLI && \
-    mkdir -p logs
+RUN mkdir -p logs
 
 ENV TZ=Asia/Shanghai \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
     HARUKI_MEDIA_BACKEND=ffi \
-    HARUKI_ASSET_STUDIO_BACKEND=native \
-    HARUKI_ASSET_STUDIO_CLI_PATH=/app/assetstudio/AssetStudioCLI \
     HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so \
     HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/app/assetstudio_native_worker \
     HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE=pool \
     HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=3 \
     HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS=256 \
     HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE=32 \
-    HARUKI_ASSET_STUDIO_NATIVE_UNITYPY_MODE=true \
     HARUKI_ASSET_STUDIO_NATIVE_MAX_EXPORT_TASKS=4 \
     HARUKI_CONFIG_PATH=/app/haruki-asset-configs.yaml
 

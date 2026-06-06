@@ -44,9 +44,11 @@ APIs:
 - `context_read_objects`
 - `context_close`
 
-The ABI still uses JSON for the control plane and a binary payload frame for
-object data. This kept the interface stable while allowing Rust to avoid
-cross-language struct layout problems.
+The NativeAOT boundary now uses typed C structs. Rust validates the native ABI
+layout at library load time and uses paged context APIs for object metadata and
+batched object reads. The Rust worker IPC is still length-prefixed JSON for
+operation/result frames, but it no longer forwards NativeAOT JSON requests or
+responses.
 
 Context open can omit the full asset list. Rust then pages metadata through
 `context_list_objects`, which avoids oversized response frames for large player
@@ -54,7 +56,7 @@ resource files.
 
 Batch object reads are the production path. `context_read_objects` returns:
 
-- response JSON
+- typed response records
 - one binary payload bundle
 - per-batch diagnostics such as worker id, call sequence, object count, payload
   bytes, failed object count, read payload time, and managed phase p50/p95 data
@@ -162,8 +164,6 @@ keeps the FFmpeg error path portable across macOS, Linux x64, and Linux arm64.
 
 ## Current Caveats
 
-- NativeAOT still uses JSON for control messages; binary payloads are already
-  framed separately, but the control ABI is not a full binary struct ABI.
 - Direct NativeAOT concurrency is not the production default.
 - CLI paths are retained for explicit comparison and rollback testing.
 - AssetStudio normal `dotnet build` may still trip platform-specific legacy FBX

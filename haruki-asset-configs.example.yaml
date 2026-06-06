@@ -51,7 +51,6 @@ tools:
     AudioClip: audio
     Animator: fbx
     all: typetree_json
-  asset_studio_native_unitypy_mode: true # compatibility only; native always uses object-level reads
 
 concurrency:
   auto_tune: false # when true, values below are treated as caps and scaled to CPU count
