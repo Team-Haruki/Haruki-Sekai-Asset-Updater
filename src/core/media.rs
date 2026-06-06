@@ -164,28 +164,7 @@ pub async fn convert_m2v_bytes_to_mp4_with_backend(
         "m2v-bytes->mp4",
         || media_ffi::convert_m2v_bytes_to_mp4(m2v_bytes, mp4_file, frame_rate),
         || async {
-            let parent = mp4_file.parent().unwrap_or_else(|| Path::new("."));
-            let mut temp_file = tempfile::Builder::new()
-                .suffix(".m2v")
-                .tempfile_in(parent)
-                .map_err(|source| ExportPipelineError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-            std::io::Write::write_all(&mut temp_file, m2v_bytes).map_err(|source| {
-                ExportPipelineError::Io {
-                    path: temp_file.path().to_path_buf(),
-                    source,
-                }
-            })?;
-            let temp_path =
-                temp_file
-                    .into_temp_path()
-                    .keep()
-                    .map_err(|error| ExportPipelineError::Io {
-                        path: error.path.to_path_buf(),
-                        source: error.error,
-                    })?;
+            let temp_path = write_cli_input_temp_file(".m2v", m2v_bytes)?;
             convert_m2v_to_mp4_cli(&temp_path, mp4_file, false, ffmpeg_path, frame_rate, retry)
                 .await?;
             remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
@@ -332,27 +311,7 @@ fn convert_wav_bytes_to_mp3_cli(
     ffmpeg_path: &str,
     retry: &RetryConfig,
 ) -> Result<(), ExportPipelineError> {
-    let parent = mp3_file.parent().unwrap_or_else(|| Path::new("."));
-    let mut temp_file = tempfile::Builder::new()
-        .suffix(".wav")
-        .tempfile_in(parent)
-        .map_err(|source| ExportPipelineError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    std::io::Write::write_all(&mut temp_file, wav_bytes).map_err(|source| {
-        ExportPipelineError::Io {
-            path: temp_file.path().to_path_buf(),
-            source,
-        }
-    })?;
-    let temp_path = temp_file
-        .into_temp_path()
-        .keep()
-        .map_err(|error| ExportPipelineError::Io {
-            path: error.path.to_path_buf(),
-            source: error.error,
-        })?;
+    let temp_path = write_cli_input_temp_file(".wav", wav_bytes)?;
     convert_wav_to_mp3_cli(&temp_path, mp3_file, ffmpeg_path, retry)?;
     remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
         path: temp_path,
@@ -452,32 +411,37 @@ fn convert_wav_bytes_to_flac_cli(
     ffmpeg_path: &str,
     retry: &RetryConfig,
 ) -> Result<(), ExportPipelineError> {
-    let parent = flac_file.parent().unwrap_or_else(|| Path::new("."));
-    let mut temp_file = tempfile::Builder::new()
-        .suffix(".wav")
-        .tempfile_in(parent)
-        .map_err(|source| ExportPipelineError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
-    std::io::Write::write_all(&mut temp_file, wav_bytes).map_err(|source| {
-        ExportPipelineError::Io {
-            path: temp_file.path().to_path_buf(),
-            source,
-        }
-    })?;
-    let temp_path = temp_file
-        .into_temp_path()
-        .keep()
-        .map_err(|error| ExportPipelineError::Io {
-            path: error.path.to_path_buf(),
-            source: error.error,
-        })?;
+    let temp_path = write_cli_input_temp_file(".wav", wav_bytes)?;
     convert_wav_to_flac_cli(&temp_path, flac_file, ffmpeg_path, retry)?;
     remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
         path: temp_path,
         source,
     })
+}
+
+fn write_cli_input_temp_file(
+    suffix: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, ExportPipelineError> {
+    let temp_root = std::env::temp_dir();
+    let mut temp_file = tempfile::Builder::new()
+        .suffix(suffix)
+        .tempfile_in(&temp_root)
+        .map_err(|source| ExportPipelineError::Io {
+            path: temp_root.clone(),
+            source,
+        })?;
+    std::io::Write::write_all(&mut temp_file, bytes).map_err(|source| ExportPipelineError::Io {
+        path: temp_file.path().to_path_buf(),
+        source,
+    })?;
+    temp_file
+        .into_temp_path()
+        .keep()
+        .map_err(|error| ExportPipelineError::Io {
+            path: error.path.to_path_buf(),
+            source: error.error,
+        })
 }
 
 async fn run_media_backend<Ffi, Cli, CliFuture>(
@@ -728,13 +692,15 @@ mod media_ffi {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
     #[cfg(feature = "media-ffi")]
     use super::convert_wav_bytes_to_mp3_with_backend;
     use super::{
-        convert_m2v_to_mp4, convert_usm_to_mp4, convert_usm_to_mp4_with_backend, FrameRate,
+        convert_m2v_bytes_to_mp4_with_backend, convert_m2v_to_mp4, convert_usm_to_mp4,
+        convert_usm_to_mp4_with_backend, FrameRate,
     };
     use crate::core::config::MediaBackend;
     use crate::core::config::RetryConfig;
@@ -921,6 +887,53 @@ mod tests {
             .unwrap();
 
         assert!(output.exists());
+    }
+
+    #[test]
+    fn cli_bytes_input_uses_system_temp_dir() {
+        let dir = tempdir().unwrap();
+        let output_dir = dir.path().join("exports");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("sample.mp4");
+        let script_path = dir.path().join("fake_ffmpeg.sh");
+        let input_log = dir.path().join("input_path.txt");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nset -eu\ninput=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-i\" ]; then input=\"$arg\"; fi\n  out=\"$arg\"\n  prev=\"$arg\"\ndone\nprintf '%s' \"$input\" > \"{}\"\n: > \"$out\"\n",
+                input_log.display()
+            ),
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(convert_m2v_bytes_to_mp4_with_backend(
+                b"dummy m2v",
+                &output,
+                &script_path.to_string_lossy(),
+                MediaBackend::Cli,
+                None,
+                &RetryConfig {
+                    attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+            ))
+            .unwrap();
+
+        let temp_input = PathBuf::from(fs::read_to_string(&input_log).unwrap());
+        assert!(output.exists());
+        assert!(!temp_input.exists());
+        assert!(!temp_input.starts_with(&output_dir));
     }
 
     #[cfg(feature = "media-ffi")]
