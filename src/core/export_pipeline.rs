@@ -6591,10 +6591,14 @@ async fn handle_usm_files(
         return Ok(output);
     }
 
+    let usm_inputs = prepare_usm_processing_inputs(usm_files)?;
+    let usm_files = usm_inputs.files;
+
     if scoped_post_process {
-        output
-            .phase_ms
-            .insert("media_scheduler.usm_merged_count".to_string(), 0);
+        output.phase_ms.insert(
+            "media_scheduler.usm_merged_count".to_string(),
+            usm_inputs.merged_count as u64,
+        );
         output.phase_ms.insert(
             "media_scheduler.usm_configured_concurrency".to_string(),
             usm_concurrency.max(1) as u64,
@@ -6657,14 +6661,15 @@ async fn handle_usm_files(
     }
 
     let usm_input = if usm_files.len() == 1 {
-        output
-            .phase_ms
-            .insert("media_scheduler.usm_merged_count".to_string(), 0);
+        output.phase_ms.insert(
+            "media_scheduler.usm_merged_count".to_string(),
+            usm_inputs.merged_count as u64,
+        );
         usm_files[0].clone()
     } else {
         output.phase_ms.insert(
             "media_scheduler.usm_merged_count".to_string(),
-            usm_files.len() as u64,
+            (usm_inputs.merged_count + usm_files.len()) as u64,
         );
         merge_usm_files(export_path, &usm_files)?
     };
@@ -8167,6 +8172,126 @@ fn merge_usm_files(dir: &Path, usm_files: &[PathBuf]) -> Result<PathBuf, ExportP
     Ok(merged_file)
 }
 
+#[derive(Debug, Default)]
+struct UsmProcessingInputs {
+    files: Vec<PathBuf>,
+    merged_count: usize,
+}
+
+fn prepare_usm_processing_inputs(
+    usm_files: Vec<PathBuf>,
+) -> Result<UsmProcessingInputs, ExportPipelineError> {
+    if usm_files.len() <= 1 {
+        return Ok(UsmProcessingInputs {
+            files: usm_files,
+            merged_count: 0,
+        });
+    }
+
+    let mut indexed = Vec::with_capacity(usm_files.len());
+    for (index, path) in usm_files.iter().enumerate() {
+        indexed.push((usm_segment_key(path), index, path.clone()));
+    }
+
+    let mut groups: BTreeMap<Option<(PathBuf, String)>, Vec<(usize, usize, PathBuf)>> =
+        BTreeMap::new();
+    for (key, index, path) in indexed {
+        if let Some((dir, stem, segment)) = key {
+            groups
+                .entry(Some((dir, stem)))
+                .or_default()
+                .push((segment, index, path));
+        } else {
+            groups
+                .entry(None)
+                .or_default()
+                .push((usize::MAX, index, path));
+        }
+    }
+
+    let mut prepared = Vec::new();
+    let mut merged_count = 0;
+    for (key, mut group) in groups {
+        group.sort_by_key(|(segment, index, _)| (*segment, *index));
+        if let Some((dir, stem)) = key {
+            let is_contiguous_segmented_usm = group.len() > 1
+                && group
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (segment, _, _))| *segment == index + 1);
+            if is_contiguous_segmented_usm {
+                let sources = group
+                    .into_iter()
+                    .map(|(_, _, path)| path)
+                    .collect::<Vec<_>>();
+                let merged = merge_usm_segment_files(&dir, &stem, &sources)?;
+                merged_count += sources.len();
+                prepared.push(merged);
+                continue;
+            }
+        }
+
+        prepared.extend(group.into_iter().map(|(_, _, path)| path));
+    }
+
+    prepared.sort();
+    Ok(UsmProcessingInputs {
+        files: prepared,
+        merged_count,
+    })
+}
+
+fn usm_segment_key(path: &Path) -> Option<(PathBuf, String, usize)> {
+    let stem = path.file_stem()?.to_str()?;
+    let (prefix, segment) = stem.rsplit_once('-')?;
+    if prefix.is_empty() || segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let segment = segment.parse::<usize>().ok()?;
+    if segment == 0 {
+        return None;
+    }
+    Some((
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        prefix.to_string(),
+        segment,
+    ))
+}
+
+fn merge_usm_segment_files(
+    dir: &Path,
+    stem: &str,
+    usm_files: &[PathBuf],
+) -> Result<PathBuf, ExportPipelineError> {
+    let merged_file = dir.join(format!("{stem}.usm"));
+    let mut target =
+        std::fs::File::create(&merged_file).map_err(|source| ExportPipelineError::Io {
+            path: merged_file.clone(),
+            source,
+        })?;
+
+    for source_path in usm_files {
+        if *source_path == merged_file {
+            continue;
+        }
+        let mut source =
+            std::fs::File::open(source_path).map_err(|source| ExportPipelineError::Io {
+                path: source_path.clone(),
+                source,
+            })?;
+        std::io::copy(&mut source, &mut target).map_err(|source| ExportPipelineError::Io {
+            path: source_path.clone(),
+            source,
+        })?;
+        remove_export_file_if_exists(source_path)?;
+    }
+
+    Ok(merged_file)
+}
+
 fn scan_all_files(dir: &Path) -> Result<Vec<PathBuf>, ExportPipelineError> {
     let mut files = Vec::new();
     walk(dir, &mut |path| files.push(path.to_path_buf()))?;
@@ -8278,7 +8403,7 @@ mod tests {
         parse_assetstudio_ffi_object_read_batch_worker_output_recoverable,
         parse_assetstudio_ffi_object_read_worker_output_recoverable, parse_payload_bundle,
         parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
-        process_usm_file, query_assetstudio_ffi_version,
+        prepare_usm_processing_inputs, process_usm_file, query_assetstudio_ffi_version,
         record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
         scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
         text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
@@ -8997,6 +9122,44 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         assert_eq!(fs::read(&merged).unwrap(), b"ABC");
         assert!(!a.exists());
         assert!(!b.exists());
+    }
+
+    #[test]
+    fn prepare_usm_processing_inputs_merges_numbered_segments() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("traffic_jam-001.usm");
+        let b = dir.path().join("traffic_jam-002.usm");
+        let c = dir.path().join("traffic_jam-003.usm");
+        fs::write(&a, b"CRI").unwrap();
+        fs::write(&b, b"DPA").unwrap();
+        fs::write(&c, b"YLD").unwrap();
+
+        let prepared =
+            prepare_usm_processing_inputs(vec![c.clone(), a.clone(), b.clone()]).unwrap();
+
+        let merged = dir.path().join("traffic_jam.usm");
+        assert_eq!(prepared.files, vec![merged.clone()]);
+        assert_eq!(prepared.merged_count, 3);
+        assert_eq!(fs::read(&merged).unwrap(), b"CRIDPAYLD");
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(!c.exists());
+    }
+
+    #[test]
+    fn prepare_usm_processing_inputs_keeps_non_contiguous_segments() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("traffic_jam-001.usm");
+        let c = dir.path().join("traffic_jam-003.usm");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&c, b"C").unwrap();
+
+        let prepared = prepare_usm_processing_inputs(vec![c.clone(), a.clone()]).unwrap();
+
+        assert_eq!(prepared.files, vec![a.clone(), c.clone()]);
+        assert_eq!(prepared.merged_count, 0);
+        assert!(a.exists());
+        assert!(c.exists());
     }
 
     #[test]
