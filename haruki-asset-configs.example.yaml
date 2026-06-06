@@ -155,15 +155,13 @@ regions:
       hca:
         decode: true
       images:
-        formats: ["png"] # png | jpg | webp; legacy convert_to_webp/remove_png is still accepted
+        formats: ["png"] # png | jpg | webp
       video:
         convert_to_mp4: true
         direct_usm_to_mp4_with_ffmpeg: true
         remove_m2v: true
       audio:
-        convert_to_mp3: true
-        convert_to_flac: false
-        remove_wav: true
+        formats: ["mp3"] # wav | flac | mp3
     upload:
       enabled: false
       providers: []
@@ -208,15 +206,13 @@ regions:
       hca:
         decode: true
       images:
-        formats: ["png"] # png | jpg | webp; legacy convert_to_webp/remove_png is still accepted
+        formats: ["png"] # png | jpg | webp
       video:
         convert_to_mp4: true
         direct_usm_to_mp4_with_ffmpeg: false
         remove_m2v: true
       audio:
-        convert_to_mp3: true
-        convert_to_flac: false
-        remove_wav: true
+        formats: ["mp3"] # wav | flac | mp3
     upload:
       enabled: false
       providers: []

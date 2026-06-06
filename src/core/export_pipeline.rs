@@ -27,8 +27,9 @@ use tracing::{debug, info, warn};
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
 use crate::core::config::{
-    AppConfig, AssetStudioFfiCallMode, ImageBackendConfig, ImageOutputFormat, ImagePngCompression,
-    MediaBackend, RegionConfig, ResourcesConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
+    AppConfig, AssetStudioFfiCallMode, AudioOutputFormat, ImageBackendConfig, ImageOutputFormat,
+    ImagePngCompression, MediaBackend, RegionConfig, ResourcesConfig,
+    DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
 };
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
@@ -7648,6 +7649,33 @@ struct HcaTrackProcessOptions<'a> {
     cpu_budget: usize,
 }
 
+fn record_hca_media_encode_acquire(
+    phase_ms: &mut HashMap<String, u64>,
+    encode_slot: &MediaEncodeAcquire,
+) {
+    add_phase_ms(
+        phase_ms,
+        "post_process.hca.media_pool_wait",
+        encode_slot.wait_ms,
+    );
+    add_phase_ms(
+        phase_ms,
+        "media_scheduler.media_encode_wait",
+        encode_slot.wait_ms,
+    );
+    record_max_phase_ms(
+        phase_ms,
+        "media_scheduler.media_encode_active_peak",
+        encode_slot.active as u64,
+    );
+    add_phase_ms(
+        phase_ms,
+        "media_scheduler.cpu_budget_wait",
+        encode_slot.cpu_budget_wait_ms,
+    );
+    add_phase_ms(phase_ms, "cpu_budget.wait", encode_slot.cpu_budget_wait_ms);
+}
+
 fn process_hca_track(
     track: cridecoder::ExtractedAcbTrack,
     options: &HcaTrackProcessOptions<'_>,
@@ -7670,10 +7698,17 @@ fn process_hca_track(
         return Ok(output);
     }
 
+    let audio_formats = options.region.export.audio.output_formats();
+    if audio_formats.is_empty() {
+        return Ok(output);
+    }
+    let keep_wav = audio_formats.contains(&AudioOutputFormat::Wav);
+    let encode_mp3 = audio_formats.contains(&AudioOutputFormat::Mp3);
+    let encode_flac = audio_formats.contains(&AudioOutputFormat::Flac);
+    let needs_wav_bytes = (keep_wav && (encode_mp3 || encode_flac)) || (encode_mp3 && encode_flac);
     let wav_file = options.output_dir.join(format!("{}.wav", track.name));
-    let needs_wav_bytes =
-        options.region.export.audio.convert_to_mp3 || options.region.export.audio.convert_to_flac;
-    if !needs_wav_bytes && !options.region.export.audio.remove_wav {
+
+    if keep_wav && !encode_mp3 && !encode_flac {
         let cpu_slot = acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
         add_phase_ms(
             &mut output.phase_ms,
@@ -7692,13 +7727,12 @@ fn process_hca_track(
         output.generated_files.push(wav_file);
         return Ok(output);
     }
-    if !needs_wav_bytes {
+
+    if !encode_mp3 && !encode_flac {
         return Ok(output);
     }
 
-    let wav_bytes = if options.region.export.audio.remove_wav {
-        None
-    } else {
+    let wav_bytes = if needs_wav_bytes {
         let cpu_slot = acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
         add_phase_ms(
             &mut output.phase_ms,
@@ -7715,49 +7749,29 @@ fn process_hca_track(
             phase_started,
         );
 
-        let phase_started = Instant::now();
-        std::fs::write(&wav_file, &wav_bytes).map_err(|source| ExportPipelineError::Io {
-            path: wav_file.clone(),
-            source,
-        })?;
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.write_wav",
-            phase_started,
-        );
-        output.generated_files.push(wav_file.clone());
+        if keep_wav {
+            let phase_started = Instant::now();
+            std::fs::write(&wav_file, &wav_bytes).map_err(|source| ExportPipelineError::Io {
+                path: wav_file.clone(),
+                source,
+            })?;
+            add_elapsed_phase_ms(
+                &mut output.phase_ms,
+                "post_process.hca.write_wav",
+                phase_started,
+            );
+            output.generated_files.push(wav_file.clone());
+        }
         Some(wav_bytes)
+    } else {
+        None
     };
 
-    if options.region.export.audio.convert_to_mp3 {
+    if encode_mp3 {
         let mp3 = options.output_dir.join(format!("{}.mp3", track.name));
         let encode_slot =
             acquire_media_encode_permit(options.media_encode_concurrency, options.cpu_budget)?;
-        add_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.media_pool_wait",
-            encode_slot.wait_ms,
-        );
-        add_phase_ms(
-            &mut output.phase_ms,
-            "media_scheduler.media_encode_wait",
-            encode_slot.wait_ms,
-        );
-        record_max_phase_ms(
-            &mut output.phase_ms,
-            "media_scheduler.media_encode_active_peak",
-            encode_slot.active as u64,
-        );
-        add_phase_ms(
-            &mut output.phase_ms,
-            "media_scheduler.cpu_budget_wait",
-            encode_slot.cpu_budget_wait_ms,
-        );
-        add_phase_ms(
-            &mut output.phase_ms,
-            "cpu_budget.wait",
-            encode_slot.cpu_budget_wait_ms,
-        );
+        record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
         let phase_started = Instant::now();
         if let Some(wav_bytes) = wav_bytes.as_deref() {
             convert_wav_bytes_to_mp3_with_backend(
@@ -7784,35 +7798,13 @@ fn process_hca_track(
             phase_started,
         );
         output.generated_files.push(mp3);
-    } else if options.region.export.audio.convert_to_flac {
+    }
+
+    if encode_flac {
         let flac = options.output_dir.join(format!("{}.flac", track.name));
         let encode_slot =
             acquire_media_encode_permit(options.media_encode_concurrency, options.cpu_budget)?;
-        add_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.media_pool_wait",
-            encode_slot.wait_ms,
-        );
-        add_phase_ms(
-            &mut output.phase_ms,
-            "media_scheduler.media_encode_wait",
-            encode_slot.wait_ms,
-        );
-        record_max_phase_ms(
-            &mut output.phase_ms,
-            "media_scheduler.media_encode_active_peak",
-            encode_slot.active as u64,
-        );
-        add_phase_ms(
-            &mut output.phase_ms,
-            "media_scheduler.cpu_budget_wait",
-            encode_slot.cpu_budget_wait_ms,
-        );
-        add_phase_ms(
-            &mut output.phase_ms,
-            "cpu_budget.wait",
-            encode_slot.cpu_budget_wait_ms,
-        );
+        record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
         let phase_started = Instant::now();
         if let Some(wav_bytes) = wav_bytes.as_deref() {
             convert_wav_bytes_to_flac_with_backend(
@@ -9254,9 +9246,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             },
             export: RegionExportConfig {
                 audio: crate::core::config::AudioExportConfig {
-                    convert_to_mp3: false,
-                    convert_to_flac: false,
-                    remove_wav: false,
+                    formats: vec![crate::core::config::AudioOutputFormat::Wav],
                 },
                 video: crate::core::config::VideoExportConfig {
                     convert_to_mp4: false,
@@ -9684,8 +9674,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         image.save(&png).unwrap();
 
         let (_config, mut region) = processing_config();
-        region.export.images.convert_to_webp = true;
-        region.export.images.remove_png = true;
+        region.export.images.formats = vec![ImageOutputFormat::Webp];
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let generated = runtime
@@ -9948,8 +9937,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             .unwrap();
         let payload = fs::read(source).unwrap();
         let (_config, mut region) = processing_config();
-        region.export.images.convert_to_webp = true;
-        region.export.images.remove_png = true;
+        region.export.images.formats = vec![ImageOutputFormat::Webp];
         let target = dir.path().join("normal.png");
         let webp = dir.path().join("normal.webp");
 

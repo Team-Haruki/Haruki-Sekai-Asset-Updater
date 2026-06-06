@@ -172,6 +172,7 @@ impl AppConfig {
         validate_image_backend(&self.backends.image)?;
         for (region_name, region) in &self.regions {
             validate_image_export_config(region_name, &region.export.images)?;
+            validate_audio_export_config(region_name, &region.export.audio)?;
         }
         validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
         warn_legacy_backend_options(&self.backends.media);
@@ -734,7 +735,32 @@ fn validate_image_export_config(
     Ok(())
 }
 
+fn validate_audio_export_config(
+    region_name: &str,
+    audio: &AudioExportConfig,
+) -> Result<(), ConfigError> {
+    let formats = audio.output_formats();
+    if formats.is_empty() {
+        return Err(ConfigError::InvalidValue {
+            field: format!("regions.{region_name}.export.audio.formats"),
+            value: "[]".to_string(),
+            expected: "at least one of wav, flac, or mp3".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn dedupe_image_formats(formats: Vec<ImageOutputFormat>) -> Vec<ImageOutputFormat> {
+    let mut output = Vec::new();
+    for format in formats {
+        if !output.contains(&format) {
+            output.push(format);
+        }
+    }
+    output
+}
+
+fn dedupe_audio_formats(formats: Vec<AudioOutputFormat>) -> Vec<AudioOutputFormat> {
     let mut output = Vec::new();
     for format in formats {
         if !output.contains(&format) {
@@ -1029,6 +1055,31 @@ impl FromStr for ImageOutputFormat {
                 field: "export.images.formats".to_string(),
                 value: other.to_string(),
                 expected: "png, jpg, or webp".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioOutputFormat {
+    Wav,
+    Flac,
+    Mp3,
+}
+
+impl FromStr for AudioOutputFormat {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "wav" => Ok(Self::Wav),
+            "flac" => Ok(Self::Flac),
+            "mp3" => Ok(Self::Mp3),
+            other => Err(ConfigError::InvalidValue {
+                field: "export.audio.formats".to_string(),
+                value: other.to_string(),
+                expected: "wav, flac, or mp3".to_string(),
             }),
         }
     }
@@ -1601,28 +1652,23 @@ impl Default for HcaExportConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ImageExportConfig {
     pub formats: Vec<ImageOutputFormat>,
-    /// Legacy v3 compatibility. Prefer `formats`.
-    pub convert_to_webp: bool,
-    /// Legacy v3 compatibility. Prefer `formats`.
-    pub remove_png: bool,
+}
+
+impl Default for ImageExportConfig {
+    fn default() -> Self {
+        Self {
+            formats: vec![ImageOutputFormat::Png],
+        }
+    }
 }
 
 impl ImageExportConfig {
     pub fn output_formats(&self) -> Vec<ImageOutputFormat> {
-        if !self.formats.is_empty() {
-            return dedupe_image_formats(self.formats.clone());
-        }
-        if self.convert_to_webp && self.remove_png {
-            vec![ImageOutputFormat::Webp]
-        } else if self.convert_to_webp {
-            vec![ImageOutputFormat::Png, ImageOutputFormat::Webp]
-        } else {
-            vec![ImageOutputFormat::Png]
-        }
+        dedupe_image_formats(self.formats.clone())
     }
 }
 
@@ -1645,20 +1691,22 @@ impl Default for VideoExportConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AudioExportConfig {
-    pub convert_to_mp3: bool,
-    pub convert_to_flac: bool,
-    pub remove_wav: bool,
+    pub formats: Vec<AudioOutputFormat>,
 }
 
 impl Default for AudioExportConfig {
     fn default() -> Self {
         Self {
-            convert_to_mp3: true,
-            convert_to_flac: false,
-            remove_wav: true,
+            formats: vec![AudioOutputFormat::Mp3],
         }
+    }
+}
+
+impl AudioExportConfig {
+    pub fn output_formats(&self) -> Vec<AudioOutputFormat> {
+        dedupe_audio_formats(self.formats.clone())
     }
 }
 
@@ -1845,27 +1893,55 @@ asset_studio:
     }
 
     #[test]
-    fn image_export_formats_override_legacy_webp_flags() {
+    fn image_export_formats_default_to_png_and_dedupe() {
+        assert_eq!(
+            ImageExportConfig::default().output_formats(),
+            vec![ImageOutputFormat::Png]
+        );
+
         let images = ImageExportConfig {
-            formats: vec![ImageOutputFormat::Jpg, ImageOutputFormat::Webp],
-            convert_to_webp: false,
-            remove_png: false,
+            formats: vec![
+                ImageOutputFormat::Jpg,
+                ImageOutputFormat::Webp,
+                ImageOutputFormat::Jpg,
+            ],
         };
 
         assert_eq!(
             images.output_formats(),
             vec![ImageOutputFormat::Jpg, ImageOutputFormat::Webp]
         );
+    }
 
-        let legacy_webp_only = ImageExportConfig {
-            convert_to_webp: true,
-            remove_png: true,
-            ..ImageExportConfig::default()
+    #[test]
+    fn audio_export_formats_default_to_mp3_and_dedupe() {
+        assert_eq!(
+            AudioExportConfig::default().output_formats(),
+            vec![AudioOutputFormat::Mp3]
+        );
+
+        let audio = AudioExportConfig {
+            formats: vec![
+                AudioOutputFormat::Wav,
+                AudioOutputFormat::Flac,
+                AudioOutputFormat::Wav,
+                AudioOutputFormat::Mp3,
+            ],
         };
         assert_eq!(
-            legacy_webp_only.output_formats(),
-            vec![ImageOutputFormat::Webp]
+            audio.output_formats(),
+            vec![
+                AudioOutputFormat::Wav,
+                AudioOutputFormat::Flac,
+                AudioOutputFormat::Mp3
+            ]
         );
+    }
+
+    #[test]
+    fn rejects_legacy_runtime_export_format_fields() {
+        assert!(yaml_serde::from_str::<ImageExportConfig>("convert_to_webp: true").is_err());
+        assert!(yaml_serde::from_str::<AudioExportConfig>("convert_to_mp3: true").is_err());
     }
 
     #[test]

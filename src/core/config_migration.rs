@@ -10,7 +10,7 @@ pub fn migrate_legacy_config_shape(root: &mut Value) {
         Value::Number(3.into()),
     );
     migrate_legacy_tools_config(map);
-    migrate_image_config(map);
+    migrate_export_config(map);
     migrate_legacy_resource_config(map);
 }
 
@@ -142,7 +142,7 @@ fn migrate_legacy_tools_config(root: &mut Mapping) {
     }
 }
 
-fn migrate_image_config(root: &mut Mapping) {
+fn migrate_export_config(root: &mut Mapping) {
     let backends = mapping_child(root, "backends");
     let image_backend = mapping_child(backends, "image");
     insert_default(image_backend, "backend", Value::String("rust".to_string()));
@@ -162,32 +162,74 @@ fn migrate_image_config(root: &mut Mapping) {
             let export = mapping_child(region, "export");
             let images = mapping_child(export, "images");
             migrate_image_export_formats(images);
+            let audio = mapping_child(export, "audio");
+            migrate_audio_export_formats(audio);
         }
     }
 }
 
 fn migrate_image_export_formats(images: &mut Mapping) {
-    if images.contains_key(Value::String("formats".to_string())) {
-        return;
-    }
     let convert_to_webp = bool_mapping_value(images, "convert_to_webp");
     let remove_png = bool_mapping_value(images, "remove_png");
-    let formats = if convert_to_webp && remove_png {
-        vec![Value::String("webp".to_string())]
-    } else if convert_to_webp {
-        vec![
-            Value::String("png".to_string()),
-            Value::String("webp".to_string()),
-        ]
-    } else {
-        vec![Value::String("png".to_string())]
-    };
-    images.insert(
-        Value::String("formats".to_string()),
-        Value::Sequence(formats),
-    );
+    if !images.contains_key(Value::String("formats".to_string())) {
+        let formats = if convert_to_webp && remove_png {
+            vec![Value::String("webp".to_string())]
+        } else if convert_to_webp {
+            vec![
+                Value::String("png".to_string()),
+                Value::String("webp".to_string()),
+            ]
+        } else {
+            vec![Value::String("png".to_string())]
+        };
+        images.insert(
+            Value::String("formats".to_string()),
+            Value::Sequence(formats),
+        );
+    }
     images.remove(Value::String("convert_to_webp".to_string()));
     images.remove(Value::String("remove_png".to_string()));
+}
+
+fn migrate_audio_export_formats(audio: &mut Mapping) {
+    if !audio.contains_key(Value::String("formats".to_string())) {
+        let has_legacy_audio = audio.contains_key(Value::String("remove_wav".to_string()))
+            || audio.contains_key(Value::String("convert_to_flac".to_string()))
+            || audio.contains_key(Value::String("convert_wav_to_flac".to_string()))
+            || audio.contains_key(Value::String("convert_to_mp3".to_string()))
+            || audio.contains_key(Value::String("convert_audio_to_mp3".to_string()));
+        if !has_legacy_audio {
+            audio.insert(
+                Value::String("formats".to_string()),
+                Value::Sequence(vec![Value::String("mp3".to_string())]),
+            );
+        } else {
+            let keep_wav = !bool_mapping_value(audio, "remove_wav");
+            let convert_to_flac = bool_mapping_value(audio, "convert_to_flac")
+                || bool_mapping_value(audio, "convert_wav_to_flac");
+            let convert_to_mp3 = bool_mapping_value(audio, "convert_to_mp3")
+                || bool_mapping_value(audio, "convert_audio_to_mp3");
+            let mut formats = Vec::new();
+            if keep_wav {
+                formats.push(Value::String("wav".to_string()));
+            }
+            if convert_to_flac {
+                formats.push(Value::String("flac".to_string()));
+            }
+            if convert_to_mp3 || formats.is_empty() {
+                formats.push(Value::String("mp3".to_string()));
+            }
+            audio.insert(
+                Value::String("formats".to_string()),
+                Value::Sequence(formats),
+            );
+        }
+    }
+    audio.remove(Value::String("convert_to_mp3".to_string()));
+    audio.remove(Value::String("convert_to_flac".to_string()));
+    audio.remove(Value::String("convert_audio_to_mp3".to_string()));
+    audio.remove(Value::String("convert_wav_to_flac".to_string()));
+    audio.remove(Value::String("remove_wav".to_string()));
 }
 
 fn migrate_legacy_resource_config(root: &mut Mapping) {
@@ -321,6 +363,10 @@ regions:
       images:
         convert_to_webp: true
         remove_png: true
+      audio:
+        convert_audio_to_mp3: true
+        convert_wav_to_flac: true
+        remove_wav: false
 "#,
         )
         .unwrap();
@@ -342,8 +388,14 @@ regions:
         assert!(migrated.contains("png_compression: fast"));
         assert!(migrated.contains("formats:"));
         assert!(migrated.contains("- webp"));
+        assert!(migrated.contains("- wav"));
+        assert!(migrated.contains("- flac"));
+        assert!(migrated.contains("- mp3"));
         assert!(!migrated.contains("convert_to_webp"));
         assert!(!migrated.contains("remove_png"));
+        assert!(!migrated.contains("convert_audio_to_mp3"));
+        assert!(!migrated.contains("convert_wav_to_flac"));
+        assert!(!migrated.contains("remove_wav"));
         assert!(migrated.contains("resources:"));
         assert!(migrated.contains("budget_ratio: 0.5"));
         assert!(migrated.contains("sample_ms: 500"));

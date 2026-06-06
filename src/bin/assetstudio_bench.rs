@@ -3,10 +3,10 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioBackendConfig, AssetStudioFfiCallMode, BackendsConfig, ChartHashConfig,
-    ExecutionConfig, GitSyncConfig, ImageExportConfig, MediaBackendConfig, RegionConfig,
-    RegionExportConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
-    RegionUploadConfig, RetryConfig, StorageConfig,
+    AppConfig, AssetStudioBackendConfig, AssetStudioFfiCallMode, AudioOutputFormat, BackendsConfig,
+    ChartHashConfig, ExecutionConfig, GitSyncConfig, ImageExportConfig, ImageOutputFormat,
+    MediaBackendConfig, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
+    RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::{
     extract_unity_asset_bundle, query_assetstudio_ffi_version, query_assetstudio_ffi_version_worker,
@@ -320,14 +320,10 @@ fn benchmark_region(args: &Args) -> RegionConfig {
                 remove_m2v: false,
             },
             audio: haruki_sekai_asset_updater::core::config::AudioExportConfig {
-                convert_to_mp3: false,
-                convert_to_flac: false,
-                remove_wav: false,
+                formats: vec![AudioOutputFormat::Wav],
             },
             images: ImageExportConfig {
-                convert_to_webp: false,
-                remove_png: false,
-                ..ImageExportConfig::default()
+                formats: vec![ImageOutputFormat::Png],
             },
             ..RegionExportConfig::default()
         },

@@ -133,9 +133,9 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 | `convert_video_to_mp4` | `export.video.convert_to_mp4` |
 | `direct_usm_to_mp4_with_ffmpeg` | `export.video.direct_usm_to_mp4_with_ffmpeg` |
 | `remove_m2v` | `export.video.remove_m2v` |
-| `convert_audio_to_mp3` | `export.audio.convert_to_mp3` |
-| `convert_wav_to_flac` | `export.audio.convert_to_flac` |
-| `remove_wav` | `export.audio.remove_wav` |
+| `convert_audio_to_mp3` | `export.audio.formats` | Adds `mp3` to the final format list. |
+| `convert_wav_to_flac` | `export.audio.formats` | Adds `flac` to the final format list. |
+| `remove_wav` | `export.audio.formats` | Omitting/removing wav is represented by the final format list. |
 | `upload_to_cloud` | `upload.enabled` |
 | `remove_local_after_upload` | `upload.remove_local_after_upload` |
 
@@ -158,6 +158,8 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 - `backends.image.backend` defaults to `rust`.
 - `backends.image.png_compression` defaults to `fast`.
 - `backends.asset_studio.call_mode` defaults to `pool`.
+- `export.images.formats` defaults to `["png"]`.
+- `export.audio.formats` defaults to `["mp3"]`.
 - `resources.cpu.budget_auto` defaults to `true`.
 - `resources.cpu.budget_ratio` defaults to `0.75`.
 - `resources.cpu.throttle.enabled` defaults to `false`.

@@ -160,14 +160,10 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
                 remove_m2v: false,
             },
             audio: haruki_sekai_asset_updater::core::config::AudioExportConfig {
-                convert_to_mp3: false,
-                convert_to_flac: false,
-                remove_wav: false,
+                formats: vec![haruki_sekai_asset_updater::core::config::AudioOutputFormat::Wav],
             },
             images: haruki_sekai_asset_updater::core::config::ImageExportConfig {
-                convert_to_webp: false,
-                remove_png: false,
-                ..haruki_sekai_asset_updater::core::config::ImageExportConfig::default()
+                formats: vec![haruki_sekai_asset_updater::core::config::ImageOutputFormat::Png],
             },
             ..RegionExportConfig::default()
         },
