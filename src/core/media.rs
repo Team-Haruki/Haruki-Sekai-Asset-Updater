@@ -3,6 +3,7 @@ use std::path::Path;
 
 use tokio::process::Command;
 
+use crate::core::cleanup::remove_file_if_exists;
 use crate::core::config::{MediaBackend, RetryConfig};
 use crate::core::errors::ExportPipelineError;
 use crate::core::retry::{retry_async, retry_sync};
@@ -140,8 +141,8 @@ pub async fn convert_m2v_to_mp4_with_backend(
         },
     )
     .await?;
-    if delete_original && m2v_file.exists() {
-        std::fs::remove_file(m2v_file).map_err(|source| ExportPipelineError::Io {
+    if delete_original {
+        remove_file_if_exists(m2v_file).map_err(|source| ExportPipelineError::Io {
             path: m2v_file.to_path_buf(),
             source,
         })?;
@@ -177,15 +178,20 @@ pub async fn convert_m2v_bytes_to_mp4_with_backend(
                     source,
                 }
             })?;
-            convert_m2v_to_mp4_cli(
-                temp_file.path(),
-                mp4_file,
-                false,
-                ffmpeg_path,
-                frame_rate,
-                retry,
-            )
-            .await
+            let temp_path =
+                temp_file
+                    .into_temp_path()
+                    .keep()
+                    .map_err(|error| ExportPipelineError::Io {
+                        path: error.path.to_path_buf(),
+                        source: error.error,
+                    })?;
+            convert_m2v_to_mp4_cli(&temp_path, mp4_file, false, ffmpeg_path, frame_rate, retry)
+                .await?;
+            remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
+                path: temp_path,
+                source,
+            })
         },
     )
     .await
@@ -225,8 +231,8 @@ async fn convert_m2v_to_mp4_cli(
         is_retryable_command_error,
     )
     .await?;
-    if delete_original && m2v_file.exists() {
-        std::fs::remove_file(m2v_file).map_err(|source| ExportPipelineError::Io {
+    if delete_original {
+        remove_file_if_exists(m2v_file).map_err(|source| ExportPipelineError::Io {
             path: m2v_file.to_path_buf(),
             source,
         })?;
@@ -340,7 +346,18 @@ fn convert_wav_bytes_to_mp3_cli(
             source,
         }
     })?;
-    convert_wav_to_mp3_cli(temp_file.path(), mp3_file, ffmpeg_path, retry)
+    let temp_path = temp_file
+        .into_temp_path()
+        .keep()
+        .map_err(|error| ExportPipelineError::Io {
+            path: error.path.to_path_buf(),
+            source: error.error,
+        })?;
+    convert_wav_to_mp3_cli(&temp_path, mp3_file, ffmpeg_path, retry)?;
+    remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
+        path: temp_path,
+        source,
+    })
 }
 
 pub fn convert_wav_to_flac(
@@ -449,7 +466,18 @@ fn convert_wav_bytes_to_flac_cli(
             source,
         }
     })?;
-    convert_wav_to_flac_cli(temp_file.path(), flac_file, ffmpeg_path, retry)
+    let temp_path = temp_file
+        .into_temp_path()
+        .keep()
+        .map_err(|error| ExportPipelineError::Io {
+            path: error.path.to_path_buf(),
+            source: error.error,
+        })?;
+    convert_wav_to_flac_cli(&temp_path, flac_file, ffmpeg_path, retry)?;
+    remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
+        path: temp_path,
+        source,
+    })
 }
 
 async fn run_media_backend<Ffi, Cli, CliFuture>(

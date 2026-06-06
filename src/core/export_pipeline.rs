@@ -23,6 +23,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex as TokioMutex, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, warn};
 
+use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
 use crate::core::config::{
     AppConfig, AssetStudioBackend, AssetStudioNativeCallMode, ConcurrencyConfig, MediaBackend,
@@ -2963,7 +2964,7 @@ fn parse_assetstudio_native_object_read_worker_output_recoverable(
             "assetstudio native object read failed; skipping object"
         );
         if let Some(payload_file) = output.payload_file {
-            let _ = std::fs::remove_file(payload_file);
+            let _ = remove_file_if_exists(&payload_file);
         }
         return Ok(NativeObjectReadParseResult::Skipped(
             NativeSkippedObjectRead {
@@ -2977,7 +2978,7 @@ fn parse_assetstudio_native_object_read_worker_output_recoverable(
     }
     let payload = if !output.payload.is_empty() {
         if let Some(payload_file) = output.payload_file {
-            let _ = std::fs::remove_file(payload_file);
+            let _ = remove_file_if_exists(&payload_file);
         }
         output.payload
     } else if let Some(payload_file) = output.payload_file {
@@ -2985,7 +2986,7 @@ fn parse_assetstudio_native_object_read_worker_output_recoverable(
             path: payload_file.clone(),
             source,
         })?;
-        let _ = std::fs::remove_file(payload_file);
+        let _ = remove_file_if_exists(&payload_file);
         payload
     } else {
         Vec::new()
@@ -3182,7 +3183,7 @@ fn parse_assetstudio_native_object_read_batch_worker_output_recoverable(
 
     let payload = if !output.payload.is_empty() {
         if let Some(payload_file) = output.payload_file {
-            let _ = std::fs::remove_file(payload_file);
+            let _ = remove_file_if_exists(&payload_file);
         }
         output.payload
     } else if let Some(payload_file) = output.payload_file {
@@ -3190,7 +3191,7 @@ fn parse_assetstudio_native_object_read_batch_worker_output_recoverable(
             path: payload_file.clone(),
             source,
         })?;
-        let _ = std::fs::remove_file(payload_file);
+        let _ = remove_file_if_exists(&payload_file);
         payload
     } else {
         Vec::new()
@@ -6796,7 +6797,7 @@ async fn process_usm_file_with_metrics(
             "post_process.usm.convert_mp4",
             phase_started,
         );
-        remove_file_if_exists(usm_file)?;
+        remove_export_file_if_exists(usm_file)?;
         output.generated_files.push(mp4);
         return Ok(output);
     }
@@ -6844,7 +6845,7 @@ async fn process_usm_file_with_metrics(
                 "post_process.usm.convert_mp4",
                 phase_started,
             );
-            remove_file_if_exists(usm_file)?;
+            remove_export_file_if_exists(usm_file)?;
             output.generated_files.push(mp4);
             return Ok(output);
         }
@@ -6892,7 +6893,7 @@ async fn process_usm_file_with_metrics(
         }
     }
 
-    remove_file_if_exists(usm_file)?;
+    remove_export_file_if_exists(usm_file)?;
     output.generated_files = generated;
     Ok(output)
 }
@@ -7019,7 +7020,7 @@ fn handle_acb_files_batched(
 
     for source_file in source_files {
         let phase_started = Instant::now();
-        remove_file_if_exists(&source_file)?;
+        remove_export_file_if_exists(&source_file)?;
         add_elapsed_phase_ms(
             &mut merged.phase_ms,
             "post_process.acb.remove_source",
@@ -7226,7 +7227,7 @@ fn handle_acb_files_streaming(
 
     for source_file in source_files.lock().unwrap().iter() {
         let phase_started = Instant::now();
-        remove_file_if_exists(source_file)?;
+        remove_export_file_if_exists(source_file)?;
         add_elapsed_phase_ms(
             &mut merged.phase_ms,
             "post_process.acb.remove_source",
@@ -7802,7 +7803,7 @@ async fn handle_png_conversion(
         let webp = png_file.with_extension("webp");
         convert_png_to_webp(&png_file, &webp)?;
         if remove_png {
-            remove_file_if_exists(&png_file)?;
+            remove_export_file_if_exists(&png_file)?;
         }
         Ok(vec![webp])
     })
@@ -7837,7 +7838,7 @@ fn convert_native_surrogate_images_to_png(
             }
             Err(error) => return Err(error),
         }
-        remove_file_if_exists(&surrogate_file)?;
+        remove_export_file_if_exists(&surrogate_file)?;
         Ok(vec![png_file])
     })
 }
@@ -8205,7 +8206,7 @@ fn merge_usm_files(dir: &Path, usm_files: &[PathBuf]) -> Result<PathBuf, ExportP
             path: source_path.clone(),
             source,
         })?;
-        remove_file_if_exists(source_path)?;
+        remove_export_file_if_exists(source_path)?;
     }
 
     Ok(merged_file)
@@ -8215,6 +8216,13 @@ fn scan_all_files(dir: &Path) -> Result<Vec<PathBuf>, ExportPipelineError> {
     let mut files = Vec::new();
     walk(dir, &mut |path| files.push(path.to_path_buf()))?;
     Ok(files)
+}
+
+fn remove_export_file_if_exists(path: &Path) -> Result<(), ExportPipelineError> {
+    remove_file_if_exists(path).map_err(|source| ExportPipelineError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn find_files_by_extension(dir: &Path, ext: &str) -> Result<Vec<PathBuf>, ExportPipelineError> {
@@ -8276,16 +8284,6 @@ fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<(), ExportPipelineError>
         } else {
             f(&path);
         }
-    }
-    Ok(())
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<(), ExportPipelineError> {
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|source| ExportPipelineError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
     }
     Ok(())
 }

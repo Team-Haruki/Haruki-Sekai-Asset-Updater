@@ -15,6 +15,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::core::cleanup::remove_file_if_exists;
 use crate::core::config::{AppConfig, AssetStudioBackend, RegionConfig, RegionProviderConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
@@ -1313,7 +1314,7 @@ impl AssetExecutionContext {
                 },
             );
         }
-        let _ = std::fs::remove_file(&temp_file);
+        let _ = remove_file_if_exists(&temp_file);
         export_result.map(|_| ()).map_err(Into::into)
     }
 
@@ -1414,7 +1415,7 @@ impl AssetExecutionContext {
             category,
         )
         .await;
-        let _ = std::fs::remove_file(&temp_file);
+        let _ = remove_file_if_exists(&temp_file);
 
         Ok(NativeBundlePostProcessJob {
             bundle_path: task.bundle_path.clone(),

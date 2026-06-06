@@ -595,6 +595,7 @@ mod tests {
     use std::io::{self, Cursor};
 
     use super::{read_frame, spill_payload_to_temp_file, write_frame, MAX_FRAME_SIZE};
+    use haruki_sekai_asset_updater::core::cleanup::remove_file_if_exists;
 
     #[test]
     fn server_frame_round_trips_payload() {
@@ -632,6 +633,6 @@ mod tests {
         let payload_file = spill_payload_to_temp_file(payload).unwrap();
 
         assert_eq!(std::fs::read(&payload_file).unwrap(), payload);
-        std::fs::remove_file(payload_file).unwrap();
+        remove_file_if_exists(&payload_file).unwrap();
     }
 }
