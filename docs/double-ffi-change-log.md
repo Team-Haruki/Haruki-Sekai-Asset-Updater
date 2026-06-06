@@ -135,10 +135,12 @@ The Rust pipeline now has a finer media scheduler and fast paths for common
 single ACB / single HCA cases. The scheduler records queue wait, active worker
 counts, encode wall time, and per-post-process phase timings.
 
-`rsmpeg` is built with FFmpeg 8 bindings. Linux Docker images therefore need
-FFmpeg 8 development headers at build time and FFmpeg 8 runtime libraries at
-run time. Ubuntu 26.04 provides matching packages such as `libavcodec62`,
-`libavformat62`, `libavutil60`, `libswresample6`, and `libswscale9`.
+`rsmpeg` is built with FFmpeg 7.1 bindings for the Linux Docker image. Debian
+trixie provides matching packages such as `libavcodec61`, `libavformat61`,
+`libavutil59`, `libswresample5`, and `libswscale8`. The builder stage still
+installs `libavdevice-dev` because `rusty_ffmpeg` probes it during system
+linking, but the runtime image does not install `libavdevice61` because the
+final binary does not link against it.
 
 ## Benchmark Tooling
 

@@ -130,21 +130,24 @@ specifically about matching CLI filenames and extensions.
 
 ## Docker Notes
 
-`rsmpeg` is compiled with FFmpeg 8 bindings. The build image and runtime image
-must match that choice.
+`rsmpeg` is compiled with FFmpeg 7.1 bindings in the Docker production image.
+The build image and runtime image must match that choice.
 
 Known-good Linux package family:
 
-- Ubuntu 26.04
-- `libavcodec-dev` / `libavcodec62`
-- `libavformat-dev` / `libavformat62`
-- `libavutil-dev` / `libavutil60`
-- `libswresample-dev` / `libswresample6`
-- `libswscale-dev` / `libswscale9`
-- `libavdevice-dev` / `libavdevice62`
+- Debian trixie
+- `libavcodec-dev` / `libavcodec61`
+- `libavformat-dev` / `libavformat61`
+- `libavutil-dev` / `libavutil59`
+- `libswresample-dev` / `libswresample5`
+- `libswscale-dev` / `libswscale8`
+- `libavdevice-dev` in the builder stage only
 
 Debian bookworm FFmpeg 5 headers are incompatible with the current
-`rsmpeg`/`rusty_ffmpeg` FFmpeg 8 feature set.
+`rsmpeg`/`rusty_ffmpeg` FFmpeg 7.1 feature set. The runtime image intentionally
+does not install `libavdevice61`; `rusty_ffmpeg` needs `libavdevice-dev` for
+build-time probing, but the service binary does not link against the device
+library.
 
 Linux arm64 also requires portable C FFI pointer handling. Use `c_char` for C
 string buffers instead of assuming `i8`.

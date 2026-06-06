@@ -1,4 +1,4 @@
-FROM ubuntu:26.04 AS builder
+FROM debian:trixie-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
@@ -48,39 +48,37 @@ RUN cd AssetStudio/AssetStudioFFI && \
     dotnet publish -c Release -r "${runtime_id}" -f net9.0 --self-contained true -o /app/assetstudio-ffi \
     -p:TargetFrameworks=net9.0 \
     -p:PublishAot=true \
-    -p:InvariantGlobalization=false
+    -p:InvariantGlobalization=true
 
-FROM mwader/static-ffmpeg:8.1.1 AS ffmpeg-builder
-
-FROM ubuntu:26.04
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
-    libicu78 \
-    libxml2-16 \
-    libavcodec62 \
-    libavdevice62 \
-    libavformat62 \
-    libavutil60 \
-    libswresample6 \
-    libswscale9 \
-    git \
-    gnupg \
-    wget \
-    openssh-client && \
-    rm -rf /var/lib/apt/lists/*
+    libxml2 \
+    libavcodec61 \
+    libavformat61 \
+    libavutil59 \
+    libswresample5 \
+    libswscale8 \
+    git && \
+    rm -rf \
+    /var/lib/apt/lists/* \
+    /var/cache/debconf/* \
+    /usr/share/doc/* \
+    /usr/share/info/* \
+    /usr/share/lintian/* \
+    /usr/share/man/*
 
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
 COPY --from=builder /app/target/release/assetstudio_ffi_worker /app/assetstudio_ffi_worker
 COPY --from=assetstudio-builder /app/assetstudio-ffi /app/assetstudio
-COPY --from=ffmpeg-builder /ffmpeg /usr/local/bin/ffmpeg
 RUN mkdir -p logs
 
 ENV TZ=Asia/Shanghai \
-    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true \
     HARUKI_MEDIA_BACKEND=ffi \
     HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so \
     HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/app/assetstudio_ffi_worker \
