@@ -8,11 +8,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::export_pipeline::{
-    call_assetstudio_native_raw, AssetStudioNativeOperation, LoadedAssetStudioNativeLibrary,
+    call_assetstudio_native_typed_request, AssetStudioNativeOperation, AssetStudioNativeRequest,
+    AssetStudioNativeResponse, LoadedAssetStudioNativeLibrary,
 };
 use serde::{Deserialize, Serialize};
 
 const MAX_FRAME_SIZE: u64 = 256 * 1024 * 1024;
+const PAYLOAD_FILE_THRESHOLD: usize = 128 * 1024 * 1024;
+const FFI_CALL_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,14 +72,14 @@ fn main() -> ExitCode {
 
     let args = Args::parse();
     if args.server {
-        return run_server(&args.native_library);
+        return run_server_on_large_stack(args.native_library);
     }
 
     let operation = AssetStudioNativeOperation::from(
         args.operation
             .expect("--operation is required unless --server is used"),
     );
-    let request_json = match read_request_json(operation) {
+    let request = match read_typed_request(operation) {
         Ok(value) => value,
         Err(error) => {
             write_process_trace("request_error", &error.to_string());
@@ -85,19 +88,20 @@ fn main() -> ExitCode {
         }
     };
 
-    write_worker_trace(operation, "before_ffi", request_json.as_deref(), None);
-    match call_assetstudio_native_raw(&args.native_library, operation, request_json.as_deref()) {
-        Ok((status, response_json)) => {
+    write_worker_trace(operation, "before_ffi", Some(&request), None);
+    match call_assetstudio_native_typed_request(&args.native_library, &request) {
+        Ok((status, response, payload)) => {
             write_worker_trace(
                 operation,
                 "after_ffi",
                 None,
                 Some(&format!(
-                    "status={status} response_bytes={}",
-                    response_json.len()
+                    "status={status} response_kind={} payload_bytes={}",
+                    response_operation(&response).as_str(),
+                    payload.len()
                 )),
             );
-            if let Err(error) = write_response(&response_json, args.response_file.as_ref()) {
+            if let Err(error) = write_response(&response, args.response_file.as_ref()) {
                 write_worker_trace(
                     operation,
                     "response_write_error",
@@ -121,18 +125,39 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_server_on_large_stack(native_library: String) -> ExitCode {
+    match std::thread::Builder::new()
+        .name("haruki-assetstudio-worker-server".to_string())
+        .stack_size(FFI_CALL_STACK_SIZE)
+        .spawn(move || run_server(&native_library))
+    {
+        Ok(handle) => match handle.join() {
+            Ok(code) => code,
+            Err(panic) => {
+                write_process_trace("server_thread_panic", &format!("{panic:?}"));
+                eprintln!("assetstudio native worker server thread panicked: {panic:?}");
+                ExitCode::from(101)
+            }
+        },
+        Err(error) => {
+            write_process_trace("server_thread_spawn_error", &error.to_string());
+            eprintln!("failed to spawn assetstudio native worker server thread: {error}");
+            ExitCode::from(101)
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ServerRequest {
     id: u64,
-    operation: WorkerOperation,
-    request_json: Option<String>,
+    request: AssetStudioNativeRequest,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ServerResponse {
     id: u64,
     status: Option<i32>,
-    response_json: Option<String>,
+    response: Option<AssetStudioNativeResponse>,
     #[serde(default)]
     payload_len: usize,
     payload_file: Option<String>,
@@ -171,39 +196,46 @@ fn run_server(native_library: &str) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        let operation = AssetStudioNativeOperation::from(request.operation);
+        let operation = request.request.operation();
         write_worker_trace(
             operation,
             "server_before_ffi",
-            request.request_json.as_deref(),
+            Some(&request.request),
             Some(&format!("id={}", request.id)),
         );
-        let response = match call_native_with_stdout_suppressed(
-            &library,
-            operation,
-            request.request_json.as_deref(),
-        ) {
-            Ok((status, response_json, payload)) => {
+        let response = match call_native_with_stdout_suppressed(&library, &request.request) {
+            Ok((status, response_body, payload)) => {
                 write_worker_trace(
                     operation,
                     "server_after_ffi",
                     None,
                     Some(&format!(
-                        "id={} status={status} response_bytes={} payload_bytes={}",
+                        "id={} status={status} response_kind={} payload_bytes={}",
                         request.id,
-                        response_json.len(),
+                        response_operation(&response_body).as_str(),
                         payload.len()
                     )),
                 );
-                ServerResponse {
-                    id: request.id,
-                    status: Some(status),
-                    response_json: Some(response_json),
-                    payload_len: payload.len(),
-                    payload_file: None,
-                    error: None,
+                match server_response_with_payload(request.id, status, response_body, payload) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        write_worker_trace(
+                            operation,
+                            "server_payload_spill_error",
+                            None,
+                            Some(&format!("id={} {error}", request.id)),
+                        );
+                        ServerResponse {
+                            id: request.id,
+                            status: None,
+                            response: None,
+                            payload_len: 0,
+                            payload_file: None,
+                            error: Some(error.to_string()),
+                        }
+                        .with_payload(Vec::new())
+                    }
                 }
-                .with_payload(payload)
             }
             Err(error) => {
                 write_worker_trace(
@@ -215,7 +247,7 @@ fn run_server(native_library: &str) -> ExitCode {
                 ServerResponse {
                     id: request.id,
                     status: None,
-                    response_json: None,
+                    response: None,
                     payload_len: 0,
                     payload_file: None,
                     error: Some(error.to_string()),
@@ -257,71 +289,64 @@ impl ServerResponse {
     }
 }
 
+fn server_response_with_payload(
+    id: u64,
+    status: i32,
+    response: AssetStudioNativeResponse,
+    payload: Vec<u8>,
+) -> io::Result<ServerResponseWithPayload> {
+    let payload_len = payload.len();
+    if payload_len > PAYLOAD_FILE_THRESHOLD {
+        let payload_file = spill_payload_to_temp_file(&payload)?;
+        Ok(ServerResponse {
+            id,
+            status: Some(status),
+            response: Some(response),
+            payload_len,
+            payload_file: Some(payload_file.to_string_lossy().to_string()),
+            error: None,
+        }
+        .with_payload(Vec::new()))
+    } else {
+        Ok(ServerResponse {
+            id,
+            status: Some(status),
+            response: Some(response),
+            payload_len,
+            payload_file: None,
+            error: None,
+        }
+        .with_payload(payload))
+    }
+}
+
+fn spill_payload_to_temp_file(payload: &[u8]) -> io::Result<PathBuf> {
+    let mut file = tempfile::Builder::new()
+        .prefix("haruki-assetstudio-worker-payload-")
+        .suffix(".bin")
+        .tempfile()?;
+    file.write_all(payload)?;
+    file.flush()?;
+    let temp_path = file.into_temp_path();
+    temp_path.keep().map_err(|error| error.error)
+}
+
 fn call_native_with_stdout_suppressed(
     native_library: &LoadedAssetStudioNativeLibrary,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
+    request: &AssetStudioNativeRequest,
 ) -> Result<
-    (i32, String, Vec<u8>),
+    (i32, AssetStudioNativeResponse, Vec<u8>),
     Box<haruki_sekai_asset_updater::core::errors::ExportPipelineError>,
 > {
     #[cfg(unix)]
     {
         let _guard = StdoutRedirectGuard::to_null();
-        call_native_operation(native_library, operation, request_json)
+        native_library.call_typed_request(request).map_err(Box::new)
     }
 
     #[cfg(not(unix))]
     {
-        call_native_operation(native_library, operation, request_json)
-    }
-}
-
-fn call_native_operation(
-    native_library: &LoadedAssetStudioNativeLibrary,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
-) -> Result<
-    (i32, String, Vec<u8>),
-    Box<haruki_sekai_asset_updater::core::errors::ExportPipelineError>,
-> {
-    if operation == AssetStudioNativeOperation::ContextReadObject {
-        let request_json = request_json.ok_or_else(|| {
-            Box::new(
-                haruki_sekai_asset_updater::core::errors::ExportPipelineError::AssetStudioNative {
-                    message: "native context_read_object requires request json".to_string(),
-                },
-            )
-        })?;
-        let (status, response_json, payload) = native_library
-            .call_payload(
-                request_json,
-                b"haruki_assetstudio_context_read_object",
-                "context_read_object",
-            )
-            .map_err(Box::new)?;
-        Ok((status, response_json, payload))
-    } else if operation == AssetStudioNativeOperation::ContextReadObjects {
-        let request_json = request_json.ok_or_else(|| {
-            Box::new(
-                haruki_sekai_asset_updater::core::errors::ExportPipelineError::AssetStudioNative {
-                    message: "native context_read_objects requires request json".to_string(),
-                },
-            )
-        })?;
-        let (status, response_json, payload) = native_library
-            .call_payload(
-                request_json,
-                b"haruki_assetstudio_context_read_objects",
-                "context_read_objects",
-            )
-            .map_err(Box::new)?;
-        Ok((status, response_json, payload))
-    } else {
-        let (status, response_json) = native_library
-            .call(operation, request_json)
-            .map_err(Box::new)?;
-        Ok((status, response_json, Vec::new()))
+        native_library.call_typed_request(request).map_err(Box::new)
     }
 }
 
@@ -388,31 +413,66 @@ fn write_frame(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     writer.flush()
 }
 
-fn read_request_json(
+fn read_typed_request(
     operation: AssetStudioNativeOperation,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+) -> Result<AssetStudioNativeRequest, Box<dyn std::error::Error>> {
     if operation == AssetStudioNativeOperation::Version {
-        return Ok(None);
+        return Ok(AssetStudioNativeRequest::Version);
     }
 
-    let mut request_json = String::new();
-    io::stdin().read_to_string(&mut request_json)?;
-    if request_json.trim().is_empty() {
-        return Err(format!("native {} request json is empty", operation.as_str()).into());
+    let mut request_text = String::new();
+    io::stdin().read_to_string(&mut request_text)?;
+    if request_text.trim().is_empty() {
+        return Err(format!("native {} request is empty", operation.as_str()).into());
     }
-    Ok(Some(request_json))
+    let request =
+        sonic_rs::from_str::<AssetStudioNativeRequest>(&request_text).map_err(|error| {
+            format!(
+                "native {} request must be a typed AssetStudioNativeRequest frame: {error}",
+                operation.as_str()
+            )
+        })?;
+    if request.operation() == operation {
+        return Ok(request);
+    }
+
+    Err(format!(
+        "native worker request operation mismatch: cli={} request={}",
+        operation.as_str(),
+        request.operation().as_str()
+    )
+    .into())
 }
 
 fn write_response(
-    response_json: &str,
+    response: &AssetStudioNativeResponse,
     response_file: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let response_text = sonic_rs::to_string(response)?;
     if let Some(response_file) = response_file {
-        std::fs::write(response_file, response_json)?;
+        std::fs::write(response_file, response_text)?;
     } else {
-        println!("{response_json}");
+        println!("{response_text}");
     }
     Ok(())
+}
+
+fn response_operation(response: &AssetStudioNativeResponse) -> AssetStudioNativeOperation {
+    match response {
+        AssetStudioNativeResponse::Version(_) => AssetStudioNativeOperation::Version,
+        AssetStudioNativeResponse::Inspect(_) => AssetStudioNativeOperation::Inspect,
+        AssetStudioNativeResponse::ContextOpen(_) => AssetStudioNativeOperation::ContextOpen,
+        AssetStudioNativeResponse::ContextListObjects(_) => {
+            AssetStudioNativeOperation::ContextListObjects
+        }
+        AssetStudioNativeResponse::ContextClose(_) => AssetStudioNativeOperation::ContextClose,
+        AssetStudioNativeResponse::ContextReadObject(_) => {
+            AssetStudioNativeOperation::ContextReadObject
+        }
+        AssetStudioNativeResponse::ContextReadObjects(_) => {
+            AssetStudioNativeOperation::ContextReadObjects
+        }
+    }
 }
 
 fn install_panic_trace_hook() {
@@ -426,10 +486,12 @@ fn install_panic_trace_hook() {
 fn write_worker_trace(
     operation: AssetStudioNativeOperation,
     stage: &str,
-    request_json: Option<&str>,
+    request: Option<&AssetStudioNativeRequest>,
     detail: Option<&str>,
 ) {
-    if let Some(request_json) = request_json {
+    if let Some(request) = request {
+        let request_text =
+            sonic_rs::to_string(request).unwrap_or_else(|error| format!("serialize_error={error}"));
         write_trace_file(
             &format!(
                 "worker-{}-{}-{}.request.json",
@@ -437,7 +499,7 @@ fn write_worker_trace(
                 operation.as_str(),
                 now_ms()
             ),
-            request_json,
+            &request_text,
         );
     }
 
@@ -532,7 +594,7 @@ fn now_ms() -> u128 {
 mod tests {
     use std::io::{self, Cursor};
 
-    use super::{read_frame, write_frame, MAX_FRAME_SIZE};
+    use super::{read_frame, spill_payload_to_temp_file, write_frame, MAX_FRAME_SIZE};
 
     #[test]
     fn server_frame_round_trips_payload() {
@@ -561,5 +623,15 @@ mod tests {
         let error = read_frame(&mut cursor).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn server_payload_spill_writes_temp_file() {
+        let payload = b"large-payload";
+
+        let payload_file = spill_payload_to_temp_file(payload).unwrap();
+
+        assert_eq!(std::fs::read(&payload_file).unwrap(), payload);
+        std::fs::remove_file(payload_file).unwrap();
     }
 }

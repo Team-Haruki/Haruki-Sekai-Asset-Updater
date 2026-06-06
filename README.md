@@ -80,7 +80,7 @@ cp haruki-asset-configs.example.yaml haruki-asset-configs.yaml
 cp .env.example .env
 export HARUKI_MEDIA_BACKEND=ffi
 export HARUKI_ASSET_STUDIO_BACKEND=native
-export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/path/to/HarukiAssetStudioNative.so
+export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
 export HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/path/to/assetstudio_native_worker
 export HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE=pool
 export HARUKI_ASSET_STUDIO_NATIVE_UNITYPY_MODE=true

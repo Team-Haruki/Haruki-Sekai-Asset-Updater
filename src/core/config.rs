@@ -339,11 +339,11 @@ fn normalize_asset_studio_native_image_format(value: &str) -> Result<String, Con
 
 fn validate_asset_studio_native_image_format(value: &str) -> Result<(), ConfigError> {
     match value.trim().to_lowercase().as_str() {
-        "jpeg" | "jpg" | "png" | "bmp" | "tga" | "webp" => Ok(()),
+        "raw_rgba" => Ok(()),
         other => Err(ConfigError::InvalidValue {
             field: "tools.asset_studio_native_image_format".to_string(),
             value: other.to_string(),
-            expected: "jpeg, jpg, png, bmp, tga, or webp".to_string(),
+            expected: "raw_rgba".to_string(),
         }),
     }
 }
@@ -1167,13 +1167,13 @@ regions:
 media_backend: ffi
 asset_studio_backend: native
 asset_studio_cli_path: /tmp/assetstudio-cli
-asset_studio_native_library_path: /tmp/libHarukiAssetStudioNative.so
+asset_studio_native_library_path: /tmp/libHarukiAssetStudioFFI.so
 asset_studio_native_call_mode: process
 asset_studio_native_worker_path: /tmp/assetstudio-native-worker
 asset_studio_native_process_concurrency: 6
 asset_studio_native_worker_max_calls: 128
 asset_studio_native_read_batch_size: 16
-asset_studio_native_image_format: bmp
+asset_studio_native_image_format: raw_rgba
 asset_studio_native_read_kinds:
   Sprite: image
   Animator: fbx
@@ -1184,7 +1184,7 @@ asset_studio_native_read_kinds:
         assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Native);
         assert_eq!(
             tools.asset_studio_native_library_path.as_deref(),
-            Some("/tmp/libHarukiAssetStudioNative.so")
+            Some("/tmp/libHarukiAssetStudioFFI.so")
         );
         assert_eq!(
             tools.asset_studio_native_call_mode,
@@ -1199,7 +1199,7 @@ asset_studio_native_read_kinds:
         assert_eq!(tools.asset_studio_native_read_batch_size, 16);
         assert_eq!(
             tools.asset_studio_native_image_format.as_deref(),
-            Some("bmp")
+            Some("raw_rgba")
         );
         assert_eq!(
             tools
@@ -1297,6 +1297,13 @@ asset_studio_backend: auto
             ConfigError::InvalidValue { ref field, ref value, .. }
                 if field == "tools.asset_studio_native_image_format" && value == "gif"
         ));
+    }
+
+    #[test]
+    fn accepts_raw_rgba_asset_studio_native_image_format() {
+        let mut config = AppConfig::default();
+        config.tools.asset_studio_native_image_format = Some("raw_rgba".to_string());
+        config.validate().unwrap();
     }
 
     #[test]
@@ -1456,7 +1463,7 @@ regions:
         std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY", "7");
         std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS", "64");
         std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE", "48");
-        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT", "TGA");
+        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT", "raw_rgba");
         std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", "9");
         std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", "true");
         std::env::set_var("HARUKI_CPU_BUDGET_AUTO", "true");
@@ -1478,7 +1485,7 @@ tools:
   asset_studio_native_process_concurrency: 2
   asset_studio_native_worker_max_calls: 128
   asset_studio_native_read_batch_size: 16
-  asset_studio_native_image_format: png
+  asset_studio_native_image_format: raw_rgba
 "#
         )
         .unwrap();
@@ -1503,7 +1510,7 @@ tools:
         assert_eq!(config.tools.asset_studio_native_read_batch_size, 48);
         assert_eq!(
             config.tools.asset_studio_native_image_format.as_deref(),
-            Some("tga")
+            Some("raw_rgba")
         );
         assert_eq!(config.concurrency.media_encode, 9);
         assert!(config.concurrency.auto_tune);

@@ -819,6 +819,9 @@ impl AssetExecutionContext {
             region,
             &job.payload_export.export_path,
             &job.payload_export.export_root,
+            job.payload_export.native_scoped_post_process,
+            &job.payload_export.native_written_files,
+            job.payload_export.native_acb_sources,
         )
         .await?;
 

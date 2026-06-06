@@ -119,6 +119,8 @@ struct Args {
     media_backend: Option<BenchMediaBackend>,
     #[arg(long, value_enum, value_delimiter = ',', default_value = "native")]
     backend: Vec<BenchBackend>,
+    #[arg(long = "asset-types", value_delimiter = ',')]
+    asset_types: Vec<String>,
     #[arg(long = "asset-version")]
     asset_version: Option<String>,
     #[arg(long = "asset-hash")]
@@ -415,7 +417,7 @@ fn benchmark_config(
     }
     if args.native_cli_parity {
         config.tools.asset_studio_native_cli_parity_mode = true;
-        config.tools.asset_studio_native_image_format = Some("png".to_string());
+        config.tools.asset_studio_native_image_format = Some("raw_rgba".to_string());
         config
             .tools
             .asset_studio_native_read_kinds
@@ -472,6 +474,9 @@ fn benchmark_config(
     region.paths.downloaded_asset_record_file = Some(temp_record_file.display().to_string());
     region.filters.start_app = start_app_rules(args);
     region.filters.on_demand = on_demand_rules(args);
+    if !args.asset_types.is_empty() {
+        region.export.asset_studio_types = args.asset_types.clone();
+    }
     region.upload.enabled = false;
     region.upload.remove_local_after_upload = false;
 

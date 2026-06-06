@@ -10,6 +10,7 @@ use haruki_sekai_asset_updater::core::config::{
 };
 use haruki_sekai_asset_updater::core::export_pipeline::{
     extract_unity_asset_bundle, query_assetstudio_native_version,
+    query_assetstudio_native_version_worker,
 };
 use tempfile::tempdir;
 
@@ -66,6 +67,8 @@ struct Args {
     unity_version: String,
     #[arg(long = "expected-file")]
     expected_file: Option<PathBuf>,
+    #[arg(long = "output-dir")]
+    output_dir: Option<PathBuf>,
     #[arg(long = "cli-path")]
     cli_path: Option<String>,
     #[arg(long = "native-library")]
@@ -110,7 +113,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(native_library) = args.native_library.as_deref() {
-        let version = query_assetstudio_native_version(native_library)?;
+        let version = match args.native_call_mode {
+            BenchNativeCallMode::Direct => query_assetstudio_native_version(native_library)?,
+            BenchNativeCallMode::Process | BenchNativeCallMode::Pool => {
+                query_assetstudio_native_version_worker(
+                    native_library,
+                    args.native_worker_path.as_deref(),
+                )
+                .await?
+            }
+        };
         eprintln!(
             "native adapter: adapter_version={:?} assetstudio_cli_version={:?}",
             version.adapter_version, version.assetstudio_cli_version
@@ -212,7 +224,21 @@ async fn run_once(
     backend: BenchBackend,
     args: &Args,
 ) -> Result<RunResult, Box<dyn std::error::Error>> {
-    let output_dir = tempdir()?;
+    let temp_output_dir = if args.output_dir.is_none() {
+        Some(tempdir()?)
+    } else {
+        None
+    };
+    let output_dir = match args.output_dir.as_deref() {
+        Some(output_dir) => {
+            if output_dir.exists() {
+                std::fs::remove_dir_all(output_dir)?;
+            }
+            std::fs::create_dir_all(output_dir)?;
+            output_dir
+        }
+        None => temp_output_dir.as_ref().unwrap().path(),
+    };
     let region = benchmark_region(args);
     let config = benchmark_config(backend, args);
 
@@ -223,7 +249,7 @@ async fn run_once(
         &region,
         &args.bundle,
         &args.export_path,
-        output_dir.path(),
+        output_dir,
         &args.category,
     )
     .await?;
@@ -231,11 +257,10 @@ async fn run_once(
 
     let export_root = if args.by_category {
         output_dir
-            .path()
             .join(args.category.to_lowercase())
             .join(&args.export_path)
     } else {
-        output_dir.path().join(&args.export_path)
+        output_dir.join(&args.export_path)
     };
 
     if let Some(expected_file) = &args.expected_file {

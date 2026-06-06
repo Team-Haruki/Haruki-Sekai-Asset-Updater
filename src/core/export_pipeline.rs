@@ -1,17 +1,23 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::ffi::{CStr, CString};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ffi::CString;
+use std::io::{Cursor, Read, Seek, Write};
+use std::mem::size_of;
 use std::os::raw::{c_char, c_int, c_longlong, c_uchar};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
-use image::{ExtendedColorType, ImageFormat, ImageReader};
+use image::{ExtendedColorType, ImageEncoder, ImageReader};
 use serde::{Deserialize, Serialize};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex as TokioMutex, OwnedSemaphorePermit, Semaphore};
@@ -32,16 +38,23 @@ use crate::core::media::{
 use crate::core::retry::retry_async;
 use crate::core::storage::upload_to_all_storages;
 
+const NATIVE_AOT_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";
 const NATIVE_AOT_IMAGE_SURROGATE_FORMAT: &str = "bmp";
 #[allow(dead_code)]
-const NATIVE_AOT_FAST_IMAGE_FORMAT: &str = NATIVE_AOT_IMAGE_SURROGATE_FORMAT;
+const NATIVE_AOT_FAST_IMAGE_FORMAT: &str = NATIVE_AOT_DEFAULT_IMAGE_FORMAT;
 const NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC: &[u8] = b"HARUKI_ASSET_PAYLOAD_BUNDLE_V1";
 const NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC: u32 = 0x4250_4148; // HAPB
 const NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION: u16 = 2;
 const NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN: usize = 20;
+const NATIVE_AOT_RGBA_IR_MAGIC: &[u8; 16] = b"HARUKI_RGBAIR_V1";
+const NATIVE_AOT_RGBA_IR_HEADER_LEN: usize = 36;
 const NATIVE_AOT_CONTEXT_LIST_PAGE_SIZE: usize = 4096;
 #[allow(dead_code)]
 const NATIVE_AOT_WORKER_MAX_CALLS_DEFAULT: usize = 256;
+const NATIVE_AOT_FFI_CALL_STACK_SIZE: usize = 64 * 1024 * 1024;
+const ASSETSTUDIO_MANIFEST_LOCKS: usize = 64;
+const ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS: usize = 220;
+static ASSETSTUDIO_MANIFEST_APPEND_LOCKS: OnceLock<Vec<Mutex<()>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 struct AssetStudioCliCapabilities {
@@ -50,7 +63,7 @@ struct AssetStudioCliCapabilities {
     sekai_keep_single_container_filename: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioNativeInspectRequest {
     pub input_path: String,
     pub asset_types: Vec<String>,
@@ -124,12 +137,12 @@ pub struct AssetStudioNativeContextOpenResponse {
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioNativeContextCloseRequest {
     pub context_id: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioNativeContextListObjectsRequest {
     pub context_id: i64,
     pub offset: usize,
@@ -154,7 +167,7 @@ pub struct AssetStudioNativeContextListObjectsResponse {
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioNativeContextReadObjectRequest {
     pub context_id: i64,
     pub path_id: i64,
@@ -253,7 +266,7 @@ pub struct AssetStudioNativeContextCloseResponse {
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioNativeVersion {
     pub success: bool,
     pub adapter_version: Option<String>,
@@ -286,6 +299,112 @@ impl AssetStudioNativeOperation {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "request", rename_all = "snake_case")]
+pub enum AssetStudioNativeRequest {
+    Version,
+    Inspect(AssetStudioNativeInspectRequest),
+    ContextOpen(AssetStudioNativeInspectRequest),
+    ContextListObjects(AssetStudioNativeContextListObjectsRequest),
+    ContextClose(AssetStudioNativeContextCloseRequest),
+    ContextReadObject(AssetStudioNativeContextReadObjectRequest),
+    ContextReadObjects(AssetStudioNativeContextReadObjectsRequest),
+}
+
+impl AssetStudioNativeRequest {
+    pub fn operation(&self) -> AssetStudioNativeOperation {
+        match self {
+            Self::Version => AssetStudioNativeOperation::Version,
+            Self::Inspect(_) => AssetStudioNativeOperation::Inspect,
+            Self::ContextOpen(_) => AssetStudioNativeOperation::ContextOpen,
+            Self::ContextListObjects(_) => AssetStudioNativeOperation::ContextListObjects,
+            Self::ContextClose(_) => AssetStudioNativeOperation::ContextClose,
+            Self::ContextReadObject(_) => AssetStudioNativeOperation::ContextReadObject,
+            Self::ContextReadObjects(_) => AssetStudioNativeOperation::ContextReadObjects,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "response", rename_all = "snake_case")]
+pub enum AssetStudioNativeResponse {
+    Version(AssetStudioNativeVersion),
+    Inspect(AssetStudioNativeInspectResponse),
+    ContextOpen(AssetStudioNativeContextOpenResponse),
+    ContextListObjects(AssetStudioNativeContextListObjectsResponse),
+    ContextClose(AssetStudioNativeContextCloseResponse),
+    ContextReadObject(AssetStudioNativeObjectReadResponse),
+    ContextReadObjects(AssetStudioNativeObjectReadBatchResponse),
+}
+
+impl AssetStudioNativeResponse {
+    fn into_version(self) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
+        match self {
+            Self::Version(response) => Ok(response),
+            other => Err(unexpected_native_response("version", &other)),
+        }
+    }
+
+    fn into_inspect(self) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
+        match self {
+            Self::Inspect(response) => Ok(response),
+            other => Err(unexpected_native_response("inspect", &other)),
+        }
+    }
+
+    fn into_context_open(
+        self,
+    ) -> Result<AssetStudioNativeContextOpenResponse, ExportPipelineError> {
+        match self {
+            Self::ContextOpen(response) => Ok(response),
+            other => Err(unexpected_native_response("context_open", &other)),
+        }
+    }
+
+    fn into_context_list_objects(
+        self,
+    ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
+        match self {
+            Self::ContextListObjects(response) => Ok(response),
+            other => Err(unexpected_native_response("context_list_objects", &other)),
+        }
+    }
+
+    fn into_context_close(
+        self,
+    ) -> Result<AssetStudioNativeContextCloseResponse, ExportPipelineError> {
+        match self {
+            Self::ContextClose(response) => Ok(response),
+            other => Err(unexpected_native_response("context_close", &other)),
+        }
+    }
+
+    fn into_object_read(self) -> Result<AssetStudioNativeObjectReadResponse, ExportPipelineError> {
+        match self {
+            Self::ContextReadObject(response) => Ok(response),
+            other => Err(unexpected_native_response("context_read_object", &other)),
+        }
+    }
+
+    fn into_object_read_batch(
+        self,
+    ) -> Result<AssetStudioNativeObjectReadBatchResponse, ExportPipelineError> {
+        match self {
+            Self::ContextReadObjects(response) => Ok(response),
+            other => Err(unexpected_native_response("context_read_objects", &other)),
+        }
+    }
+}
+
+fn unexpected_native_response(
+    expected: &'static str,
+    response: &AssetStudioNativeResponse,
+) -> ExportPipelineError {
+    ExportPipelineError::AssetStudioNative {
+        message: format!("native worker returned unexpected response for {expected}: {response:?}"),
+    }
+}
+
 impl NativeObjectReadPlanStats {
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
@@ -307,6 +426,9 @@ pub struct PostProcessSummary {
 pub struct UnityAssetBundlePayloadExport {
     pub export_path: PathBuf,
     pub export_root: PathBuf,
+    pub native_scoped_post_process: bool,
+    pub native_written_files: Vec<PathBuf>,
+    pub native_acb_sources: Vec<NativeInMemoryMediaSource>,
     pub native_export_phase_ms: HashMap<String, u64>,
     pub native_skipped_object_reads: Vec<NativeSkippedObjectRead>,
     pub native_object_read_plan: NativeObjectReadPlanStats,
@@ -336,9 +458,24 @@ pub struct NativeObjectReadPlanStats {
 
 #[derive(Debug, Clone, Default)]
 struct NativeUnityPyUnpackSummary {
+    written_files: Vec<PathBuf>,
+    acb_sources: Vec<NativeInMemoryMediaSource>,
     phase_ms: HashMap<String, u64>,
     skipped_object_reads: Vec<NativeSkippedObjectRead>,
     object_read_plan: NativeObjectReadPlanStats,
+}
+
+#[derive(Debug, Default)]
+struct NativeSemanticExportPathState {
+    claims: HashMap<PathBuf, usize>,
+    written_files: Vec<PathBuf>,
+    acb_sources: Vec<NativeInMemoryMediaSource>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeInMemoryMediaSource {
+    pub target: PathBuf,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
@@ -357,6 +494,30 @@ struct NativeUnityPyUnpackOptions<'a> {
 struct NativeUnityPyPoolCallOptions<'a> {
     inspect_request: &'a AssetStudioNativeInspectRequest,
     unpack: NativeUnityPyUnpackOptions<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeAssetStudioExportManifestEntry {
+    path: String,
+    asset_type: Option<String>,
+    name: Option<String>,
+    container: Option<String>,
+    payload_kind: Option<String>,
+    suggested_extension: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativePlayableExport {
+    container: String,
+    object_count: usize,
+    objects: Vec<NativePlayableExportObject>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativePlayableExportObject {
+    name: Option<String>,
+    asset_type: Option<String>,
+    data: sonic_rs::Value,
 }
 
 enum NativeObjectReadParseResult {
@@ -431,6 +592,9 @@ pub async fn extract_unity_asset_bundle(
         region,
         &payload_export.export_path,
         output_dir,
+        payload_export.native_scoped_post_process,
+        &payload_export.native_written_files,
+        payload_export.native_acb_sources,
     )
     .await?;
     summary.native_export_phase_ms = payload_export.native_export_phase_ms;
@@ -464,7 +628,9 @@ pub async fn export_unity_asset_bundle_payloads(
     } else {
         output_dir.join(export_path)
     };
+    let mut post_process_export_path = actual_export_path.clone();
     let mut native_unitypy_summary = NativeUnityPyUnpackSummary::default();
+    let mut native_scoped_post_process = false;
 
     match app_config.tools.asset_studio_backend {
         AssetStudioBackend::Cli => {
@@ -507,6 +673,10 @@ pub async fn export_unity_asset_bundle_payloads(
                 native_library_path,
             )
             .await?;
+            native_scoped_post_process = true;
+            if region.export.by_category {
+                post_process_export_path = output_dir.to_path_buf();
+            }
         }
         AssetStudioBackend::Auto => {
             if let Some(native_library_path) =
@@ -526,6 +696,10 @@ pub async fn export_unity_asset_bundle_payloads(
                 match native_result {
                     Ok(summary) => {
                         native_unitypy_summary = summary;
+                        native_scoped_post_process = true;
+                        if region.export.by_category {
+                            post_process_export_path = output_dir.to_path_buf();
+                        }
                     }
                     Err(error) => {
                         if let Some(asset_studio_cli_path) =
@@ -574,8 +748,11 @@ pub async fn export_unity_asset_bundle_payloads(
     }
 
     Ok(UnityAssetBundlePayloadExport {
-        export_path: actual_export_path,
+        export_path: post_process_export_path,
         export_root: output_dir.to_path_buf(),
+        native_scoped_post_process,
+        native_written_files: native_unitypy_summary.written_files,
+        native_acb_sources: native_unitypy_summary.acb_sources,
         native_export_phase_ms: native_unitypy_summary.phase_ms,
         native_skipped_object_reads: native_unitypy_summary.skipped_object_reads,
         native_object_read_plan: native_unitypy_summary.object_read_plan,
@@ -650,10 +827,48 @@ async fn run_assetstudio_native_unitypy_unpack(
     strip_path_prefix: &str,
     native_library_path: &str,
 ) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
-    if app_config.tools.asset_studio_native_call_mode != AssetStudioNativeCallMode::Pool {
+    if app_config.tools.asset_studio_native_call_mode == AssetStudioNativeCallMode::Direct {
+        let inspect_request = AssetStudioNativeInspectRequest {
+            input_path: asset_bundle_file.to_string_lossy().to_string(),
+            asset_types: asset_studio_export_type_list(region),
+            unity_version: (!region.runtime.unity_version.is_empty())
+                .then(|| region.runtime.unity_version.clone()),
+            filter_exclude_mode: false,
+            filter_with_regex: false,
+            filter_by_name: None,
+            filter_by_container: None,
+            filter_by_path_ids: Vec::new(),
+            load_all_assets: true,
+            include_assets: false,
+        };
+        let unpack_options = NativeUnityPyUnpackOptions {
+            output_dir,
+            export_path,
+            strip_path_prefix,
+            region,
+            read_kinds: &app_config.tools.asset_studio_native_read_kinds,
+            image_format: app_config
+                .tools
+                .asset_studio_native_image_format
+                .as_deref()
+                .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
+            read_batch_size: app_config.tools.asset_studio_native_read_batch_size,
+            cli_parity_mode: app_config.tools.asset_studio_native_cli_parity_mode,
+        };
+        let mut worker = NativeDirectWorker::load(native_library_path)?;
+        return call_assetstudio_native_unitypy_unpack_with_target(
+            NativeUnityPyCallTarget::Direct(&mut worker),
+            &AtomicU64::new(1),
+            &inspect_request,
+            &unpack_options,
+        )
+        .await;
+    }
+
+    if app_config.tools.asset_studio_native_call_mode == AssetStudioNativeCallMode::Process {
         warn!(
             call_mode = ?app_config.tools.asset_studio_native_call_mode,
-            "unitypy-style native unpack uses worker pool regardless of configured call mode"
+            "unitypy-style native unpack uses worker pool for context affinity in process mode"
         );
     }
     let worker_path = configured_assetstudio_native_worker_path(
@@ -689,7 +904,7 @@ async fn run_assetstudio_native_unitypy_unpack(
             .tools
             .asset_studio_native_image_format
             .as_deref()
-            .unwrap_or(NATIVE_AOT_IMAGE_SURROGATE_FORMAT),
+            .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
         read_batch_size: app_config.tools.asset_studio_native_read_batch_size,
         cli_parity_mode: app_config.tools.asset_studio_native_cli_parity_mode,
     };
@@ -711,23 +926,365 @@ async fn run_assetstudio_native_unitypy_unpack(
     }
 }
 
-type AssetStudioInspectFn =
-    unsafe extern "C" fn(request_json: *const c_char, response_json: *mut *mut c_char) -> c_int;
-type AssetStudioContextOpenFn =
-    unsafe extern "C" fn(request_json: *const c_char, response_json: *mut *mut c_char) -> c_int;
-type AssetStudioContextListObjectsFn =
-    unsafe extern "C" fn(request_json: *const c_char, response_json: *mut *mut c_char) -> c_int;
-type AssetStudioContextCloseFn =
-    unsafe extern "C" fn(request_json: *const c_char, response_json: *mut *mut c_char) -> c_int;
-type AssetStudioContextReadObjectsFn = unsafe extern "C" fn(
-    request_json: *const c_char,
-    response_json: *mut *mut c_char,
-    payload_ptr: *mut *mut c_uchar,
-    payload_len: *mut c_longlong,
-) -> c_int;
-type AssetStudioVersionFn = unsafe extern "C" fn(response_json: *mut *mut c_char) -> c_int;
 type AssetStudioFreeStringFn = unsafe extern "C" fn(value: *mut c_char);
 type AssetStudioFreeBufferFn = unsafe extern "C" fn(value: *mut c_uchar);
+type AssetStudioResultFreeFn = unsafe extern "C" fn(handle: c_longlong) -> c_int;
+type AssetStudioTypedCapabilitiesFn =
+    unsafe extern "C" fn(response: *mut AssetStudioTypedCapabilitiesResponse) -> c_int;
+type AssetStudioTypedAbiLayoutFn =
+    unsafe extern "C" fn(response: *mut AssetStudioTypedAbiLayoutResponse) -> c_int;
+type AssetStudioTypedLimitsFn =
+    unsafe extern "C" fn(response: *mut AssetStudioTypedLimitsResponse) -> c_int;
+type AssetStudioTypedContextOpenFn = unsafe extern "C" fn(
+    request: *const AssetStudioTypedContextOpenRequest,
+    response: *mut AssetStudioTypedContextOpenResponse,
+) -> c_int;
+type AssetStudioTypedContextListObjectsSizeFn = unsafe extern "C" fn(
+    request: *const AssetStudioTypedObjectListRequest,
+    response: *mut AssetStudioTypedObjectTable,
+) -> c_int;
+type AssetStudioTypedContextListObjectsIntoFn = unsafe extern "C" fn(
+    request: *const AssetStudioTypedObjectListIntoRequest,
+    response: *mut AssetStudioTypedObjectTable,
+) -> c_int;
+type AssetStudioTypedContextCloseFn = unsafe extern "C" fn(
+    request: *const AssetStudioTypedContextCloseRequest,
+    response: *mut AssetStudioTypedContextCloseResponse,
+) -> c_int;
+type AssetStudioTypedContextReadObjectsDirectRetryFn = unsafe extern "C" fn(
+    request: *const AssetStudioTypedObjectReadBatchIntoRequest,
+    response: *mut AssetStudioTypedObjectReadBatchRetryResponse,
+) -> c_int;
+
+const ASSETSTUDIO_TYPED_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_SCHEMA_VERSION: c_int = 2;
+const ASSETSTUDIO_TYPED_LAYOUT_VERSION: c_int = 2;
+const ASSETSTUDIO_TYPED_CONTEXT_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_LIMITS_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION: c_int = 3;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION: c_int = 3;
+const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_INTO_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_DIRECT_RETRY_ABI_VERSION: c_int = 1;
+
+const ASSETSTUDIO_SYMBOL_FREE_STRING: &[u8] = b"haruki_assetstudio_free_string";
+const ASSETSTUDIO_SYMBOL_FREE_BUFFER: &[u8] = b"haruki_assetstudio_free_buffer";
+const ASSETSTUDIO_SYMBOL_RESULT_FREE: &[u8] = b"haruki_assetstudio_result_free";
+const ASSETSTUDIO_SYMBOL_CAPABILITIES: &[u8] = b"haruki_assetstudio_capabilities_v2";
+const ASSETSTUDIO_SYMBOL_ABI_LAYOUT: &[u8] = b"haruki_assetstudio_abi_layout_v2";
+const ASSETSTUDIO_SYMBOL_LIMITS: &[u8] = b"haruki_assetstudio_limits_v1";
+const ASSETSTUDIO_SYMBOL_CONTEXT_OPEN: &[u8] = b"haruki_assetstudio_context_open_v2";
+const ASSETSTUDIO_SYMBOL_CONTEXT_LIST_OBJECTS_SIZE: &[u8] =
+    b"haruki_assetstudio_context_list_objects_size_v3";
+const ASSETSTUDIO_SYMBOL_CONTEXT_LIST_OBJECTS_INTO: &[u8] =
+    b"haruki_assetstudio_context_list_objects_into_v3";
+const ASSETSTUDIO_SYMBOL_CONTEXT_CLOSE: &[u8] = b"haruki_assetstudio_context_close_v2";
+const ASSETSTUDIO_SYMBOL_CONTEXT_READ_OBJECTS_DIRECT_RETRY: &[u8] =
+    b"haruki_assetstudio_context_read_objects_direct_retry_v7";
+
+#[repr(C)]
+#[derive(Default)]
+struct AssetStudioTypedCapabilitiesResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    core_api_version_major: c_int,
+    core_api_version_minor: c_int,
+    context_abi_version: c_int,
+    object_table_abi_version: c_int,
+    object_table_into_abi_version: c_int,
+    object_lookup_abi_version: c_int,
+    object_lookup_into_abi_version: c_int,
+    object_read_abi_version: c_int,
+    object_read_batch_abi_version: c_int,
+    object_read_batch_handle_abi_version: c_int,
+    object_read_batch_into_abi_version: c_int,
+    object_read_batch_by_index_abi_version: c_int,
+    object_read_batch_direct_into_abi_version: c_int,
+    object_read_batch_direct_retry_abi_version: c_int,
+    supports_typed_object_table: c_int,
+    supports_caller_provided_object_table_buffers: c_int,
+    supports_typed_object_lookup: c_int,
+    supports_caller_provided_object_lookup_buffers: c_int,
+    supports_typed_object_read: c_int,
+    supports_typed_object_read_batch: c_int,
+    supports_result_handle: c_int,
+    supports_direct_object_read_retry: c_int,
+    supports_typed_context: c_int,
+    supports_native_dependency_resolver: c_int,
+    supports_abi_layout: c_int,
+    supports_multiple_contexts: c_int,
+    supports_concurrent_operations: c_int,
+    supports_context_lifetime_guards: c_int,
+    native_console_capture: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AssetStudioTypedAbiLayoutResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    layout_version: c_int,
+    context_open_request: c_int,
+    context_open_response: c_int,
+    context_close_request: c_int,
+    context_close_response: c_int,
+    limits_response: c_int,
+    capabilities_response: c_int,
+    object_list_request: c_int,
+    object_list_into_request_v3: c_int,
+    object_table: c_int,
+    asset_object: c_int,
+    object_read_item_request: c_int,
+    object_read_batch_into_request_v4: c_int,
+    object_read_item_response_v4: c_int,
+    object_read_batch_retry_response_v7: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AssetStudioTypedLimitsResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    limits_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    max_native_utf8_bytes: c_int,
+    max_object_read_batch_count: c_int,
+    max_object_table_page_limit: c_int,
+    max_object_read_batch_payload_bytes: c_longlong,
+    max_cached_object_read_batch_payload_bytes: c_longlong,
+    max_active_contexts: c_int,
+    max_concurrent_operations: c_int,
+    supports_multiple_contexts: c_int,
+    supports_concurrent_operations: c_int,
+    legacy_static_engine: c_int,
+    native_console_capture: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct AssetStudioTypedContextOpenRequest {
+    struct_size: c_int,
+    input_path_utf8: *const c_uchar,
+    input_path_utf8_len: c_int,
+    unity_version_utf8: *const c_uchar,
+    unity_version_utf8_len: c_int,
+    asset_types_csv_utf8: *const c_uchar,
+    asset_types_csv_utf8_len: c_int,
+    output_dir_utf8: *const c_uchar,
+    output_dir_utf8_len: c_int,
+    load_all_assets: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AssetStudioTypedContextOpenResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    context_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    assets_file_count: c_int,
+    exportable_asset_count: c_int,
+    object_index_count: c_int,
+    has_more_assets: c_int,
+    unity_version_utf8: *mut c_uchar,
+    unity_version_utf8_len: c_int,
+    buffer: *mut c_uchar,
+    buffer_len: c_longlong,
+    duration_ms: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct AssetStudioTypedContextCloseRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AssetStudioTypedContextCloseResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    context_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    duration_ms: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct AssetStudioTypedObjectListRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    offset: c_int,
+    limit: c_int,
+    asset_types_csv_utf8: *const c_uchar,
+    asset_types_csv_utf8_len: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct AssetStudioTypedObjectListIntoRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    offset: c_int,
+    limit: c_int,
+    asset_types_csv_utf8: *const c_uchar,
+    asset_types_csv_utf8_len: c_int,
+    flags: c_int,
+    reserved: c_int,
+    buffer: *mut c_uchar,
+    buffer_len: c_longlong,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AssetStudioTypedAssetObject {
+    index: c_int,
+    type_id: c_int,
+    path_id: c_longlong,
+    size: c_longlong,
+    estimated_payload_capacity: c_longlong,
+    raw_payload_capacity: c_longlong,
+    image_payload_capacity: c_longlong,
+    text_payload_capacity: c_longlong,
+    payload_capacity_flags: c_int,
+    reserved: c_int,
+    name_offset: c_int,
+    name_len: c_int,
+    container_offset: c_int,
+    container_len: c_int,
+    type_offset: c_int,
+    type_len: c_int,
+    unique_id_offset: c_int,
+    unique_id_len: c_int,
+    source_file_offset: c_int,
+    source_file_len: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AssetStudioTypedObjectTable {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    object_table_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    offset: c_int,
+    limit: c_int,
+    next_offset: c_int,
+    has_more: c_int,
+    total_count: c_int,
+    returned_count: c_int,
+    objects: *mut AssetStudioTypedAssetObject,
+    string_data: *mut c_uchar,
+    string_data_len: c_int,
+    buffer: *mut c_uchar,
+    buffer_len: c_longlong,
+    duration_ms: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct AssetStudioTypedObjectReadItemRequest {
+    path_id: c_longlong,
+    kind_utf8: *const c_uchar,
+    kind_utf8_len: c_int,
+    image_format_utf8: *const c_uchar,
+    image_format_utf8_len: c_int,
+}
+
+#[repr(C)]
+struct AssetStudioTypedObjectReadBatchIntoRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    items: *const AssetStudioTypedObjectReadItemRequest,
+    count: c_int,
+    flags: c_int,
+    items_buffer: *mut c_uchar,
+    items_buffer_len: c_longlong,
+    payload: *mut c_uchar,
+    payload_len: c_longlong,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AssetStudioTypedObjectReadBatchRetryResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    object_read_batch_abi_version: c_int,
+    object_read_batch_into_abi_version: c_int,
+    object_read_batch_direct_retry_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    requested_count: c_int,
+    returned_count: c_int,
+    failed_count: c_int,
+    items: *mut AssetStudioTypedObjectReadItemResponse,
+    string_data: *mut c_uchar,
+    string_data_len: c_int,
+    items_buffer: *mut c_uchar,
+    items_buffer_len: c_longlong,
+    payload: *mut c_uchar,
+    payload_len: c_longlong,
+    required_items_buffer_len: c_longlong,
+    required_string_data_len: c_int,
+    required_payload_len: c_longlong,
+    duration_ms: c_longlong,
+    result_handle: c_longlong,
+    ownership_flags: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct AssetStudioTypedObjectReadItemResponse {
+    index: c_int,
+    status: c_int,
+    error_code: c_int,
+    path_id: c_longlong,
+    type_id: c_int,
+    size: c_longlong,
+    payload_offset: c_longlong,
+    payload_len: c_longlong,
+    payload_kind_offset: c_int,
+    payload_kind_len: c_int,
+    suggested_extension_offset: c_int,
+    suggested_extension_len: c_int,
+    error_message_offset: c_int,
+    error_message_len: c_int,
+}
 
 struct EnvVarGuard {
     name: &'static str,
@@ -759,14 +1316,28 @@ fn native_call_lock() -> MutexGuard<'static, ()> {
 pub fn query_assetstudio_native_version(
     native_library_path: &str,
 ) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
-    let (status, response_json) = call_assetstudio_native_raw(
-        native_library_path,
-        AssetStudioNativeOperation::Version,
-        None,
-    )?;
-    let response: AssetStudioNativeVersion = sonic_rs::from_str(&response_json)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
-    if status == 0 && response.success {
+    let _lock = native_call_lock();
+    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+    library.query_version()
+}
+
+pub async fn query_assetstudio_native_version_worker(
+    native_library_path: &str,
+    worker_path: Option<&str>,
+) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
+    let worker_path = configured_assetstudio_native_worker_path(worker_path)?;
+    let request = AssetStudioNativeRequest::Version;
+    let output = run_assetstudio_native_worker(&worker_path, native_library_path, &request).await?;
+    parse_assetstudio_native_version_response(output.status_success, output.response, output.status)
+}
+
+fn parse_assetstudio_native_version_response(
+    status_success: bool,
+    response: AssetStudioNativeResponse,
+    status: String,
+) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
+    let response = response.into_version()?;
+    if status_success && response.success {
         Ok(response)
     } else {
         Err(ExportPipelineError::AssetStudioNative {
@@ -781,19 +1352,13 @@ pub fn inspect_assetstudio_native_bundle(
     native_library_path: &str,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
-    let request_json = sonic_rs::to_string(request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-    let (status, response_json) = call_assetstudio_native_raw(
-        native_library_path,
-        AssetStudioNativeOperation::Inspect,
-        Some(&request_json),
-    )?;
-    let response: AssetStudioNativeInspectResponse = sonic_rs::from_str(&response_json)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let _lock = native_call_lock();
+    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+    let response = library.inspect(request)?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native inspect warning");
     }
-    if status == 0 && response.success {
+    if response.success {
         info!(
             assets = response.assets.len(),
             duration_ms = response.duration_ms,
@@ -803,9 +1368,10 @@ pub fn inspect_assetstudio_native_bundle(
         Ok(response)
     } else {
         Err(ExportPipelineError::AssetStudioNative {
-            message: response.error.clone().unwrap_or_else(|| {
-                format!("native inspect failed with status {status} and no error message")
-            }),
+            message: response
+                .error
+                .clone()
+                .unwrap_or_else(|| "native typed inspect failed with no error message".to_string()),
         })
     }
 }
@@ -814,19 +1380,13 @@ pub fn open_assetstudio_native_context(
     native_library_path: &str,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeContextOpenResponse, ExportPipelineError> {
-    let request_json = sonic_rs::to_string(request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-    let (status, response_json) = call_assetstudio_native_raw(
-        native_library_path,
-        AssetStudioNativeOperation::ContextOpen,
-        Some(&request_json),
-    )?;
-    let response: AssetStudioNativeContextOpenResponse = sonic_rs::from_str(&response_json)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let _lock = native_call_lock();
+    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+    let response = library.open_context(request)?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native context open warning");
     }
-    if status == 0 && response.success {
+    if response.success {
         info!(
             context_id = response.context_id,
             assets = response.assets.len(),
@@ -838,7 +1398,7 @@ pub fn open_assetstudio_native_context(
     } else {
         Err(ExportPipelineError::AssetStudioNative {
             message: response.error.clone().unwrap_or_else(|| {
-                format!("native context_open failed with status {status} and no error message")
+                "native typed context_open failed with no error message".to_string()
             }),
         })
     }
@@ -848,24 +1408,18 @@ pub fn close_assetstudio_native_context(
     native_library_path: &str,
     request: &AssetStudioNativeContextCloseRequest,
 ) -> Result<AssetStudioNativeContextCloseResponse, ExportPipelineError> {
-    let request_json = sonic_rs::to_string(request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-    let (status, response_json) = call_assetstudio_native_raw(
-        native_library_path,
-        AssetStudioNativeOperation::ContextClose,
-        Some(&request_json),
-    )?;
-    let response: AssetStudioNativeContextCloseResponse = sonic_rs::from_str(&response_json)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let _lock = native_call_lock();
+    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+    let response = library.close_context(request)?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native context close warning");
     }
-    if status == 0 && response.success {
+    if response.success {
         Ok(response)
     } else {
         Err(ExportPipelineError::AssetStudioNative {
             message: response.error.clone().unwrap_or_else(|| {
-                format!("native context_close failed with status {status} and no error message")
+                "native typed context_close failed with no error message".to_string()
             }),
         })
     }
@@ -875,26 +1429,18 @@ pub fn list_assetstudio_native_context_objects(
     native_library_path: &str,
     request: &AssetStudioNativeContextListObjectsRequest,
 ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
-    let request_json = sonic_rs::to_string(request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-    let (status, response_json) = call_assetstudio_native_raw(
-        native_library_path,
-        AssetStudioNativeOperation::ContextListObjects,
-        Some(&request_json),
-    )?;
-    let response: AssetStudioNativeContextListObjectsResponse = sonic_rs::from_str(&response_json)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let _lock = native_call_lock();
+    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+    let response = library.list_context_objects(request)?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native context list objects warning");
     }
-    if status == 0 && response.success {
+    if response.success {
         Ok(response)
     } else {
         Err(ExportPipelineError::AssetStudioNative {
             message: response.error.clone().unwrap_or_else(|| {
-                format!(
-                    "native context_list_objects failed with status {status} and no error message"
-                )
+                "native typed context_list_objects failed with no error message".to_string()
             }),
         })
     }
@@ -942,20 +1488,66 @@ async fn call_assetstudio_native_inspect_by_mode(
     }
 }
 
-pub fn call_assetstudio_native_raw(
+pub fn call_assetstudio_native_typed_request(
     native_library_path: &str,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
-) -> Result<(c_int, String), ExportPipelineError> {
+    request: &AssetStudioNativeRequest,
+) -> Result<(c_int, AssetStudioNativeResponse, Vec<u8>), ExportPipelineError> {
     let _lock = native_call_lock();
     let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
-    library.call(operation, request_json)
+    library.call_typed_request(request)
 }
 
 pub struct LoadedAssetStudioNativeLibrary {
-    library: libloading::Library,
+    _library: libloading::Library,
     _native_dependency_handles: Vec<libloading::Library>,
     _env_guard: EnvVarGuard,
+    _free_string: AssetStudioFreeStringFn,
+    free_buffer: AssetStudioFreeBufferFn,
+    result_free: AssetStudioResultFreeFn,
+    capabilities: AssetStudioTypedCapabilitiesFn,
+    abi_layout: AssetStudioTypedAbiLayoutFn,
+    limits: AssetStudioTypedLimitsFn,
+    context_open: AssetStudioTypedContextOpenFn,
+    context_list_objects_size: AssetStudioTypedContextListObjectsSizeFn,
+    context_list_objects_into: AssetStudioTypedContextListObjectsIntoFn,
+    context_close: AssetStudioTypedContextCloseFn,
+    context_read_objects_direct_retry: AssetStudioTypedContextReadObjectsDirectRetryFn,
+}
+
+fn load_required_symbol<T>(
+    library: &libloading::Library,
+    symbol: &'static [u8],
+) -> Result<T, ExportPipelineError>
+where
+    T: Copy,
+{
+    unsafe {
+        library
+            .get::<T>(symbol)
+            .map(|function| *function)
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!(
+                    "missing required typed AssetStudioFFI symbol `{}`: {source}",
+                    String::from_utf8_lossy(symbol)
+                ),
+            })
+    }
+}
+
+fn check_typed_abi_version(
+    name: &'static str,
+    native: c_int,
+    expected: c_int,
+) -> Result<(), ExportPipelineError> {
+    if native == expected {
+        Ok(())
+    } else {
+        Err(ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "AssetStudioFFI {name} version mismatch: native={native} rust={expected}"
+            ),
+        })
+    }
 }
 
 impl LoadedAssetStudioNativeLibrary {
@@ -974,237 +1566,1001 @@ impl LoadedAssetStudioNativeLibrary {
                     ),
                 }
             })?;
-            Ok(Self {
-                library,
+            let free_string = load_required_symbol::<AssetStudioFreeStringFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_FREE_STRING,
+            )?;
+            let free_buffer = load_required_symbol::<AssetStudioFreeBufferFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_FREE_BUFFER,
+            )?;
+            let result_free = load_required_symbol::<AssetStudioResultFreeFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_RESULT_FREE,
+            )?;
+            let capabilities = load_required_symbol::<AssetStudioTypedCapabilitiesFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_CAPABILITIES,
+            )?;
+            let abi_layout = load_required_symbol::<AssetStudioTypedAbiLayoutFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_ABI_LAYOUT,
+            )?;
+            let limits = load_required_symbol::<AssetStudioTypedLimitsFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_LIMITS,
+            )?;
+            let context_open = load_required_symbol::<AssetStudioTypedContextOpenFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_CONTEXT_OPEN,
+            )?;
+            let context_list_objects_size =
+                load_required_symbol::<AssetStudioTypedContextListObjectsSizeFn>(
+                    &library,
+                    ASSETSTUDIO_SYMBOL_CONTEXT_LIST_OBJECTS_SIZE,
+                )?;
+            let context_list_objects_into =
+                load_required_symbol::<AssetStudioTypedContextListObjectsIntoFn>(
+                    &library,
+                    ASSETSTUDIO_SYMBOL_CONTEXT_LIST_OBJECTS_INTO,
+                )?;
+            let context_close = load_required_symbol::<AssetStudioTypedContextCloseFn>(
+                &library,
+                ASSETSTUDIO_SYMBOL_CONTEXT_CLOSE,
+            )?;
+            let context_read_objects_direct_retry =
+                load_required_symbol::<AssetStudioTypedContextReadObjectsDirectRetryFn>(
+                    &library,
+                    ASSETSTUDIO_SYMBOL_CONTEXT_READ_OBJECTS_DIRECT_RETRY,
+                )?;
+            let loaded = Self {
+                _library: library,
                 _native_dependency_handles: native_dependency_handles,
                 _env_guard: env_guard,
-            })
-        }
-    }
-
-    pub fn call(
-        &self,
-        operation: AssetStudioNativeOperation,
-        request_json: Option<&str>,
-    ) -> Result<(c_int, String), ExportPipelineError> {
-        let request_json = request_json
-            .map(|value| {
-                CString::new(value).map_err(|source| ExportPipelineError::AssetStudioNative {
-                    message: format!(
-                        "native {} request json contains interior nul byte: {source}",
-                        operation.as_str()
-                    ),
-                })
-            })
-            .transpose()?;
-
-        unsafe {
-            let free = self
-                .library
-                .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
-                .map_err(|source| ExportPipelineError::AssetStudioNative {
-                    message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
-                })?;
-
-            let mut response_ptr: *mut c_char = ptr::null_mut();
-            let status = match operation {
-                AssetStudioNativeOperation::Version => {
-                    let version = self
-                        .library
-                        .get::<AssetStudioVersionFn>(b"haruki_assetstudio_version")
-                        .map_err(|source| ExportPipelineError::AssetStudioNative {
-                            message: format!("missing haruki_assetstudio_version symbol: {source}"),
-                        })?;
-                    version(&mut response_ptr)
-                }
-                AssetStudioNativeOperation::Inspect => {
-                    let inspect = self
-                        .library
-                        .get::<AssetStudioInspectFn>(b"haruki_assetstudio_inspect")
-                        .map_err(|source| ExportPipelineError::AssetStudioNative {
-                            message: format!("missing haruki_assetstudio_inspect symbol: {source}"),
-                        })?;
-                    let request_json = request_json.as_ref().ok_or_else(|| {
-                        ExportPipelineError::AssetStudioNative {
-                            message: "native inspect requires request json".to_string(),
-                        }
-                    })?;
-                    inspect(request_json.as_ptr(), &mut response_ptr)
-                }
-                AssetStudioNativeOperation::ContextOpen => {
-                    let context_open = self
-                        .library
-                        .get::<AssetStudioContextOpenFn>(b"haruki_assetstudio_context_open")
-                        .map_err(|source| ExportPipelineError::AssetStudioNative {
-                            message: format!(
-                                "missing haruki_assetstudio_context_open symbol: {source}"
-                            ),
-                        })?;
-                    let request_json = request_json.as_ref().ok_or_else(|| {
-                        ExportPipelineError::AssetStudioNative {
-                            message: "native context_open requires request json".to_string(),
-                        }
-                    })?;
-                    context_open(request_json.as_ptr(), &mut response_ptr)
-                }
-                AssetStudioNativeOperation::ContextListObjects => {
-                    let list_objects = self
-                        .library
-                        .get::<AssetStudioContextListObjectsFn>(
-                            b"haruki_assetstudio_context_list_objects",
-                        )
-                        .map_err(|source| ExportPipelineError::AssetStudioNative {
-                            message: format!(
-                                "missing haruki_assetstudio_context_list_objects symbol: {source}"
-                            ),
-                        })?;
-                    let request_json = request_json.as_ref().ok_or_else(|| {
-                        ExportPipelineError::AssetStudioNative {
-                            message: "native context_list_objects requires request json"
-                                .to_string(),
-                        }
-                    })?;
-                    list_objects(request_json.as_ptr(), &mut response_ptr)
-                }
-                AssetStudioNativeOperation::ContextClose => {
-                    let context_close = self
-                        .library
-                        .get::<AssetStudioContextCloseFn>(b"haruki_assetstudio_context_close")
-                        .map_err(|source| ExportPipelineError::AssetStudioNative {
-                            message: format!(
-                                "missing haruki_assetstudio_context_close symbol: {source}"
-                            ),
-                        })?;
-                    let request_json = request_json.as_ref().ok_or_else(|| {
-                        ExportPipelineError::AssetStudioNative {
-                            message: "native context_close requires request json".to_string(),
-                        }
-                    })?;
-                    context_close(request_json.as_ptr(), &mut response_ptr)
-                }
-                AssetStudioNativeOperation::ContextReadObject => {
-                    return Err(ExportPipelineError::AssetStudioNative {
-                        message: "native context_read_object requires payload-aware call path"
-                            .to_string(),
-                    });
-                }
-                AssetStudioNativeOperation::ContextReadObjects => {
-                    return Err(ExportPipelineError::AssetStudioNative {
-                        message: "native context_read_objects requires payload-aware call path"
-                            .to_string(),
-                    });
-                }
+                _free_string: free_string,
+                free_buffer,
+                result_free,
+                capabilities,
+                abi_layout,
+                limits,
+                context_open,
+                context_list_objects_size,
+                context_list_objects_into,
+                context_close,
+                context_read_objects_direct_retry,
             };
-            let response = take_native_response_string(response_ptr, *free);
-            if status != 0 && response.is_empty() {
-                return Err(ExportPipelineError::AssetStudioNative {
-                    message: format!(
-                        "native {} failed with status {status} and no response",
-                        operation.as_str()
-                    ),
-                });
-            }
-            Ok((status, response))
+            loaded.verify_typed_abi()?;
+            Ok(loaded)
         }
     }
 
-    pub fn call_payload(
+    pub fn query_version(&self) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
+        let response = self.call_typed_capabilities()?;
+        Ok(AssetStudioNativeVersion {
+            success: response.status == 0,
+            adapter_version: None,
+            assetstudio_cli_version: None,
+            error: (response.status != 0).then(|| {
+                format!(
+                    "AssetStudioFFI capabilities_v2 failed: status={} error_code={}",
+                    response.status, response.error_code
+                )
+            }),
+        })
+    }
+
+    fn inspect(
         &self,
-        request_json: &str,
-        symbol: &'static [u8],
-        operation_name: &str,
-    ) -> Result<(c_int, String, Vec<u8>), ExportPipelineError> {
-        let request_json = CString::new(request_json).map_err(|source| {
-            ExportPipelineError::AssetStudioNative {
+        request: &AssetStudioNativeInspectRequest,
+    ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
+        let open_response = self.open_context(request)?;
+        if !open_response.success {
+            return Ok(AssetStudioNativeInspectResponse {
+                success: false,
+                assets_file_count: open_response.assets_file_count,
+                exportable_asset_count: open_response.exportable_asset_count,
+                unity_version: open_response.unity_version,
+                assets: Vec::new(),
+                warnings: open_response.warnings,
+                phase_ms: open_response.phase_ms,
+                metrics: open_response.metrics,
+                error: open_response.error,
+                duration_ms: open_response.duration_ms,
+            });
+        }
+
+        let context_id = open_response.context_id;
+        let mut phase_ms = open_response.phase_ms.clone();
+        let mut assets = Vec::with_capacity(open_response.exportable_asset_count);
+        let mut inspect_error = None;
+        let mut offset = 0usize;
+
+        let list_result = (|| {
+            if !open_response.assets.is_empty() && !open_response.has_more_assets {
+                assets.extend(open_response.assets.clone());
+                return Ok(());
+            }
+            loop {
+                let response =
+                    self.list_context_objects(&AssetStudioNativeContextListObjectsRequest {
+                        context_id,
+                        offset,
+                        limit: NATIVE_AOT_CONTEXT_LIST_PAGE_SIZE,
+                    })?;
+                merge_optional_max_phase_ms(
+                    &mut phase_ms,
+                    "context_list.duration_ms",
+                    response.duration_ms,
+                );
+                if !response.success {
+                    return Err(ExportPipelineError::AssetStudioNative {
+                        message: response.error.unwrap_or_else(|| {
+                            "native typed inspect list_objects failed".to_string()
+                        }),
+                    });
+                }
+                assets.extend(response.assets);
+                match response.next_offset {
+                    Some(next_offset) => offset = next_offset,
+                    None => break,
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = list_result {
+            inspect_error = Some(error.to_string());
+        }
+
+        let close_response =
+            self.close_context(&AssetStudioNativeContextCloseRequest { context_id });
+        if let Err(error) = close_response {
+            if inspect_error.is_none() {
+                inspect_error = Some(error.to_string());
+            } else {
+                warn!(error = %error, "assetstudio typed inspect context close failed after list error");
+            }
+        }
+
+        Ok(AssetStudioNativeInspectResponse {
+            success: inspect_error.is_none(),
+            assets_file_count: open_response.assets_file_count,
+            exportable_asset_count: open_response.exportable_asset_count,
+            unity_version: open_response.unity_version,
+            assets,
+            warnings: open_response.warnings,
+            phase_ms,
+            metrics: open_response.metrics,
+            error: inspect_error,
+            duration_ms: open_response.duration_ms,
+        })
+    }
+
+    fn verify_typed_abi(&self) -> Result<(), ExportPipelineError> {
+        let capabilities = self.call_typed_capabilities()?;
+        if capabilities.struct_size != size_of::<AssetStudioTypedCapabilitiesResponse>() as c_int {
+            return Err(ExportPipelineError::AssetStudioNative {
                 message: format!(
-                    "native {operation_name} request json contains interior nul byte: {source}"
+                    "AssetStudioFFI capabilities_v2 struct size mismatch: native={} rust={}",
+                    capabilities.struct_size,
+                    size_of::<AssetStudioTypedCapabilitiesResponse>()
                 ),
+            });
+        }
+        if capabilities.status != 0 {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!(
+                    "AssetStudioFFI capabilities_v2 failed: status={} error_code={}",
+                    capabilities.status, capabilities.error_code
+                ),
+            });
+        }
+        check_typed_abi_version(
+            "capabilities_v2 abi",
+            capabilities.abi_version,
+            ASSETSTUDIO_TYPED_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "capabilities_v2 schema",
+            capabilities.schema_version,
+            ASSETSTUDIO_TYPED_SCHEMA_VERSION,
+        )?;
+        check_typed_abi_version(
+            "context",
+            capabilities.context_abi_version,
+            ASSETSTUDIO_TYPED_CONTEXT_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "object_table",
+            capabilities.object_table_abi_version,
+            ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "object_table_into",
+            capabilities.object_table_into_abi_version,
+            ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "object_read_batch",
+            capabilities.object_read_batch_abi_version,
+            ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "object_read_batch_into",
+            capabilities.object_read_batch_into_abi_version,
+            ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_INTO_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "object_read_batch_direct_retry",
+            capabilities.object_read_batch_direct_retry_abi_version,
+            ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_DIRECT_RETRY_ABI_VERSION,
+        )?;
+
+        let mut layout = AssetStudioTypedAbiLayoutResponse::default();
+        let status = unsafe { (self.abi_layout)(&mut layout) };
+        if status != 0 || layout.status != 0 {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!(
+                    "AssetStudioFFI abi_layout_v2 failed: status={} response_status={} error_code={}",
+                    status, layout.status, layout.error_code
+                ),
+            });
+        }
+        if layout.struct_size != size_of::<AssetStudioTypedAbiLayoutResponse>() as c_int {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!(
+                    "AssetStudioFFI abi_layout_v2 struct size mismatch: native={} rust={}",
+                    layout.struct_size,
+                    size_of::<AssetStudioTypedAbiLayoutResponse>()
+                ),
+            });
+        }
+        check_typed_abi_version(
+            "abi_layout_v2 abi",
+            layout.abi_version,
+            ASSETSTUDIO_TYPED_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "abi_layout_v2 schema",
+            layout.schema_version,
+            ASSETSTUDIO_TYPED_SCHEMA_VERSION,
+        )?;
+        check_typed_abi_version(
+            "abi_layout_v2 layout",
+            layout.layout_version,
+            ASSETSTUDIO_TYPED_LAYOUT_VERSION,
+        )?;
+        check_typed_struct_size::<AssetStudioTypedCapabilitiesResponse>(
+            layout.capabilities_response,
+            "haruki_assetstudio_capabilities_response",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedContextOpenRequest>(
+            layout.context_open_request,
+            "haruki_assetstudio_context_open_request",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedContextOpenResponse>(
+            layout.context_open_response,
+            "haruki_assetstudio_context_open_response",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedContextCloseRequest>(
+            layout.context_close_request,
+            "haruki_assetstudio_context_close_request",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedContextCloseResponse>(
+            layout.context_close_response,
+            "haruki_assetstudio_context_close_response",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedLimitsResponse>(
+            layout.limits_response,
+            "haruki_assetstudio_limits_response",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedObjectListRequest>(
+            layout.object_list_request,
+            "haruki_assetstudio_object_list_request",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedObjectListIntoRequest>(
+            layout.object_list_into_request_v3,
+            "haruki_assetstudio_object_list_into_request_v3",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedObjectTable>(
+            layout.object_table,
+            "haruki_assetstudio_object_table",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedAssetObject>(
+            layout.asset_object,
+            "haruki_assetstudio_asset_object",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedObjectReadItemRequest>(
+            layout.object_read_item_request,
+            "haruki_assetstudio_object_read_item_request",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedObjectReadBatchIntoRequest>(
+            layout.object_read_batch_into_request_v4,
+            "haruki_assetstudio_object_read_batch_into_request_v4",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedObjectReadItemResponse>(
+            layout.object_read_item_response_v4,
+            "haruki_assetstudio_object_read_item_response_v4",
+        )?;
+        check_typed_struct_size::<AssetStudioTypedObjectReadBatchRetryResponse>(
+            layout.object_read_batch_retry_response_v7,
+            "haruki_assetstudio_object_read_batch_retry_response_v7",
+        )?;
+
+        let mut limits = AssetStudioTypedLimitsResponse::default();
+        let status = unsafe { (self.limits)(&mut limits) };
+        if status != 0 || limits.status != 0 {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!(
+                    "AssetStudioFFI limits_v1 failed: status={} response_status={} error_code={}",
+                    status, limits.status, limits.error_code
+                ),
+            });
+        }
+        if limits.struct_size != size_of::<AssetStudioTypedLimitsResponse>() as c_int {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!(
+                    "AssetStudioFFI limits_v1 struct size mismatch: native={} rust={}",
+                    limits.struct_size,
+                    size_of::<AssetStudioTypedLimitsResponse>()
+                ),
+            });
+        }
+        check_typed_abi_version(
+            "limits_v1 abi",
+            limits.abi_version,
+            ASSETSTUDIO_TYPED_ABI_VERSION,
+        )?;
+        check_typed_abi_version(
+            "limits_v1 schema",
+            limits.schema_version,
+            ASSETSTUDIO_TYPED_SCHEMA_VERSION,
+        )?;
+        check_typed_abi_version(
+            "limits_v1 limits",
+            limits.limits_abi_version,
+            ASSETSTUDIO_TYPED_LIMITS_ABI_VERSION,
+        )?;
+        Ok(())
+    }
+
+    fn call_typed_capabilities(
+        &self,
+    ) -> Result<AssetStudioTypedCapabilitiesResponse, ExportPipelineError> {
+        let mut response = AssetStudioTypedCapabilitiesResponse::default();
+        let status = unsafe { (self.capabilities)(&mut response) };
+        if status != 0 || response.status != 0 {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: format!(
+                    "AssetStudioFFI capabilities_v2 failed: status={} response_status={} error_code={}",
+                    status, response.status, response.error_code
+                ),
+            });
+        }
+        Ok(response)
+    }
+
+    pub fn call_typed_request(
+        &self,
+        request: &AssetStudioNativeRequest,
+    ) -> Result<(c_int, AssetStudioNativeResponse, Vec<u8>), ExportPipelineError> {
+        match request {
+            AssetStudioNativeRequest::Version => {
+                let response = self.query_version()?;
+                let status = if response.success { 0 } else { 100 };
+                Ok((
+                    status,
+                    AssetStudioNativeResponse::Version(response),
+                    Vec::new(),
+                ))
+            }
+            AssetStudioNativeRequest::Inspect(request) => {
+                let response = self.inspect(request)?;
+                let status = if response.success { 0 } else { 100 };
+                Ok((
+                    status,
+                    AssetStudioNativeResponse::Inspect(response),
+                    Vec::new(),
+                ))
+            }
+            AssetStudioNativeRequest::ContextOpen(request) => {
+                let response = self.open_context(request)?;
+                let status = if response.success { 0 } else { 100 };
+                Ok((
+                    status,
+                    AssetStudioNativeResponse::ContextOpen(response),
+                    Vec::new(),
+                ))
+            }
+            AssetStudioNativeRequest::ContextListObjects(request) => {
+                let response = self.list_context_objects(request)?;
+                let status = if response.success { 0 } else { 100 };
+                Ok((
+                    status,
+                    AssetStudioNativeResponse::ContextListObjects(response),
+                    Vec::new(),
+                ))
+            }
+            AssetStudioNativeRequest::ContextClose(request) => {
+                let response = self.close_context(request)?;
+                let status = if response.success { 0 } else { 100 };
+                Ok((
+                    status,
+                    AssetStudioNativeResponse::ContextClose(response),
+                    Vec::new(),
+                ))
+            }
+            AssetStudioNativeRequest::ContextReadObject(request) => {
+                let batch_request = AssetStudioNativeContextReadObjectsRequest {
+                    context_id: request.context_id,
+                    objects: vec![AssetStudioNativeContextReadObjectItemRequest {
+                        path_id: request.path_id,
+                        kind: request.kind.clone(),
+                        image_format: request.image_format.clone(),
+                    }],
+                };
+                let (status, batch_response, payload) =
+                    self.read_context_objects(&batch_request)?;
+                let response = batch_response.reads.into_iter().next().unwrap_or_else(|| {
+                    AssetStudioNativeObjectReadResponse {
+                        success: false,
+                        asset: None,
+                        payload_kind: None,
+                        payload_len: 0,
+                        suggested_extension: None,
+                        warnings: Vec::new(),
+                        phase_ms: HashMap::new(),
+                        error: Some("typed context_read_object returned no read item".to_string()),
+                        duration_ms: None,
+                    }
+                });
+                Ok((
+                    status,
+                    AssetStudioNativeResponse::ContextReadObject(response),
+                    payload,
+                ))
+            }
+            AssetStudioNativeRequest::ContextReadObjects(request) => {
+                let (status, response, payload) = self.read_context_objects(request)?;
+                Ok((
+                    status,
+                    AssetStudioNativeResponse::ContextReadObjects(response),
+                    payload,
+                ))
+            }
+        }
+    }
+
+    fn open_context(
+        &self,
+        request: &AssetStudioNativeInspectRequest,
+    ) -> Result<AssetStudioNativeContextOpenResponse, ExportPipelineError> {
+        let input_path = CString::new(request.input_path.clone()).map_err(|source| {
+            ExportPipelineError::AssetStudioNative {
+                message: format!("native context_open input path contains nul byte: {source}"),
             }
         })?;
-
-        unsafe {
-            let free_string = self
-                .library
-                .get::<AssetStudioFreeStringFn>(b"haruki_assetstudio_free_string")
-                .map_err(|source| ExportPipelineError::AssetStudioNative {
-                    message: format!("missing haruki_assetstudio_free_string symbol: {source}"),
-                })?;
-            let free_buffer = self
-                .library
-                .get::<AssetStudioFreeBufferFn>(b"haruki_assetstudio_free_buffer")
-                .map_err(|source| ExportPipelineError::AssetStudioNative {
-                    message: format!("missing haruki_assetstudio_free_buffer symbol: {source}"),
-                })?;
-            let read = self
-                .library
-                .get::<AssetStudioContextReadObjectsFn>(symbol)
-                .map_err(|source| ExportPipelineError::AssetStudioNative {
-                    message: format!("missing {operation_name} symbol: {source}"),
-                })?;
-
-            let mut response_ptr: *mut c_char = ptr::null_mut();
-            let mut payload_ptr: *mut c_uchar = ptr::null_mut();
-            let mut payload_len: c_longlong = 0;
-            let status = read(
-                request_json.as_ptr(),
-                &mut response_ptr,
-                &mut payload_ptr,
-                &mut payload_len,
-            );
-            let response = take_native_response_string(response_ptr, *free_string);
-            let payload = if !payload_ptr.is_null() && payload_len > 0 {
-                let payload =
-                    std::slice::from_raw_parts(payload_ptr, payload_len as usize).to_vec();
-                free_buffer(payload_ptr);
-                payload
-            } else {
-                Vec::new()
-            };
-            if status != 0 && response.is_empty() {
-                return Err(ExportPipelineError::AssetStudioNative {
-                    message: format!(
-                        "native {operation_name} failed with status {status} and no response"
-                    ),
-                });
+        let unity_version = optional_native_cstring(request.unity_version.as_deref())?;
+        let asset_types_csv = CString::new(request.asset_types.join(",")).map_err(|source| {
+            ExportPipelineError::AssetStudioNative {
+                message: format!("native context_open asset types contain nul byte: {source}"),
             }
-            Ok((status, response, payload))
+        })?;
+        let typed_request = AssetStudioTypedContextOpenRequest {
+            struct_size: size_of::<AssetStudioTypedContextOpenRequest>() as c_int,
+            input_path_utf8: input_path.as_ptr().cast(),
+            input_path_utf8_len: input_path.as_bytes().len() as c_int,
+            unity_version_utf8: unity_version
+                .as_ref()
+                .map_or(ptr::null(), |value| value.as_ptr().cast()),
+            unity_version_utf8_len: unity_version
+                .as_ref()
+                .map_or(0, |value| value.as_bytes().len() as c_int),
+            asset_types_csv_utf8: asset_types_csv.as_ptr().cast(),
+            asset_types_csv_utf8_len: asset_types_csv.as_bytes().len() as c_int,
+            output_dir_utf8: ptr::null(),
+            output_dir_utf8_len: 0,
+            load_all_assets: request.load_all_assets as c_int,
+            flags: 0,
+            reserved: 0,
+        };
+        let mut response = AssetStudioTypedContextOpenResponse::default();
+        let status = unsafe { (self.context_open)(&typed_request, &mut response) };
+        let unity_version =
+            typed_response_string(response.unity_version_utf8, response.unity_version_utf8_len);
+        if !response.buffer.is_null() {
+            unsafe { (self.free_buffer)(response.buffer) };
         }
+        let success = status == 0 && response.status == 0;
+        let mut phase_ms = HashMap::new();
+        if response.duration_ms >= 0 {
+            phase_ms.insert("context_open_v2".to_string(), response.duration_ms as u64);
+        }
+        Ok(AssetStudioNativeContextOpenResponse {
+            success,
+            context_id: response.context_id,
+            assets_file_count: response.assets_file_count.max(0) as usize,
+            exportable_asset_count: response.exportable_asset_count.max(0) as usize,
+            unity_version,
+            assets: Vec::new(),
+            warnings: Vec::new(),
+            phase_ms,
+            metrics: HashMap::new(),
+            worker_id: None,
+            object_index_count: response.object_index_count.max(0) as usize,
+            returned_asset_count: 0,
+            has_more_assets: response.has_more_assets != 0 || response.exportable_asset_count > 0,
+            error: (!success).then(|| {
+                format!(
+                    "typed context_open_v2 failed: status={} response_status={} error_code={}",
+                    status, response.status, response.error_code
+                )
+            }),
+            duration_ms: (response.duration_ms >= 0).then_some(response.duration_ms as u64),
+        })
+    }
+
+    fn list_context_objects(
+        &self,
+        request: &AssetStudioNativeContextListObjectsRequest,
+    ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
+        let asset_types_csv = CString::new("").unwrap();
+        let offset = checked_c_int(request.offset, "context_list_objects offset")?;
+        let limit = checked_c_int(request.limit, "context_list_objects limit")?;
+        let size_request = AssetStudioTypedObjectListRequest {
+            struct_size: size_of::<AssetStudioTypedObjectListRequest>() as c_int,
+            context_id: request.context_id,
+            offset,
+            limit,
+            asset_types_csv_utf8: asset_types_csv.as_ptr().cast(),
+            asset_types_csv_utf8_len: 0,
+            flags: 0,
+            reserved: 0,
+        };
+        let mut size_response = AssetStudioTypedObjectTable::default();
+        let status = unsafe { (self.context_list_objects_size)(&size_request, &mut size_response) };
+        if status != 0 || size_response.status != 0 {
+            return Ok(typed_list_error_response(request, status, &size_response));
+        }
+        let buffer_len = usize::try_from(size_response.buffer_len.max(0)).map_err(|_| {
+            ExportPipelineError::AssetStudioNative {
+                message: "typed context_list_objects buffer length is too large".to_string(),
+            }
+        })?;
+        let mut buffer = vec![0u8; buffer_len];
+        let into_request = AssetStudioTypedObjectListIntoRequest {
+            struct_size: size_of::<AssetStudioTypedObjectListIntoRequest>() as c_int,
+            context_id: request.context_id,
+            offset,
+            limit,
+            asset_types_csv_utf8: asset_types_csv.as_ptr().cast(),
+            asset_types_csv_utf8_len: 0,
+            flags: 0,
+            reserved: 0,
+            buffer: buffer.as_mut_ptr(),
+            buffer_len: buffer.len() as c_longlong,
+        };
+        let mut response = AssetStudioTypedObjectTable::default();
+        let status = unsafe { (self.context_list_objects_into)(&into_request, &mut response) };
+        Ok(if status == 0 && response.status == 0 {
+            typed_list_success_response(&response)
+        } else {
+            typed_list_error_response(request, status, &response)
+        })
+    }
+
+    fn close_context(
+        &self,
+        request: &AssetStudioNativeContextCloseRequest,
+    ) -> Result<AssetStudioNativeContextCloseResponse, ExportPipelineError> {
+        let typed_request = AssetStudioTypedContextCloseRequest {
+            struct_size: size_of::<AssetStudioTypedContextCloseRequest>() as c_int,
+            context_id: request.context_id,
+            flags: 0,
+            reserved: 0,
+        };
+        let mut response = AssetStudioTypedContextCloseResponse::default();
+        let status = unsafe { (self.context_close)(&typed_request, &mut response) };
+        let success = status == 0 && response.status == 0;
+        Ok(AssetStudioNativeContextCloseResponse {
+            success,
+            warnings: Vec::new(),
+            error: (!success).then(|| {
+                format!(
+                    "typed context_close_v2 failed: status={} response_status={} error_code={}",
+                    status, response.status, response.error_code
+                )
+            }),
+            duration_ms: (response.duration_ms >= 0).then_some(response.duration_ms as u64),
+        })
+    }
+
+    fn read_context_objects(
+        &self,
+        request: &AssetStudioNativeContextReadObjectsRequest,
+    ) -> Result<(c_int, AssetStudioNativeObjectReadBatchResponse, Vec<u8>), ExportPipelineError>
+    {
+        let mut kinds = Vec::with_capacity(request.objects.len());
+        let mut formats = Vec::with_capacity(request.objects.len());
+        let mut items = Vec::with_capacity(request.objects.len());
+        for item in &request.objects {
+            let kind = CString::new(item.kind.clone()).map_err(|source| {
+                ExportPipelineError::AssetStudioNative {
+                    message: format!("native read kind contains nul byte: {source}"),
+                }
+            })?;
+            let format = CString::new(item.image_format.clone()).map_err(|source| {
+                ExportPipelineError::AssetStudioNative {
+                    message: format!("native read image format contains nul byte: {source}"),
+                }
+            })?;
+            items.push(AssetStudioTypedObjectReadItemRequest {
+                path_id: item.path_id,
+                kind_utf8: kind.as_ptr().cast(),
+                kind_utf8_len: kind.as_bytes().len() as c_int,
+                image_format_utf8: format.as_ptr().cast(),
+                image_format_utf8_len: format.as_bytes().len() as c_int,
+            });
+            kinds.push(kind);
+            formats.push(format);
+        }
+        let typed_request = AssetStudioTypedObjectReadBatchIntoRequest {
+            struct_size: size_of::<AssetStudioTypedObjectReadBatchIntoRequest>() as c_int,
+            context_id: request.context_id,
+            items: items.as_ptr(),
+            count: items.len() as c_int,
+            flags: 0,
+            items_buffer: ptr::null_mut(),
+            items_buffer_len: 0,
+            payload: ptr::null_mut(),
+            payload_len: 0,
+            reserved: 0,
+        };
+        let mut response = AssetStudioTypedObjectReadBatchRetryResponse::default();
+        let status =
+            unsafe { (self.context_read_objects_direct_retry)(&typed_request, &mut response) };
+        let output = typed_read_objects_response(request, status, &response);
+        let payload = typed_read_objects_payload_bundle(&response);
+        if response.result_handle != 0 {
+            unsafe {
+                (self.result_free)(response.result_handle);
+            }
+        }
+        let payload = payload?;
+        let call_status = if output.success {
+            0
+        } else {
+            status.max(response.status)
+        };
+        Ok((call_status, output, payload))
     }
 }
 
-pub fn call_assetstudio_native_read_object_raw(
-    native_library_path: &str,
-    request_json: &str,
-) -> Result<(c_int, String, Vec<u8>), ExportPipelineError> {
-    call_assetstudio_native_payload_raw(
-        native_library_path,
-        request_json,
-        b"haruki_assetstudio_context_read_object",
-        "context_read_object",
-    )
+fn check_typed_struct_size<T>(
+    native: c_int,
+    name: &'static str,
+) -> Result<(), ExportPipelineError> {
+    let rust = size_of::<T>();
+    if native >= 0 && native as usize == rust {
+        Ok(())
+    } else {
+        Err(ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "AssetStudioFFI ABI layout mismatch for {name}: native={native} rust={rust}"
+            ),
+        })
+    }
 }
 
-pub fn call_assetstudio_native_read_objects_raw(
-    native_library_path: &str,
-    request_json: &str,
-) -> Result<(c_int, String, Vec<u8>), ExportPipelineError> {
-    call_assetstudio_native_payload_raw(
-        native_library_path,
-        request_json,
-        b"haruki_assetstudio_context_read_objects",
-        "context_read_objects",
-    )
+fn optional_native_cstring(value: Option<&str>) -> Result<Option<CString>, ExportPipelineError> {
+    value
+        .map(CString::new)
+        .transpose()
+        .map_err(|source| ExportPipelineError::AssetStudioNative {
+            message: format!("native string contains nul byte: {source}"),
+        })
 }
 
-fn call_assetstudio_native_payload_raw(
-    native_library_path: &str,
-    request_json: &str,
-    symbol: &'static [u8],
-    operation_name: &str,
-) -> Result<(c_int, String, Vec<u8>), ExportPipelineError> {
-    let _lock = native_call_lock();
-    let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
-    library.call_payload(request_json, symbol, operation_name)
+fn checked_c_int(value: usize, name: &str) -> Result<c_int, ExportPipelineError> {
+    c_int::try_from(value).map_err(|_| ExportPipelineError::AssetStudioNative {
+        message: format!("{name} is too large for typed AssetStudio ABI"),
+    })
+}
+
+fn typed_response_string(pointer: *const c_uchar, len: c_int) -> Option<String> {
+    if pointer.is_null() || len <= 0 {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, len as usize) };
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn typed_table_string(
+    table: &AssetStudioTypedObjectTable,
+    offset: c_int,
+    len: c_int,
+) -> Option<String> {
+    if table.string_data.is_null() || offset < 0 || len <= 0 {
+        return None;
+    }
+    typed_response_string(unsafe { table.string_data.add(offset as usize) }, len)
+        .filter(|value| !value.is_empty())
+}
+
+fn typed_list_success_response(
+    response: &AssetStudioTypedObjectTable,
+) -> AssetStudioNativeContextListObjectsResponse {
+    let objects = if response.objects.is_null() || response.returned_count <= 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(response.objects, response.returned_count as usize) }
+            .iter()
+            .map(|object| AssetStudioNativeAssetInfo {
+                index: object.index.max(0) as usize,
+                name: typed_table_string(response, object.name_offset, object.name_len),
+                container: typed_table_string(
+                    response,
+                    object.container_offset,
+                    object.container_len,
+                ),
+                asset_type: typed_table_string(response, object.type_offset, object.type_len),
+                type_id: object.type_id,
+                path_id: object.path_id,
+                unique_id: typed_table_string(
+                    response,
+                    object.unique_id_offset,
+                    object.unique_id_len,
+                ),
+                size: object.size,
+                source_file: typed_table_string(
+                    response,
+                    object.source_file_offset,
+                    object.source_file_len,
+                ),
+            })
+            .collect()
+    };
+    AssetStudioNativeContextListObjectsResponse {
+        success: true,
+        context_id: response.context_id,
+        offset: response.offset.max(0) as usize,
+        limit: response.limit.max(0) as usize,
+        next_offset: (response.has_more != 0 && response.next_offset >= 0)
+            .then_some(response.next_offset as usize),
+        total_count: response.total_count.max(0) as usize,
+        returned_count: response.returned_count.max(0) as usize,
+        assets: objects,
+        warnings: Vec::new(),
+        error: None,
+        duration_ms: (response.duration_ms >= 0).then_some(response.duration_ms as u64),
+    }
+}
+
+fn typed_list_error_response(
+    request: &AssetStudioNativeContextListObjectsRequest,
+    status: c_int,
+    response: &AssetStudioTypedObjectTable,
+) -> AssetStudioNativeContextListObjectsResponse {
+    AssetStudioNativeContextListObjectsResponse {
+        success: false,
+        context_id: request.context_id,
+        offset: request.offset,
+        limit: request.limit,
+        next_offset: None,
+        total_count: 0,
+        returned_count: 0,
+        assets: Vec::new(),
+        warnings: Vec::new(),
+        error: Some(format!(
+            "typed context_list_objects_v3 failed: status={} response_status={} error_code={}",
+            status, response.status, response.error_code
+        )),
+        duration_ms: (response.duration_ms >= 0).then_some(response.duration_ms as u64),
+    }
+}
+
+fn typed_read_string(
+    response: &AssetStudioTypedObjectReadBatchRetryResponse,
+    offset: c_int,
+    len: c_int,
+) -> Option<String> {
+    if response.string_data.is_null() || offset < 0 || len <= 0 {
+        return None;
+    }
+    let bytes = unsafe {
+        std::slice::from_raw_parts(response.string_data.add(offset as usize), len as usize)
+    };
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn typed_read_payload<'a>(
+    response: &'a AssetStudioTypedObjectReadBatchRetryResponse,
+    item: &AssetStudioTypedObjectReadItemResponse,
+) -> &'a [u8] {
+    if response.payload.is_null() || item.payload_offset < 0 || item.payload_len <= 0 {
+        return &[];
+    }
+    let start = item.payload_offset as usize;
+    let len = item.payload_len as usize;
+    let Some(end) = start.checked_add(len) else {
+        return &[];
+    };
+    if end > response.payload_len.max(0) as usize {
+        return &[];
+    }
+    unsafe { std::slice::from_raw_parts(response.payload.add(start), len) }
+}
+
+fn typed_read_items(
+    response: &AssetStudioTypedObjectReadBatchRetryResponse,
+) -> &[AssetStudioTypedObjectReadItemResponse] {
+    if response.items.is_null() || response.returned_count <= 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(response.items, response.returned_count as usize) }
+    }
+}
+
+fn typed_read_objects_response(
+    request: &AssetStudioNativeContextReadObjectsRequest,
+    status: c_int,
+    response: &AssetStudioTypedObjectReadBatchRetryResponse,
+) -> AssetStudioNativeObjectReadBatchResponse {
+    let partial_success = status == 9 || response.status == 9;
+    let success = (status == 0 && response.status == 0) || partial_success;
+    let mut phase_ms = HashMap::new();
+    if response.duration_ms >= 0 {
+        phase_ms.insert(
+            "read_objects_direct_retry_v7".to_string(),
+            response.duration_ms as u64,
+        );
+    }
+    let mut payload_kind_counts = HashMap::new();
+    let mut payload_bytes_by_kind = HashMap::new();
+    let reads = typed_read_items(response)
+        .iter()
+        .map(|item| {
+            let item_success = item.status == 0;
+            let payload_kind =
+                typed_read_string(response, item.payload_kind_offset, item.payload_kind_len);
+            if item_success {
+                if let Some(payload_kind) = payload_kind.as_deref() {
+                    *payload_kind_counts
+                        .entry(payload_kind.to_string())
+                        .or_default() += 1;
+                    *payload_bytes_by_kind
+                        .entry(payload_kind.to_string())
+                        .or_default() += item.payload_len.max(0) as u64;
+                }
+            }
+            AssetStudioNativeObjectReadResponse {
+                success: item_success,
+                asset: Some(AssetStudioNativeAssetInfo {
+                    index: item.index.max(0) as usize,
+                    name: None,
+                    container: None,
+                    asset_type: None,
+                    type_id: item.type_id,
+                    path_id: item.path_id,
+                    unique_id: None,
+                    size: item.size,
+                    source_file: None,
+                }),
+                payload_kind,
+                payload_len: item.payload_len,
+                suggested_extension: typed_read_string(
+                    response,
+                    item.suggested_extension_offset,
+                    item.suggested_extension_len,
+                ),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: (!item_success).then(|| {
+                    typed_read_string(response, item.error_message_offset, item.error_message_len)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "typed object read failed: path_id={} status={} error_code={}",
+                                item.path_id, item.status, item.error_code
+                            )
+                        })
+                }),
+                duration_ms: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let payload_data_bytes = typed_read_items(response)
+        .iter()
+        .filter(|item| item.status == 0)
+        .map(|item| item.payload_len.max(0) as u64)
+        .sum::<u64>();
+    AssetStudioNativeObjectReadBatchResponse {
+        success,
+        reads,
+        warnings: Vec::new(),
+        phase_ms,
+        asset_type_counts: HashMap::new(),
+        payload_kind_counts,
+        payload_bytes_by_kind,
+        payload_len: response.payload_len,
+        object_count: response.returned_count.max(0) as usize,
+        payload_bundle_version: NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION as u32,
+        payload_bundle_entry_count: typed_read_items(response)
+            .iter()
+            .filter(|item| item.status == 0 && item.payload_len > 0)
+            .count(),
+        payload_bundle_bytes: 0,
+        payload_data_bytes,
+        failed_count: response.failed_count.max(0) as usize,
+        read_payload_ms: if response.duration_ms >= 0 {
+            response.duration_ms as u64
+        } else {
+            0
+        },
+        worker_id: None,
+        call_seq: None,
+        phase_stats: HashMap::new(),
+        error: (!success).then(|| {
+            format!(
+                "typed context_read_objects_direct_retry_v7 failed: requested={} status={} response_status={} error_code={}",
+                request.objects.len(),
+                status,
+                response.status,
+                response.error_code
+            )
+        }),
+        duration_ms: (response.duration_ms >= 0).then_some(response.duration_ms as u64),
+    }
+}
+
+fn typed_read_objects_payload_bundle(
+    response: &AssetStudioTypedObjectReadBatchRetryResponse,
+) -> Result<Vec<u8>, ExportPipelineError> {
+    let entries = typed_read_items(response)
+        .iter()
+        .filter(|item| item.status == 0 && item.payload_len > 0)
+        .map(|item| (item.path_id.to_string(), typed_read_payload(response, item)))
+        .collect::<Vec<_>>();
+    write_native_payload_bundle(entries)
+}
+
+fn write_native_payload_bundle(
+    entries: Vec<(String, &[u8])>,
+) -> Result<Vec<u8>, ExportPipelineError> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let payload_data_bytes = entries
+        .iter()
+        .map(|(_, payload)| payload.len() as u64)
+        .sum::<u64>();
+    let mut total_len = NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN;
+    for (name, payload) in &entries {
+        total_len = total_len
+            .checked_add(4)
+            .and_then(|value| value.checked_add(8))
+            .and_then(|value| value.checked_add(name.len()))
+            .and_then(|value| value.checked_add(payload.len()))
+            .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+                message: "native payload bundle is too large".to_string(),
+            })?;
+    }
+    let mut bundle = Vec::with_capacity(total_len);
+    bundle.extend_from_slice(&NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
+    bundle.extend_from_slice(&NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
+    bundle.extend_from_slice(&(NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes());
+    bundle.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    bundle.extend_from_slice(&payload_data_bytes.to_le_bytes());
+    for (name, payload) in entries {
+        let name_len =
+            u32::try_from(name.len()).map_err(|_| ExportPipelineError::AssetStudioNative {
+                message: "native payload bundle entry name is too large".to_string(),
+            })?;
+        bundle.extend_from_slice(&name_len.to_le_bytes());
+        bundle.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bundle.extend_from_slice(name.as_bytes());
+        bundle.extend_from_slice(payload);
+    }
+    Ok(bundle)
 }
 
 #[allow(dead_code)]
@@ -1214,14 +2570,12 @@ async fn call_assetstudio_native_inspect_process(
     process_concurrency: usize,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
-    let request_json = sonic_rs::to_string(request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
+    let request = AssetStudioNativeRequest::Inspect(request.clone());
     let worker_path = configured_assetstudio_native_worker_path(worker_path)?;
     let output = match run_assetstudio_native_worker_limited(
         &worker_path,
         native_library_path,
-        AssetStudioNativeOperation::Inspect,
-        Some(&request_json),
+        &request,
         process_concurrency,
     )
     .await
@@ -1236,8 +2590,7 @@ async fn call_assetstudio_native_inspect_process(
             run_assetstudio_native_worker_isolated(
                 &worker_path,
                 native_library_path,
-                AssetStudioNativeOperation::Inspect,
-                Some(&request_json),
+                &request,
                 process_concurrency,
             )
             .await?
@@ -1254,14 +2607,12 @@ async fn call_assetstudio_native_inspect_pool(
     process_concurrency: usize,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
-    let request_json = sonic_rs::to_string(request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
+    let request = AssetStudioNativeRequest::Inspect(request.clone());
     let worker_path = configured_assetstudio_native_worker_path(worker_path)?;
     let output = match run_assetstudio_native_worker_pool(
         &worker_path,
         native_library_path,
-        AssetStudioNativeOperation::Inspect,
-        Some(&request_json),
+        &request,
         process_concurrency,
     )
     .await
@@ -1276,8 +2627,7 @@ async fn call_assetstudio_native_inspect_pool(
             run_assetstudio_native_worker_isolated(
                 &worker_path,
                 native_library_path,
-                AssetStudioNativeOperation::Inspect,
-                Some(&request_json),
+                &request,
                 process_concurrency,
             )
             .await?
@@ -1292,8 +2642,7 @@ fn parse_assetstudio_native_inspect_worker_output(
     worker_kind: &str,
     output: NativeWorkerOutput,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
-    let response: AssetStudioNativeInspectResponse = sonic_rs::from_str(&output.stdout)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let response = output.response.into_inspect()?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native inspect worker warning");
     }
@@ -1318,24 +2667,54 @@ fn parse_assetstudio_native_inspect_worker_output(
     }
 }
 
+enum NativeUnityPyCallTarget<'a> {
+    Pooled(&'a mut NativePooledWorker),
+    Direct(&'a mut NativeDirectWorker),
+}
+
+impl NativeUnityPyCallTarget<'_> {
+    async fn call(
+        &mut self,
+        id: u64,
+        request: &AssetStudioNativeRequest,
+    ) -> Result<NativeWorkerOutput, ExportPipelineError> {
+        match self {
+            Self::Pooled(worker) => worker.call(id, request).await,
+            Self::Direct(worker) => worker.call(id, request).await,
+        }
+    }
+}
+
 async fn call_assetstudio_native_unitypy_unpack_worker(
     worker: &mut NativePooledWorker,
     next_id: &AtomicU64,
     inspect_request: &AssetStudioNativeInspectRequest,
     options: &NativeUnityPyUnpackOptions<'_>,
 ) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
-    let open_request_json = sonic_rs::to_string(inspect_request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-    let open_output = worker
-        .call(
-            next_id.fetch_add(1, Ordering::Relaxed),
-            AssetStudioNativeOperation::ContextOpen,
-            Some(&open_request_json),
-        )
+    call_assetstudio_native_unitypy_unpack_with_target(
+        NativeUnityPyCallTarget::Pooled(worker),
+        next_id,
+        inspect_request,
+        options,
+    )
+    .await
+}
+
+async fn call_assetstudio_native_unitypy_unpack_with_target(
+    mut target: NativeUnityPyCallTarget<'_>,
+    next_id: &AtomicU64,
+    inspect_request: &AssetStudioNativeInspectRequest,
+    options: &NativeUnityPyUnpackOptions<'_>,
+) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
+    let open_request = AssetStudioNativeRequest::ContextOpen(inspect_request.clone());
+    let open_output = target
+        .call(next_id.fetch_add(1, Ordering::Relaxed), &open_request)
         .await?;
     let open_response = parse_assetstudio_native_context_open_worker_output(open_output)?;
     let context_id = open_response.context_id;
     let mut summary = NativeUnityPyUnpackSummary {
+        written_files: Vec::new(),
+        acb_sources: Vec::new(),
         phase_ms: open_response.phase_ms.clone(),
         skipped_object_reads: Vec::new(),
         object_read_plan: NativeObjectReadPlanStats {
@@ -1346,7 +2725,7 @@ async fn call_assetstudio_native_unitypy_unpack_worker(
 
     let unpack_result = async {
         let assets = list_assetstudio_native_context_objects_worker(
-            worker,
+            &mut target,
             next_id,
             context_id,
             &open_response,
@@ -1359,66 +2738,69 @@ async fn call_assetstudio_native_unitypy_unpack_worker(
 
         let read_batch_size =
             native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
+        let mut path_state = NativeSemanticExportPathState::default();
+        let mut playable_outputs = Vec::new();
         for asset_chunk in readable_assets.chunks(read_batch_size) {
-            summary.object_read_plan.batch_count += 1;
-            let request = native_object_read_batch_request(
-                context_id,
-                asset_chunk,
-                options.read_kinds,
-                options.image_format,
-            );
-            let request_json = sonic_rs::to_string(&request)
-                .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-            let output = worker
-                .call(
-                    next_id.fetch_add(1, Ordering::Relaxed),
-                    AssetStudioNativeOperation::ContextReadObjects,
-                    Some(&request_json),
-                )
-                .await?;
-            let read_outputs =
-                parse_assetstudio_native_object_read_batch_worker_output_recoverable(
-                    output,
+            let read_subchunks = native_object_read_subchunks(asset_chunk, options.image_format);
+            for asset_chunk in read_subchunks {
+                summary.object_read_plan.batch_count += 1;
+                let request = native_object_read_batch_request(
+                    context_id,
                     asset_chunk,
-                )?;
-            record_native_object_read_batch_diagnostics(&mut summary, asset_chunk, &read_outputs);
-            for (asset, read_output) in asset_chunk.iter().zip(read_outputs.results) {
-                let read_output = match read_output {
-                    NativeObjectReadParseResult::Read(read_output) => {
-                        summary.object_read_plan.successful_reads += 1;
-                        read_output
+                    options.read_kinds,
+                    options.image_format,
+                );
+                let request = AssetStudioNativeRequest::ContextReadObjects(request);
+                let output = target
+                    .call(next_id.fetch_add(1, Ordering::Relaxed), &request)
+                    .await?;
+                let read_outputs =
+                    parse_assetstudio_native_object_read_batch_worker_output_recoverable(
+                        output,
+                        asset_chunk,
+                    )?;
+                record_native_object_read_batch_diagnostics(
+                    &mut summary,
+                    asset_chunk,
+                    &read_outputs,
+                );
+                for (asset, read_output) in asset_chunk.iter().zip(read_outputs.results) {
+                    let read_output = match read_output {
+                        NativeObjectReadParseResult::Read(read_output) => {
+                            summary.object_read_plan.successful_reads += 1;
+                            read_output
+                        }
+                        NativeObjectReadParseResult::Skipped(skipped) => {
+                            summary.skipped_object_reads.push(skipped);
+                            summary.object_read_plan.skipped_reads += 1;
+                            continue;
+                        }
+                    };
+                    merge_phase_ms(&mut summary.phase_ms, &read_output.response.phase_ms);
+                    if is_playable_mono_typetree(asset, &read_output) {
+                        playable_outputs.push(((*asset).clone(), (*read_output).clone()));
+                    } else {
+                        write_unitypy_object_payload(
+                            options,
+                            &mut path_state,
+                            asset,
+                            &read_output,
+                        )?;
                     }
-                    NativeObjectReadParseResult::Skipped(skipped) => {
-                        summary.skipped_object_reads.push(skipped);
-                        summary.object_read_plan.skipped_reads += 1;
-                        continue;
-                    }
-                };
-                merge_phase_ms(&mut summary.phase_ms, &read_output.response.phase_ms);
-                write_unitypy_object_payload(
-                    options.output_dir,
-                    options.export_path,
-                    options.strip_path_prefix,
-                    options.region,
-                    options.cli_parity_mode,
-                    asset,
-                    &read_output,
-                )?;
+                }
             }
         }
+        write_assetstudio_playable_payloads(options, &mut path_state, playable_outputs)?;
+        summary.written_files = path_state.written_files;
+        summary.acb_sources = path_state.acb_sources;
         Ok(summary)
     }
     .await;
 
     let close_request = AssetStudioNativeContextCloseRequest { context_id };
-    let close_request_json = sonic_rs::to_string(&close_request)
-        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-    let close_result = worker
-        .call(
-            next_id.fetch_add(1, Ordering::Relaxed),
-            AssetStudioNativeOperation::ContextClose,
-            Some(&close_request_json),
-        )
+    let close_request = AssetStudioNativeRequest::ContextClose(close_request);
+    let close_result = target
+        .call(next_id.fetch_add(1, Ordering::Relaxed), &close_request)
         .await
         .and_then(parse_assetstudio_native_context_close_worker_output);
 
@@ -1434,7 +2816,7 @@ async fn call_assetstudio_native_unitypy_unpack_worker(
 }
 
 async fn list_assetstudio_native_context_objects_worker(
-    worker: &mut NativePooledWorker,
+    target: &mut NativeUnityPyCallTarget<'_>,
     next_id: &AtomicU64,
     context_id: i64,
     open_response: &AssetStudioNativeContextOpenResponse,
@@ -1457,14 +2839,9 @@ async fn list_assetstudio_native_context_objects_worker(
             offset,
             limit: NATIVE_AOT_CONTEXT_LIST_PAGE_SIZE,
         };
-        let request_json = sonic_rs::to_string(&request)
-            .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-        let output = worker
-            .call(
-                next_id.fetch_add(1, Ordering::Relaxed),
-                AssetStudioNativeOperation::ContextListObjects,
-                Some(&request_json),
-            )
+        let request = AssetStudioNativeRequest::ContextListObjects(request);
+        let output = target
+            .call(next_id.fetch_add(1, Ordering::Relaxed), &request)
             .await?;
         let response = parse_assetstudio_native_context_list_objects_worker_output(output)?;
         merge_optional_max_phase_ms(
@@ -1527,13 +2904,46 @@ fn native_read_batch_size_for_assets(
     tuned_size.max(1).min(assets.len().max(1))
 }
 
+fn native_object_read_subchunks<'a>(
+    asset_chunk: &'a [&'a AssetStudioNativeAssetInfo],
+    image_format: &str,
+) -> Vec<&'a [&'a AssetStudioNativeAssetInfo]> {
+    let mut subchunks = Vec::new();
+    let mut group_start = 0usize;
+    for (index, asset) in asset_chunk.iter().enumerate() {
+        if !is_native_aot_non_bmp_image_read(asset, image_format) {
+            continue;
+        }
+        if group_start < index {
+            subchunks.push(&asset_chunk[group_start..index]);
+        }
+        subchunks.push(&asset_chunk[index..index + 1]);
+        group_start = index + 1;
+    }
+    if group_start < asset_chunk.len() {
+        subchunks.push(&asset_chunk[group_start..]);
+    }
+    subchunks
+}
+
+fn is_native_aot_non_bmp_image_read(
+    asset: &AssetStudioNativeAssetInfo,
+    image_format: &str,
+) -> bool {
+    let is_image_asset = asset.asset_type.as_deref().is_some_and(|asset_type| {
+        assetstudio_type_selector_matches("Texture2D", asset_type)
+            || assetstudio_type_selector_matches("Texture2DArray", asset_type)
+            || assetstudio_type_selector_matches("Sprite", asset_type)
+    });
+    is_image_asset && native_image_format_for_asset(asset, image_format) != "bmp"
+}
+
 #[allow(dead_code)]
 fn parse_assetstudio_native_object_read_worker_output_recoverable(
     output: NativeWorkerOutput,
     asset: &AssetStudioNativeAssetInfo,
 ) -> Result<NativeObjectReadParseResult, ExportPipelineError> {
-    let response: AssetStudioNativeObjectReadResponse = sonic_rs::from_str(&output.stdout)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let response = output.response.into_object_read()?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native object read warning");
     }
@@ -1591,8 +3001,19 @@ fn select_native_unitypy_readable_assets<'a>(
     summary: &mut NativeUnityPyUnpackSummary,
 ) -> Vec<&'a AssetStudioNativeAssetInfo> {
     let mut readable_assets = Vec::new();
+    let texture2d_array_containers = texture2d_array_parent_containers(assets);
     for asset in assets {
         if !assetstudio_object_mode_type_enabled(asset, configured_asset_types) {
+            continue;
+        }
+        if is_texture2d_array_image_with_parent(asset, &texture2d_array_containers) {
+            summary.skipped_object_reads.push(NativeSkippedObjectRead {
+                path_id: asset.path_id,
+                asset_type: asset.asset_type.clone(),
+                name: asset.name.clone(),
+                container: asset.container.clone(),
+                error: "Texture2DArrayImage is covered by its Texture2DArray parent".to_string(),
+            });
             continue;
         }
         if !is_unitypy_supported_asset(asset) {
@@ -1615,6 +3036,37 @@ fn select_native_unitypy_readable_assets<'a>(
     readable_assets
 }
 
+fn texture2d_array_parent_containers(assets: &[AssetStudioNativeAssetInfo]) -> HashSet<String> {
+    assets
+        .iter()
+        .filter(|asset| {
+            asset.asset_type.as_deref().is_some_and(|asset_type| {
+                normalize_assetstudio_type_name(asset_type) == "texture2darray"
+            })
+        })
+        .filter_map(normalized_native_asset_container)
+        .collect()
+}
+
+fn is_texture2d_array_image_with_parent(
+    asset: &AssetStudioNativeAssetInfo,
+    parent_containers: &HashSet<String>,
+) -> bool {
+    asset.asset_type.as_deref().is_some_and(|asset_type| {
+        normalize_assetstudio_type_name(asset_type) == "texture2darrayimage"
+    }) && normalized_native_asset_container(asset)
+        .is_some_and(|container| parent_containers.contains(&container))
+}
+
+fn normalized_native_asset_container(asset: &AssetStudioNativeAssetInfo) -> Option<String> {
+    asset
+        .container
+        .as_deref()
+        .map(|container| container.replace('\\', "/"))
+        .map(|container| container.trim().to_string())
+        .filter(|container| !container.is_empty())
+}
+
 fn native_object_read_batch_request(
     context_id: i64,
     asset_chunk: &[&AssetStudioNativeAssetInfo],
@@ -1628,10 +3080,14 @@ fn native_object_read_batch_request(
             .map(|asset| AssetStudioNativeContextReadObjectItemRequest {
                 path_id: asset.path_id,
                 kind: native_read_kind_for_asset(asset, read_kinds),
-                image_format: image_format.to_string(),
+                image_format: native_image_format_for_asset(asset, image_format),
             })
             .collect(),
     }
+}
+
+fn native_image_format_for_asset(_asset: &AssetStudioNativeAssetInfo, _configured: &str) -> String {
+    NATIVE_AOT_DEFAULT_IMAGE_FORMAT.to_string()
 }
 
 fn record_native_object_read_batch_diagnostics(
@@ -1719,8 +3175,7 @@ fn parse_assetstudio_native_object_read_batch_worker_output_recoverable(
     output: NativeWorkerOutput,
     assets: &[&AssetStudioNativeAssetInfo],
 ) -> Result<NativeObjectReadBatchParseOutput, ExportPipelineError> {
-    let response: AssetStudioNativeObjectReadBatchResponse = sonic_rs::from_str(&output.stdout)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let response = output.response.into_object_read_batch()?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native object read batch warning");
     }
@@ -1766,8 +3221,8 @@ fn parse_assetstudio_native_object_read_batch_worker_output_recoverable(
             object_count: response_object_count(&response, assets.len()),
             payload_bundle_version: response.payload_bundle_version,
             payload_bundle_entry_count: response.payload_bundle_entry_count,
-            payload_bundle_bytes: response_payload_bundle_bytes(&response, payload.len()),
-            payload_data_bytes: response_payload_data_bytes(&response),
+            payload_bundle_bytes: object_read_batch_payload_bundle_bytes(&response, payload.len()),
+            payload_data_bytes: object_read_batch_payload_data_bytes(&response),
             failed_count: if response.failed_count > 0 {
                 response.failed_count
             } else {
@@ -1805,8 +3260,8 @@ fn parse_assetstudio_native_object_read_batch_worker_output_recoverable(
     let object_count = response_object_count(&response, assets.len());
     let payload_bundle_version = response.payload_bundle_version;
     let payload_bundle_entry_count = response.payload_bundle_entry_count;
-    let payload_bundle_bytes = response_payload_bundle_bytes(&response, payload.len());
-    let payload_data_bytes = response_payload_data_bytes(&response);
+    let payload_bundle_bytes = object_read_batch_payload_bundle_bytes(&response, payload.len());
+    let payload_data_bytes = object_read_batch_payload_data_bytes(&response);
     let mut failed_count = response.failed_count;
     let read_payload_ms = response.read_payload_ms;
     let worker_id = response.worker_id.clone();
@@ -1895,7 +3350,7 @@ fn response_object_count(
     }
 }
 
-fn response_payload_bundle_bytes(
+fn object_read_batch_payload_bundle_bytes(
     response: &AssetStudioNativeObjectReadBatchResponse,
     fallback_payload_len: usize,
 ) -> u64 {
@@ -1908,7 +3363,9 @@ fn response_payload_bundle_bytes(
     }
 }
 
-fn response_payload_data_bytes(response: &AssetStudioNativeObjectReadBatchResponse) -> u64 {
+fn object_read_batch_payload_data_bytes(
+    response: &AssetStudioNativeObjectReadBatchResponse,
+) -> u64 {
     if response.payload_data_bytes > 0 {
         response.payload_data_bytes
     } else {
@@ -2143,11 +3600,8 @@ fn merge_optional_max_phase_ms(target: &mut HashMap<String, u64>, phase: &str, v
 }
 
 fn write_unitypy_object_payload(
-    output_dir: &Path,
-    export_path: &str,
-    strip_path_prefix: &str,
-    region: &RegionConfig,
-    cli_parity_mode: bool,
+    options: &NativeUnityPyUnpackOptions<'_>,
+    path_state: &mut NativeSemanticExportPathState,
     asset: &AssetStudioNativeAssetInfo,
     read_output: &AssetStudioNativeObjectReadOutput,
 ) -> Result<(), ExportPipelineError> {
@@ -2158,25 +3612,35 @@ fn write_unitypy_object_payload(
     }
 
     let target = unitypy_object_output_path(
-        output_dir,
-        export_path,
-        strip_path_prefix,
-        region.export.by_category,
+        options.output_dir,
+        options.export_path,
+        options.strip_path_prefix,
+        options.region.export.by_category,
         asset,
         read_output.response.payload_kind.as_deref(),
         read_output.response.suggested_extension.as_deref(),
     );
-    let target = if cli_parity_mode {
+    let target = if options.cli_parity_mode {
         assetstudio_cli_parity_output_path(
             &target,
             asset,
             read_output.response.suggested_extension.as_deref(),
         )
-    } else if should_route_character_sprite_object(asset) {
-        character_sprite_object_output_path(&target, asset)
     } else {
         target
     };
+    let target = text_asset_media_bytes_target(&target, asset).unwrap_or(target);
+    let target = assetbundle_typetree_output_path(
+        options.output_dir,
+        options.export_path,
+        options.strip_path_prefix,
+        options.region.export.by_category,
+        asset,
+        read_output.response.payload_kind.as_deref(),
+        &read_output.payload,
+    )?
+    .unwrap_or(target);
+    let target = path_state.claim(target, asset);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ExportPipelineError::Io {
             path: parent.to_path_buf(),
@@ -2184,33 +3648,349 @@ fn write_unitypy_object_payload(
         })?;
     }
 
-    if asset.asset_type.as_deref() == Some("TextAsset")
-        && target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".acb.bytes"))
-    {
-        let acb_target = target.with_file_name(
-            target
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.trim_end_matches(".bytes").to_string())
-                .unwrap_or_else(|| format!("asset_{}.acb", asset.path_id)),
-        );
-        write_unitypy_payload_file(&acb_target, &read_output.payload, cli_parity_mode)?;
+    let payload_kind = read_output.response.payload_kind.as_deref().unwrap_or("");
+    if is_text_asset_acb_target(asset, &target) {
+        path_state.acb_sources.push(NativeInMemoryMediaSource {
+            target: target.clone(),
+            payload: read_output.payload.clone(),
+        });
         return Ok(());
     }
 
-    let payload_kind = read_output.response.payload_kind.as_deref().unwrap_or("");
-    if payload_kind.starts_with("image_array_bundle_") || payload_kind == "animator_bundle_fbx" {
-        write_payload_bundle(&target, &read_output.payload)?;
-    } else if payload_kind == "image_bmp" {
-        let bmp_target = target.with_extension(NATIVE_AOT_IMAGE_SURROGATE_FORMAT);
-        write_unitypy_payload_file(&bmp_target, &read_output.payload, cli_parity_mode)?;
+    let written_files = if payload_kind == "image_array_bundle_raw_rgba" {
+        write_native_image_payload_bundle_final_files(
+            &target,
+            &read_output.payload,
+            options.region,
+        )?
+    } else if payload_kind.starts_with("image_array_bundle_")
+        || payload_kind == "animator_bundle_fbx"
+    {
+        write_payload_bundle(&target, &read_output.payload)?
+    } else if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
+        write_native_image_payload_final_files(&target, &read_output.payload, options.region)?
     } else {
-        write_unitypy_payload_file(&target, &read_output.payload, cli_parity_mode)?;
+        write_unitypy_payload_file(&target, &read_output.payload, options.cli_parity_mode)?;
+        vec![target.clone()]
+    };
+    let manifest_target = if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
+        native_image_surrogate_public_target(&target, options.region)
+    } else {
+        target.clone()
+    };
+    let manifest_written_files = written_files.clone();
+    path_state.written_files.extend(written_files);
+    if payload_kind.starts_with("image_array_bundle_") {
+        for written_file in manifest_written_files {
+            let manifest_target =
+                native_image_surrogate_public_target(&written_file, options.region);
+            write_assetstudio_export_manifest_entry(
+                options.output_dir,
+                &manifest_target,
+                asset,
+                read_output,
+            )?;
+        }
+    } else {
+        write_assetstudio_export_manifest_entry(
+            options.output_dir,
+            &manifest_target,
+            asset,
+            read_output,
+        )?;
     }
     Ok(())
+}
+
+fn is_playable_mono_typetree(
+    asset: &AssetStudioNativeAssetInfo,
+    read_output: &AssetStudioNativeObjectReadOutput,
+) -> bool {
+    asset
+        .asset_type
+        .as_deref()
+        .is_some_and(|asset_type| assetstudio_type_selector_matches("MonoBehaviour", asset_type))
+        && read_output.response.payload_kind.as_deref() == Some("typetree_json")
+        && asset.container.as_deref().is_some_and(|container| {
+            container
+                .replace('\\', "/")
+                .to_ascii_lowercase()
+                .ends_with(".playable")
+        })
+}
+
+fn write_assetstudio_playable_payloads(
+    options: &NativeUnityPyUnpackOptions<'_>,
+    path_state: &mut NativeSemanticExportPathState,
+    playable_outputs: Vec<(
+        AssetStudioNativeAssetInfo,
+        AssetStudioNativeObjectReadOutput,
+    )>,
+) -> Result<(), ExportPipelineError> {
+    let mut by_container: BTreeMap<
+        String,
+        Vec<(
+            AssetStudioNativeAssetInfo,
+            AssetStudioNativeObjectReadOutput,
+        )>,
+    > = BTreeMap::new();
+    for (asset, read_output) in playable_outputs {
+        let Some(container) = asset
+            .container
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.replace('\\', "/"))
+        else {
+            write_unitypy_object_payload(options, path_state, &asset, &read_output)?;
+            continue;
+        };
+        by_container
+            .entry(container)
+            .or_default()
+            .push((asset, read_output));
+    }
+
+    for (container, mut entries) in by_container {
+        entries.sort_by(|(left, _), (right, _)| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.index.cmp(&right.index))
+        });
+        let mut objects = Vec::with_capacity(entries.len());
+        for (asset, read_output) in &entries {
+            let data: sonic_rs::Value = sonic_rs::from_slice(&read_output.payload)
+                .map_err(|source| ExportPipelineError::NativeParse { source })?;
+            objects.push(NativePlayableExportObject {
+                name: asset.name.clone(),
+                asset_type: asset.asset_type.clone(),
+                data,
+            });
+        }
+        let playable = NativePlayableExport {
+            container: container.clone(),
+            object_count: objects.len(),
+            objects,
+        };
+        let payload = sonic_rs::to_vec_pretty(&playable)
+            .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
+        let (first_asset, first_read_output) =
+            entries
+                .first()
+                .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+                    message: format!("playable export has no objects for container {container}"),
+                })?;
+        let target = playable_container_output_path(
+            options.output_dir,
+            options.export_path,
+            options.strip_path_prefix,
+            options.region.export.by_category,
+            &container,
+        );
+        let target = path_state.claim(target, first_asset);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ExportPipelineError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        write_unitypy_payload_file(&target, &payload, options.cli_parity_mode)?;
+        path_state.written_files.push(target.clone());
+        write_assetstudio_export_manifest_entry(
+            options.output_dir,
+            &target,
+            first_asset,
+            first_read_output,
+        )?;
+    }
+    Ok(())
+}
+
+fn playable_container_output_path(
+    output_dir: &Path,
+    export_path: &str,
+    strip_path_prefix: &str,
+    by_category: bool,
+    container: &str,
+) -> PathBuf {
+    let relative = strip_container_prefix(container, strip_path_prefix);
+    let mut path = if by_category {
+        output_dir.join(&relative)
+    } else {
+        let file_name = Path::new(&relative)
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("timeline.playable"));
+        output_dir.join(export_path).join(file_name)
+    };
+    path.set_extension("json");
+    path
+}
+
+impl NativeSemanticExportPathState {
+    fn claim(&mut self, path: PathBuf, asset: &AssetStudioNativeAssetInfo) -> PathBuf {
+        let mut ordinal = 1usize;
+        loop {
+            let candidate = semantic_duplicate_path(&path, ordinal);
+            if !candidate.exists() && !self.claims.contains_key(&candidate) {
+                self.claims.insert(candidate.clone(), ordinal);
+                if ordinal > 1 {
+                    warn!(
+                        asset_type = asset.asset_type.as_deref().unwrap_or(""),
+                        name = asset.name.as_deref().unwrap_or(""),
+                        container = asset.container.as_deref().unwrap_or(""),
+                        output_path = %candidate.display(),
+                        "semantic export path collision; using deterministic duplicate suffix"
+                    );
+                }
+                return candidate;
+            }
+            ordinal += 1;
+        }
+    }
+}
+
+fn semantic_duplicate_path(path: &Path, ordinal: usize) -> PathBuf {
+    if ordinal <= 1 {
+        return path.to_path_buf();
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("asset");
+    let extension = path.extension().and_then(|value| value.to_str());
+    let stem = format!("{stem}__dup{ordinal}");
+    match extension {
+        Some(extension) if !extension.is_empty() => parent.join(format!("{stem}.{extension}")),
+        _ => parent.join(stem),
+    }
+}
+
+fn write_assetstudio_export_manifest_entry(
+    output_dir: &Path,
+    target: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+    read_output: &AssetStudioNativeObjectReadOutput,
+) -> Result<(), ExportPipelineError> {
+    let manifest_root = output_dir.to_path_buf();
+    std::fs::create_dir_all(&manifest_root).map_err(|source| ExportPipelineError::Io {
+        path: manifest_root.clone(),
+        source,
+    })?;
+    let manifest_path = manifest_root.join(".assetstudio-export-manifest.jsonl");
+    let public_target = assetstudio_manifest_public_target(target, read_output)?;
+    let path = public_target
+        .strip_prefix(&manifest_root)
+        .unwrap_or(&public_target)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let entry = NativeAssetStudioExportManifestEntry {
+        path,
+        asset_type: asset.asset_type.clone(),
+        name: asset.name.clone(),
+        container: asset.container.clone(),
+        payload_kind: read_output.response.payload_kind.clone(),
+        suggested_extension: read_output.response.suggested_extension.clone(),
+    };
+    let line = sonic_rs::to_string(&entry)
+        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
+    let locks = ASSETSTUDIO_MANIFEST_APPEND_LOCKS.get_or_init(|| {
+        (0..ASSETSTUDIO_MANIFEST_LOCKS)
+            .map(|_| Mutex::new(()))
+            .collect()
+    });
+    let lock_index = manifest_lock_index(&manifest_path);
+    let _guard =
+        locks[lock_index]
+            .lock()
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("assetstudio export manifest lock poisoned: {source}"),
+            })?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&manifest_path)
+        .map_err(|source| ExportPipelineError::Io {
+            path: manifest_path.clone(),
+            source,
+        })?;
+    writeln!(file, "{line}").map_err(|source| ExportPipelineError::Io {
+        path: manifest_path,
+        source,
+    })?;
+    Ok(())
+}
+
+fn assetstudio_manifest_public_target(
+    target: &Path,
+    read_output: &AssetStudioNativeObjectReadOutput,
+) -> Result<PathBuf, ExportPipelineError> {
+    match read_output.response.payload_kind.as_deref() {
+        Some("image_bmp") | Some("image_raw_rgba") => {
+            if target
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("bmp"))
+            {
+                Ok(target.with_extension("png"))
+            } else {
+                Ok(target.to_path_buf())
+            }
+        }
+        Some("animator_bundle_fbx") => {
+            let entries = parse_payload_bundle_borrowed(&read_output.payload)?;
+            let entry_name = entries
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .find(|name| {
+                    Path::new(name)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"))
+                })
+                .or_else(|| entries.first().map(|(name, _)| name.as_str()))
+                .unwrap_or("payload.bin");
+            Ok(payload_bundle_entry_target(target, entry_name))
+        }
+        _ => Ok(target.to_path_buf()),
+    }
+}
+
+fn manifest_lock_index(path: &Path) -> usize {
+    let mut hash = 0usize;
+    for byte in path.to_string_lossy().bytes() {
+        hash = hash.wrapping_mul(131).wrapping_add(byte as usize);
+    }
+    hash % ASSETSTUDIO_MANIFEST_LOCKS
+}
+
+fn text_asset_media_bytes_target(
+    target: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+) -> Option<PathBuf> {
+    if asset.asset_type.as_deref() != Some("TextAsset") {
+        return None;
+    }
+    let file_name = target.file_name()?.to_str()?;
+    let media_name = file_name
+        .strip_suffix(".acb.bytes")
+        .map(|stem| format!("{stem}.acb"))
+        .or_else(|| {
+            file_name
+                .strip_suffix(".usm.bytes")
+                .map(|stem| format!("{stem}.usm"))
+        })?;
+    Some(target.with_file_name(media_name))
+}
+
+fn is_text_asset_acb_target(asset: &AssetStudioNativeAssetInfo, target: &Path) -> bool {
+    asset.asset_type.as_deref() == Some("TextAsset")
+        && target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("acb"))
 }
 
 fn write_unitypy_payload_file(
@@ -2235,20 +4015,223 @@ fn write_unitypy_payload_file(
     }
 }
 
+fn write_native_image_payload_final_files(
+    target: &Path,
+    payload: &[u8],
+    region: &RegionConfig,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let mut written_files = Vec::new();
+    let raw_rgba = if payload.starts_with(NATIVE_AOT_RGBA_IR_MAGIC) {
+        Some(parse_native_rgba_ir_payload(payload, target)?)
+    } else {
+        None
+    };
+    let image = if region.export.images.convert_to_webp {
+        Some(decode_image_payload_bytes(payload, target)?)
+    } else {
+        None
+    };
+
+    if region.export.images.convert_to_webp {
+        let webp = target.with_extension("webp");
+        write_dynamic_image_to_webp_file(image.as_ref().unwrap(), &webp)?;
+        written_files.push(webp);
+    }
+
+    if !region.export.images.convert_to_webp || !region.export.images.remove_png {
+        if let Some(raw_rgba) = raw_rgba.as_ref() {
+            write_native_rgba_ir_to_png_file_fast(raw_rgba, target)?;
+        } else {
+            let image = match image.as_ref() {
+                Some(image) => Cow::Borrowed(image),
+                None => Cow::Owned(decode_image_payload_bytes(payload, target)?),
+            };
+            write_dynamic_image_to_png_file_fast(&image, target)?;
+        }
+        written_files.push(target.to_path_buf());
+    }
+
+    Ok(written_files)
+}
+
+fn native_image_surrogate_public_target(target: &Path, region: &RegionConfig) -> PathBuf {
+    if !target
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(NATIVE_AOT_IMAGE_SURROGATE_FORMAT))
+    {
+        return target.to_path_buf();
+    }
+    if region.export.images.convert_to_webp && region.export.images.remove_png {
+        target.with_extension("webp")
+    } else {
+        target.with_extension("png")
+    }
+}
+
+fn decode_image_payload_bytes(
+    payload: &[u8],
+    target: &Path,
+) -> Result<image::DynamicImage, ExportPipelineError> {
+    if payload.starts_with(NATIVE_AOT_RGBA_IR_MAGIC) {
+        return decode_native_rgba_ir_payload(payload, target);
+    }
+    ImageReader::new(Cursor::new(payload))
+        .with_guessed_format()
+        .map_err(|source| ExportPipelineError::Io {
+            path: target.to_path_buf(),
+            source,
+        })?
+        .decode()
+        .map_err(|source| ExportPipelineError::Image {
+            path: target.to_path_buf(),
+            source,
+        })
+}
+
+fn decode_native_rgba_ir_payload(
+    payload: &[u8],
+    target: &Path,
+) -> Result<image::DynamicImage, ExportPipelineError> {
+    let raw_rgba = parse_native_rgba_ir_payload(payload, target)?;
+    let pixels = native_rgba_ir_contiguous_pixels(&raw_rgba).into_owned();
+    image::RgbaImage::from_raw(raw_rgba.width, raw_rgba.height, pixels)
+        .map(image::DynamicImage::ImageRgba8)
+        .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` could not be converted to an image",
+                target.display()
+            ),
+        })
+}
+
+struct NativeRgbaIr<'a> {
+    width: u32,
+    height: u32,
+    stride: usize,
+    row_bytes: usize,
+    height_usize: usize,
+    pixels: &'a [u8],
+}
+
+fn parse_native_rgba_ir_payload<'a>(
+    payload: &'a [u8],
+    target: &Path,
+) -> Result<NativeRgbaIr<'a>, ExportPipelineError> {
+    if payload.len() < NATIVE_AOT_RGBA_IR_HEADER_LEN {
+        return Err(ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` is too short: {} bytes",
+                target.display(),
+                payload.len()
+            ),
+        });
+    }
+    if !payload.starts_with(NATIVE_AOT_RGBA_IR_MAGIC) {
+        return Err(ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` has invalid magic",
+                target.display()
+            ),
+        });
+    }
+    let read_u32 = |offset: usize| -> u32 {
+        u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap())
+    };
+    let width = read_u32(16);
+    let height = read_u32(20);
+    let stride = read_u32(24) as usize;
+    let pixel_format = read_u32(28);
+    if pixel_format != 1 {
+        return Err(ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` has unsupported pixel format {}",
+                target.display(),
+                pixel_format
+            ),
+        });
+    }
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` has invalid width {}",
+                target.display(),
+                width
+            ),
+        })?;
+    if stride < row_bytes {
+        return Err(ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` has invalid stride {} for width {}",
+                target.display(),
+                stride,
+                width
+            ),
+        });
+    }
+    let height_usize =
+        usize::try_from(height).map_err(|_| ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` has invalid height {}",
+                target.display(),
+                height
+            ),
+        })?;
+    let pixel_bytes = stride
+        .checked_mul(height_usize)
+        .and_then(|value| value.checked_add(NATIVE_AOT_RGBA_IR_HEADER_LEN))
+        .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` is too large",
+                target.display()
+            ),
+        })?;
+    if payload.len() < pixel_bytes {
+        return Err(ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "native raw RGBA image payload for `{}` is truncated: expected at least {}, got {}",
+                target.display(),
+                pixel_bytes,
+                payload.len()
+            ),
+        });
+    }
+    Ok(NativeRgbaIr {
+        width,
+        height,
+        stride,
+        row_bytes,
+        height_usize,
+        pixels: &payload[NATIVE_AOT_RGBA_IR_HEADER_LEN..pixel_bytes],
+    })
+}
+
+fn native_rgba_ir_contiguous_pixels<'a>(raw_rgba: &'a NativeRgbaIr<'a>) -> Cow<'a, [u8]> {
+    if raw_rgba.stride == raw_rgba.row_bytes {
+        return Cow::Borrowed(&raw_rgba.pixels[..raw_rgba.row_bytes * raw_rgba.height_usize]);
+    }
+    let mut pixels = Vec::with_capacity(raw_rgba.row_bytes * raw_rgba.height_usize);
+    for y in 0..raw_rgba.height_usize {
+        let start = y * raw_rgba.stride;
+        pixels.extend_from_slice(&raw_rgba.pixels[start..start + raw_rgba.row_bytes]);
+    }
+    Cow::Owned(pixels)
+}
+
 fn is_assetstudio_cli_skippable_write_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(63) | Some(36))
 }
 
-fn write_payload_bundle(target: &Path, payload: &[u8]) -> Result<(), ExportPipelineError> {
-    let parent = target.parent().unwrap_or_else(|| Path::new(""));
-    let stem = target
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("asset");
+fn write_payload_bundle(
+    target: &Path,
+    payload: &[u8],
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
     let entries = parse_payload_bundle_borrowed(payload)?;
+    let mut written_files = Vec::with_capacity(entries.len());
     for (name, bytes) in entries {
-        let entry_target = parent.join(stem).join(safe_payload_bundle_path(&name));
+        let entry_target = payload_bundle_entry_target(target, &name);
         if let Some(entry_parent) = entry_target.parent() {
             std::fs::create_dir_all(entry_parent).map_err(|source| ExportPipelineError::Io {
                 path: entry_parent.to_path_buf(),
@@ -2256,11 +4239,46 @@ fn write_payload_bundle(target: &Path, payload: &[u8]) -> Result<(), ExportPipel
             })?;
         }
         std::fs::write(&entry_target, bytes).map_err(|source| ExportPipelineError::Io {
-            path: entry_target,
+            path: entry_target.clone(),
             source,
         })?;
+        written_files.push(entry_target);
     }
-    Ok(())
+    Ok(written_files)
+}
+
+fn write_native_image_payload_bundle_final_files(
+    target: &Path,
+    payload: &[u8],
+    region: &RegionConfig,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let entries = parse_payload_bundle_borrowed(payload)?;
+    let mut written_files = Vec::with_capacity(entries.len());
+    for (name, bytes) in entries {
+        let entry_target = payload_bundle_entry_target(target, &name).with_extension("png");
+        if let Some(entry_parent) = entry_target.parent() {
+            std::fs::create_dir_all(entry_parent).map_err(|source| ExportPipelineError::Io {
+                path: entry_parent.to_path_buf(),
+                source,
+            })?;
+        }
+        written_files.extend(write_native_image_payload_final_files(
+            &entry_target,
+            bytes,
+            region,
+        )?);
+    }
+    Ok(written_files)
+}
+
+fn payload_bundle_entry_target(target: &Path, entry_name: &str) -> PathBuf {
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let stem = target
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("asset");
+    parent.join(stem).join(safe_payload_bundle_path(entry_name))
 }
 
 fn safe_payload_bundle_path(name: &str) -> PathBuf {
@@ -2289,7 +4307,7 @@ fn parse_payload_bundle_borrowed(
     payload: &[u8],
 ) -> Result<Vec<(String, &[u8])>, ExportPipelineError> {
     let mut cursor = 0usize;
-    let (count, expected_payload_data_bytes) = if payload.len() >= 4
+    if payload.len() >= 4
         && u32::from_le_bytes(payload[0..4].try_into().unwrap())
             == NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC
     {
@@ -2309,15 +4327,43 @@ fn parse_payload_bundle_borrowed(
         let count = read_bundle_u32(payload, &mut cursor)? as usize;
         let expected_payload_data_bytes = read_bundle_u64(payload, &mut cursor)?;
         cursor = header_len;
-        (count, Some(expected_payload_data_bytes))
-    } else if payload.starts_with(NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC) {
+        return parse_payload_bundle_interleaved_entries(
+            payload,
+            cursor,
+            count,
+            Some(expected_payload_data_bytes),
+        );
+    }
+
+    if payload.starts_with(NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC) {
         cursor += NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC.len();
-        (read_bundle_u32(payload, &mut cursor)? as usize, None)
-    } else {
-        return Err(ExportPipelineError::AssetStudioNative {
-            message: "native payload bundle has invalid magic".to_string(),
-        });
-    };
+        let count = read_bundle_u32(payload, &mut cursor)? as usize;
+        match parse_payload_bundle_grouped_entries(payload, cursor, count) {
+            Ok(entries) => return Ok(entries),
+            Err(grouped_error) => {
+                return parse_payload_bundle_interleaved_entries(payload, cursor, count, None)
+                    .map_err(|interleaved_error| ExportPipelineError::AssetStudioNative {
+                        message: format!(
+                            "{}; legacy grouped parse also failed: {}",
+                            assetstudio_error_message(&interleaved_error),
+                            assetstudio_error_message(&grouped_error)
+                        ),
+                    });
+            }
+        }
+    }
+
+    Err(ExportPipelineError::AssetStudioNative {
+        message: "native payload bundle has invalid magic".to_string(),
+    })
+}
+
+fn parse_payload_bundle_interleaved_entries(
+    payload: &[u8],
+    mut cursor: usize,
+    count: usize,
+    expected_payload_data_bytes: Option<u64>,
+) -> Result<Vec<(String, &[u8])>, ExportPipelineError> {
     let mut entries = Vec::with_capacity(count);
     let mut observed_payload_data_bytes = 0u64;
     for _ in 0..count {
@@ -2347,57 +4393,123 @@ fn parse_payload_bundle_borrowed(
         cursor += data_len_usize;
         observed_payload_data_bytes = observed_payload_data_bytes.saturating_add(data_len);
     }
+    finish_payload_bundle_parse(
+        payload,
+        cursor,
+        observed_payload_data_bytes,
+        expected_payload_data_bytes,
+    )?;
+    Ok(entries)
+}
+
+fn parse_payload_bundle_grouped_entries(
+    payload: &[u8],
+    mut cursor: usize,
+    count: usize,
+) -> Result<Vec<(String, &[u8])>, ExportPipelineError> {
+    let mut headers = Vec::with_capacity(count);
+    let mut observed_payload_data_bytes = 0u64;
+    for _ in 0..count {
+        let name_len = read_bundle_u32(payload, &mut cursor)? as usize;
+        let data_len = read_bundle_u64(payload, &mut cursor)?;
+        if payload.len().saturating_sub(cursor) < name_len {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: "native payload bundle has truncated entry name".to_string(),
+            });
+        }
+        let name = std::str::from_utf8(&payload[cursor..cursor + name_len])
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("native payload bundle entry name is not utf-8: {source}"),
+            })?
+            .to_string();
+        cursor += name_len;
+        headers.push((name, data_len));
+        observed_payload_data_bytes = observed_payload_data_bytes.saturating_add(data_len);
+    }
+
+    let mut entries = Vec::with_capacity(count);
+    for (name, data_len) in headers {
+        let data_len_usize =
+            usize::try_from(data_len).map_err(|_| ExportPipelineError::AssetStudioNative {
+                message: "native payload bundle entry data is too large".to_string(),
+            })?;
+        if payload.len().saturating_sub(cursor) < data_len_usize {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: "native payload bundle has truncated entry data".to_string(),
+            });
+        }
+        entries.push((name, &payload[cursor..cursor + data_len_usize]));
+        cursor += data_len_usize;
+    }
+
+    finish_payload_bundle_parse(payload, cursor, observed_payload_data_bytes, None)?;
+    Ok(entries)
+}
+
+fn finish_payload_bundle_parse(
+    payload: &[u8],
+    cursor: usize,
+    observed_payload_data_bytes: u64,
+    expected_payload_data_bytes: Option<u64>,
+) -> Result<(), ExportPipelineError> {
     if cursor != payload.len() {
         return Err(ExportPipelineError::AssetStudioNative {
-            message: "native payload bundle has trailing bytes".to_string(),
+            message: format!(
+                "native payload bundle has {} trailing byte(s)",
+                payload.len().saturating_sub(cursor)
+            ),
         });
     }
-    if let Some(expected) = expected_payload_data_bytes {
-        if expected != observed_payload_data_bytes {
+    if let Some(expected_payload_data_bytes) = expected_payload_data_bytes {
+        if observed_payload_data_bytes != expected_payload_data_bytes {
             return Err(ExportPipelineError::AssetStudioNative {
                 message: format!(
-                    "native payload bundle data byte mismatch: header={expected}, observed={observed_payload_data_bytes}"
+                    "native payload bundle data byte count mismatch: expected {expected_payload_data_bytes}, got {observed_payload_data_bytes}"
                 ),
             });
         }
     }
-    Ok(entries)
+    Ok(())
 }
 
-fn read_bundle_u16(payload: &[u8], cursor: &mut usize) -> Result<u16, ExportPipelineError> {
-    if payload.len().saturating_sub(*cursor) < 2 {
-        return Err(ExportPipelineError::AssetStudioNative {
-            message: "native payload bundle is truncated".to_string(),
-        });
+fn assetstudio_error_message(error: &ExportPipelineError) -> String {
+    match error {
+        ExportPipelineError::AssetStudioNative { message } => message.clone(),
+        other => other.to_string(),
     }
-    let mut bytes = [0u8; 2];
-    bytes.copy_from_slice(&payload[*cursor..*cursor + 2]);
-    *cursor += 2;
-    Ok(u16::from_le_bytes(bytes))
 }
 
 fn read_bundle_u32(payload: &[u8], cursor: &mut usize) -> Result<u32, ExportPipelineError> {
     if payload.len().saturating_sub(*cursor) < 4 {
         return Err(ExportPipelineError::AssetStudioNative {
-            message: "native payload bundle is truncated".to_string(),
+            message: "native payload bundle has truncated u32".to_string(),
         });
     }
-    let mut bytes = [0u8; 4];
-    bytes.copy_from_slice(&payload[*cursor..*cursor + 4]);
+    let value = u32::from_le_bytes(payload[*cursor..*cursor + 4].try_into().unwrap());
     *cursor += 4;
-    Ok(u32::from_le_bytes(bytes))
+    Ok(value)
+}
+
+fn read_bundle_u16(payload: &[u8], cursor: &mut usize) -> Result<u16, ExportPipelineError> {
+    if payload.len().saturating_sub(*cursor) < 2 {
+        return Err(ExportPipelineError::AssetStudioNative {
+            message: "native payload bundle has truncated u16".to_string(),
+        });
+    }
+    let value = u16::from_le_bytes(payload[*cursor..*cursor + 2].try_into().unwrap());
+    *cursor += 2;
+    Ok(value)
 }
 
 fn read_bundle_u64(payload: &[u8], cursor: &mut usize) -> Result<u64, ExportPipelineError> {
     if payload.len().saturating_sub(*cursor) < 8 {
         return Err(ExportPipelineError::AssetStudioNative {
-            message: "native payload bundle is truncated".to_string(),
+            message: "native payload bundle has truncated u64".to_string(),
         });
     }
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&payload[*cursor..*cursor + 8]);
+    let value = u64::from_le_bytes(payload[*cursor..*cursor + 8].try_into().unwrap());
     *cursor += 8;
-    Ok(u64::from_le_bytes(bytes))
+    Ok(value)
 }
 
 fn unitypy_object_output_path(
@@ -2421,58 +4533,299 @@ fn unitypy_object_output_path(
         let file_name = Path::new(&relative)
             .file_name()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(format!("asset_{}", asset.path_id)));
+            .unwrap_or_else(|| PathBuf::from(assetstudio_semantic_file_stem(asset)));
         output_dir.join(export_path).join(file_name)
     };
     let extension = unitypy_object_output_extension(asset, payload_kind, suggested_extension);
     if !extension.is_empty() {
         path.set_extension(extension.trim_start_matches('.'));
     }
-    path
+    semantic_assetstudio_object_output_path(path, asset)
 }
 
-fn should_route_character_sprite_object(asset: &AssetStudioNativeAssetInfo) -> bool {
-    if !asset
-        .asset_type
-        .as_deref()
-        .is_some_and(|asset_type| assetstudio_type_selector_matches("sprite", asset_type))
-    {
-        return false;
-    }
-
-    let Some(container) = asset.container.as_deref() else {
-        return false;
-    };
-    let relative =
-        strip_container_prefix(container, "assets/sekai/assetbundle/resources/startapp/");
-    relative.starts_with("character/")
-}
-
-fn character_sprite_object_output_path(
-    default_path: &Path,
+fn semantic_assetstudio_object_output_path(
+    default_path: PathBuf,
     asset: &AssetStudioNativeAssetInfo,
 ) -> PathBuf {
-    let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = default_path
+    let normalized = asset
+        .asset_type
+        .as_deref()
+        .map(normalize_assetstudio_type_name)
+        .unwrap_or_default();
+    if is_member_cutout_container(asset) {
+        match normalized.as_str() {
+            "sprite" => return member_cutout_sprite_output_path(&default_path, asset),
+            "texture2d" | "texture2dimage" => return default_path,
+            _ => {}
+        }
+    }
+
+    let semantic_dir = match normalized.as_str() {
+        "monobehaviour" | "monobehavior"
+            if mono_behaviour_can_use_container_path(&default_path, asset) =>
+        {
+            None
+        }
+        "sprite" => Some("sprite"),
+        "mesh" => Some("mesh"),
+        "animator" => Some("animator"),
+        "font" => return named_flat_subasset_output_path(&default_path, asset),
+        "monobehaviour" | "monobehavior" => Some("monobehaviour"),
+        "texture2darray" | "texture2darrayimage" => Some("texture2d_array"),
+        "monoscript" => Some("monoscript"),
+        "gameobject" => Some("gameobject"),
+        "material" => Some("material"),
+        "transform" => Some("transform"),
+        "recttransform" => Some("recttransform"),
+        "particlesystem" => Some("particle_system"),
+        "particlesystemrenderer" => Some("particle_system_renderer"),
+        "spriterenderer" => Some("sprite_renderer"),
+        "spritemask" => Some("sprite_mask"),
+        "meshfilter" => Some("mesh_filter"),
+        "meshrenderer" => Some("mesh_renderer"),
+        "skinnedmeshrenderer" => Some("skinned_mesh_renderer"),
+        "playabledirector" => Some("playable_director"),
+        "canvas" => Some("canvas"),
+        "canvasrenderer" => Some("canvas_renderer"),
+        "camera" => Some("camera"),
+        "avatar" => Some("avatar"),
+        "audiolistener" => Some("audio_listener"),
+        "animation" => Some("animation"),
+        "animationclip" => Some("animation_clip"),
+        "textmesh" => Some("text_mesh"),
+        "sortinggroup" => Some("sorting_group"),
+        "cubemap" => Some("cubemap"),
+        "texture3d" => Some("texture3d"),
+        "shader" | "shadervariantcollection" => Some("shader"),
+        _ => None,
+    };
+    match semantic_dir {
+        Some(semantic_dir) => named_subasset_output_path(&default_path, asset, semantic_dir),
+        None => default_path,
+    }
+}
+
+fn mono_behaviour_can_use_container_path(
+    default_path: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+) -> bool {
+    let Some(container_stem) = default_path
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
-        .unwrap_or("asset");
-    let sprite_dir = parent.join(format!("{stem}_sprites"));
-    let file_stem = asset
+    else {
+        return false;
+    };
+    let Some(asset_stem) = asset
         .name
         .as_deref()
         .map(assetstudio_fix_file_name)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("sprite_{}", asset.path_id));
-    let extension = default_path.extension().and_then(|value| value.to_str());
-    let path = match extension {
-        Some(extension) if !extension.is_empty() => {
-            sprite_dir.join(format!("{file_stem}.{extension}"))
-        }
-        _ => sprite_dir.join(file_stem),
+    else {
+        return false;
     };
-    non_overwriting_assetstudio_output_path(path, asset)
+    normalize_semantic_path_component(container_stem)
+        == normalize_semantic_path_component(&asset_stem)
+}
+
+fn normalize_semantic_path_component(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| *ch != '_' && *ch != '-' && !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn assetbundle_typetree_output_path(
+    output_dir: &Path,
+    export_path: &str,
+    strip_path_prefix: &str,
+    by_category: bool,
+    asset: &AssetStudioNativeAssetInfo,
+    payload_kind: Option<&str>,
+    payload: &[u8],
+) -> Result<Option<PathBuf>, ExportPipelineError> {
+    if payload_kind != Some("typetree_json")
+        || asset
+            .asset_type
+            .as_deref()
+            .is_none_or(|asset_type| normalize_assetstudio_type_name(asset_type) != "assetbundle")
+    {
+        return Ok(None);
+    }
+
+    let data: sonic_rs::Value = sonic_rs::from_slice(payload)
+        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let bundle_name = data
+        .get("m_AssetBundleName")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            data.get("m_Name")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or(asset.name.as_deref())
+        .unwrap_or(export_path);
+    let bundle_path = safe_payload_bundle_path(bundle_name);
+
+    if !by_category {
+        return Ok(Some(
+            output_dir
+                .join(export_path)
+                .join(bundle_path)
+                .join("_bundle.json"),
+        ));
+    }
+
+    let mut categories = HashSet::new();
+    let mut container_parents = HashSet::new();
+    if let Some(containers) = data.get("m_Container").and_then(|value| value.as_array()) {
+        for entry in containers {
+            let Some(key) = entry.get("key").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let relative = strip_container_prefix(key, strip_path_prefix);
+            if let Some(category) = assetbundle_container_category(&relative) {
+                categories.insert(category.to_string());
+            }
+            if let Some(parent) = relative
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                container_parents.insert(parent.to_path_buf());
+            }
+        }
+    }
+
+    if categories.len() > 1 {
+        return Ok(Some(output_dir.join(bundle_path).join("_bundle.json")));
+    }
+
+    if let Some(category) = categories.iter().next() {
+        return Ok(Some(
+            output_dir
+                .join(category)
+                .join(bundle_path)
+                .join("_bundle.json"),
+        ));
+    }
+
+    if container_parents.len() == 1 {
+        let parent = container_parents
+            .into_iter()
+            .next()
+            .expect("single container parent is present");
+        return Ok(Some(output_dir.join(parent).join("_bundle.json")));
+    }
+
+    Ok(Some(output_dir.join(bundle_path).join("_bundle.json")))
+}
+
+fn assetbundle_container_category(relative: &Path) -> Option<&'static str> {
+    match relative
+        .components()
+        .next()
+        .and_then(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        }) {
+        Some(value) if value.eq_ignore_ascii_case("startapp") => Some("startapp"),
+        Some(value) if value.eq_ignore_ascii_case("ondemand") => Some("ondemand"),
+        _ => None,
+    }
+}
+
+fn is_member_cutout_container(asset: &AssetStudioNativeAssetInfo) -> bool {
+    asset.container.as_deref().is_some_and(|container| {
+        container
+            .replace('\\', "/")
+            .contains("/character/member_cutout")
+    })
+}
+
+fn member_cutout_sprite_output_path(
+    default_path: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+) -> PathBuf {
+    let Some(stem) = default_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+    else {
+        return default_path.to_path_buf();
+    };
+    let extension = default_path.extension().and_then(|value| value.to_str());
+    let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
+    let object_dir = parent.join(format!("{stem}.assets")).join("sprite");
+    let file_stem = assetstudio_semantic_file_stem(asset);
+    match extension {
+        Some(extension) if !extension.is_empty() => {
+            object_dir.join(format!("{file_stem}.{extension}"))
+        }
+        _ => object_dir.join(file_stem),
+    }
+}
+
+fn named_flat_subasset_output_path(
+    default_path: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+) -> PathBuf {
+    let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
+    let file_stem = assetstudio_semantic_file_stem(asset);
+    let extension = default_path.extension().and_then(|value| value.to_str());
+    match extension {
+        Some(extension) if !extension.is_empty() => parent.join(format!("{file_stem}.{extension}")),
+        _ => parent.join(file_stem),
+    }
+}
+
+fn named_subasset_output_path(
+    default_path: &Path,
+    asset: &AssetStudioNativeAssetInfo,
+    semantic_dir: &str,
+) -> PathBuf {
+    let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
+    let container_stem = default_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("asset");
+    let object_dir = parent
+        .join(format!("{container_stem}.assets"))
+        .join(semantic_dir);
+    let file_stem = assetstudio_semantic_file_stem(asset);
+    let extension = default_path.extension().and_then(|value| value.to_str());
+    match extension {
+        Some(extension) if !extension.is_empty() => {
+            object_dir.join(format!("{file_stem}.{extension}"))
+        }
+        _ => object_dir.join(file_stem),
+    }
+}
+
+fn assetstudio_semantic_file_stem(asset: &AssetStudioNativeAssetInfo) -> String {
+    asset
+        .name
+        .as_deref()
+        .map(assetstudio_fix_file_name)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            asset
+                .unique_id
+                .as_deref()
+                .map(assetstudio_fix_file_name)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            asset
+                .asset_type
+                .as_deref()
+                .map(assetstudio_fix_file_name)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "asset".to_string())
 }
 
 fn unitypy_object_output_extension(
@@ -2487,6 +4840,7 @@ fn unitypy_object_output_extension(
             .and_then(static_known_payload_extension)
             .unwrap_or("bytes"),
         "image_bmp" => NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+        "image_raw_rgba" => "png",
         "image_png" => "png",
         "image_tga" => "tga",
         "image_jpeg" => "jpg",
@@ -2496,6 +4850,7 @@ fn unitypy_object_output_extension(
         | "image_array_bundle_tga"
         | "image_array_bundle_jpeg"
         | "image_array_bundle_webp"
+        | "image_array_bundle_raw_rgba"
         | "animator_bundle_fbx" => "",
         "audio_raw" => suggested_extension
             .and_then(static_known_payload_extension)
@@ -2546,51 +4901,6 @@ fn static_known_payload_extension(extension: &str) -> Option<&'static str> {
     }
 }
 
-fn non_overwriting_assetstudio_output_path(
-    path: PathBuf,
-    asset: &AssetStudioNativeAssetInfo,
-) -> PathBuf {
-    if !path.exists() {
-        return path;
-    }
-
-    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("asset");
-    let extension = path.extension().and_then(|value| value.to_str());
-    if let Some(unique_id) = asset.unique_id.as_deref().filter(|value| !value.is_empty()) {
-        let candidate = parent.join(match extension {
-            Some(extension) if !extension.is_empty() => format!("{stem}{unique_id}.{extension}"),
-            _ => format!("{stem}{unique_id}"),
-        });
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-
-    for index in 0..1000 {
-        let suffix = if index == 0 {
-            format!("#{}", asset.path_id)
-        } else {
-            format!("#{}_{}", asset.path_id, index)
-        };
-        let file_name = match extension {
-            Some(extension) if !extension.is_empty() => {
-                format!("{stem}_{suffix}.{extension}")
-            }
-            _ => format!("{stem}_{suffix}"),
-        };
-        let candidate = parent.join(file_name);
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    path
-}
-
 fn assetstudio_cli_parity_output_path(
     default_path: &Path,
     asset: &AssetStudioNativeAssetInfo,
@@ -2602,10 +4912,9 @@ fn assetstudio_cli_parity_output_path(
         .as_deref()
         .map(assetstudio_fix_file_name)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| format!("asset_{}", asset.path_id));
+        .unwrap_or_else(|| assetstudio_semantic_file_stem(asset));
     let extension = assetstudio_cli_parity_extension(asset, suggested_extension);
-    let path = parent.join(format!("{file_name}{extension}"));
-    non_overwriting_assetstudio_output_path(path, asset)
+    parent.join(format!("{file_name}{extension}"))
 }
 
 fn assetstudio_cli_parity_extension(
@@ -2647,14 +4956,39 @@ fn assetstudio_cli_parity_extension(
 }
 
 fn assetstudio_fix_file_name(value: &str) -> String {
-    value
+    let safe: String = value
         .chars()
         .map(|ch| match ch {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
             _ if ch.is_control() => '_',
             _ => ch,
         })
-        .collect()
+        .collect();
+    shorten_assetstudio_public_file_stem(&compress_repeated_clone_suffixes(&safe))
+}
+
+fn compress_repeated_clone_suffixes(value: &str) -> String {
+    let marker = "(Clone)";
+    let mut end = value.len();
+    let mut count = 0usize;
+    while end >= marker.len() && value[..end].ends_with(marker) {
+        end -= marker.len();
+        count += 1;
+    }
+    if count <= 1 {
+        return value.to_string();
+    }
+    format!("{}__clone{count}", value[..end].trim_end())
+}
+
+fn shorten_assetstudio_public_file_stem(value: &str) -> String {
+    if value.chars().count() <= ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS {
+        return value.to_string();
+    }
+    let keep = ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS.saturating_sub("__truncated".len());
+    let mut shortened: String = value.chars().take(keep).collect();
+    shortened.push_str("__truncated");
+    shortened
 }
 
 fn default_extension_for_asset(asset: &AssetStudioNativeAssetInfo) -> &'static str {
@@ -2693,8 +5027,7 @@ fn strip_container_prefix(container: &str, strip_path_prefix: &str) -> PathBuf {
 fn parse_assetstudio_native_context_open_worker_output(
     output: NativeWorkerOutput,
 ) -> Result<AssetStudioNativeContextOpenResponse, ExportPipelineError> {
-    let response: AssetStudioNativeContextOpenResponse = sonic_rs::from_str(&output.stdout)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let response = output.response.into_context_open()?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native context open warning");
     }
@@ -2723,8 +5056,7 @@ fn parse_assetstudio_native_context_open_worker_output(
 fn parse_assetstudio_native_context_list_objects_worker_output(
     output: NativeWorkerOutput,
 ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
-    let response: AssetStudioNativeContextListObjectsResponse = sonic_rs::from_str(&output.stdout)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let response = output.response.into_context_list_objects()?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native context list objects warning");
     }
@@ -2755,8 +5087,7 @@ fn parse_assetstudio_native_context_list_objects_worker_output(
 fn parse_assetstudio_native_context_close_worker_output(
     output: NativeWorkerOutput,
 ) -> Result<(), ExportPipelineError> {
-    let response: AssetStudioNativeContextCloseResponse = sonic_rs::from_str(&output.stdout)
-        .map_err(|source| ExportPipelineError::NativeParse { source })?;
+    let response = output.response.into_context_close()?;
     for warning in &response.warnings {
         warn!(warning = %warning, "assetstudio native context close warning");
     }
@@ -2779,35 +5110,32 @@ fn parse_assetstudio_native_context_close_worker_output(
 async fn run_assetstudio_native_worker_limited(
     worker_path: &Path,
     native_library_path: &str,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
+    request: &AssetStudioNativeRequest,
     process_concurrency: usize,
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let _permit = acquire_native_process_permit(process_concurrency).await?;
     let _cpu_permit = acquire_cpu_budget_permit(process_concurrency).await?;
-    run_assetstudio_native_worker(worker_path, native_library_path, operation, request_json).await
+    run_assetstudio_native_worker(worker_path, native_library_path, request).await
 }
 
 #[allow(dead_code)]
 async fn run_assetstudio_native_worker_isolated(
     worker_path: &Path,
     native_library_path: &str,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
+    request: &AssetStudioNativeRequest,
     process_concurrency: usize,
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let _recovery_guard = native_process_recovery_lock().await;
     let _permits = acquire_all_native_process_permits(process_concurrency).await?;
     let _cpu_permit = acquire_cpu_budget_permit(process_concurrency).await?;
-    run_assetstudio_native_worker(worker_path, native_library_path, operation, request_json).await
+    run_assetstudio_native_worker(worker_path, native_library_path, request).await
 }
 
 #[allow(dead_code)]
 async fn run_assetstudio_native_worker_pool(
     worker_path: &Path,
     native_library_path: &str,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
+    request: &AssetStudioNativeRequest,
     process_concurrency: usize,
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let pool = native_worker_pool(
@@ -2817,7 +5145,7 @@ async fn run_assetstudio_native_worker_pool(
         NATIVE_AOT_WORKER_MAX_CALLS_DEFAULT,
         process_concurrency,
     );
-    pool.call(operation, request_json).await
+    pool.call(request).await
 }
 
 fn is_native_worker_signal_failure(error: &ExportPipelineError) -> bool {
@@ -3132,15 +5460,14 @@ async fn native_process_recovery_lock() -> tokio::sync::MutexGuard<'static, ()> 
 #[derive(Debug, Serialize, Deserialize)]
 struct NativeWorkerServerRequest {
     id: u64,
-    operation: String,
-    request_json: Option<String>,
+    request: AssetStudioNativeRequest,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct NativeWorkerServerResponse {
     id: u64,
     status: Option<i32>,
-    response_json: Option<String>,
+    response: Option<AssetStudioNativeResponse>,
     #[serde(default)]
     payload_len: usize,
     payload_file: Option<String>,
@@ -3218,8 +5545,7 @@ impl NativeWorkerPool {
     #[allow(dead_code)]
     async fn call(
         &self,
-        operation: AssetStudioNativeOperation,
-        request_json: Option<&str>,
+        request: &AssetStudioNativeRequest,
     ) -> Result<NativeWorkerOutput, ExportPipelineError> {
         let _permit = self
             .semaphore
@@ -3235,7 +5561,7 @@ impl NativeWorkerPool {
             None => self.spawn_worker().await?,
         };
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let call_result = worker.call(request_id, operation, request_json).await;
+        let call_result = worker.call(request_id, request).await;
 
         match call_result {
             Ok(output) => {
@@ -3460,18 +5786,117 @@ struct NativePooledWorker {
     stats: Arc<NativeWorkerPoolStats>,
 }
 
+struct NativeDirectWorker {
+    sender: mpsc::Sender<NativeDirectCommand>,
+    thread: Option<JoinHandle<()>>,
+    completed_calls: usize,
+}
+
+type NativeDirectCallResult =
+    Result<(i32, AssetStudioNativeResponse, Vec<u8>), ExportPipelineError>;
+
+enum NativeDirectCommand {
+    Call {
+        request: AssetStudioNativeRequest,
+        reply: mpsc::Sender<NativeDirectCallResult>,
+    },
+    Shutdown,
+}
+
+impl NativeDirectWorker {
+    fn load(native_library_path: &str) -> Result<Self, ExportPipelineError> {
+        let library = LoadedAssetStudioNativeLibrary::load(native_library_path)?;
+        let (sender, receiver) = mpsc::channel::<NativeDirectCommand>();
+        let thread = std::thread::Builder::new()
+            .name("haruki-assetstudio-direct-ffi".to_string())
+            .stack_size(NATIVE_AOT_FFI_CALL_STACK_SIZE)
+            .spawn(move || run_native_direct_worker(library, receiver))
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("failed to spawn native direct FFI thread: {source}"),
+            })?;
+        Ok(Self {
+            sender,
+            thread: Some(thread),
+            completed_calls: 0,
+        })
+    }
+
+    async fn call(
+        &mut self,
+        id: u64,
+        request: &AssetStudioNativeRequest,
+    ) -> Result<NativeWorkerOutput, ExportPipelineError> {
+        let started = Instant::now();
+        let operation = request.operation();
+        let (reply, response_receiver) = mpsc::channel();
+        self.sender
+            .send(NativeDirectCommand::Call {
+                request: request.clone(),
+                reply,
+            })
+            .map_err(|source| ExportPipelineError::AssetStudioNative {
+                message: format!("native direct FFI thread is not available: {source}"),
+            })?;
+        let (status, response, payload) = response_receiver.recv().map_err(|source| {
+            ExportPipelineError::AssetStudioNative {
+                message: format!("native direct FFI thread did not return a response: {source}"),
+            }
+        })??;
+        self.completed_calls = self.completed_calls.saturating_add(1);
+        debug!(
+            request_id = id,
+            operation = operation.as_str(),
+            status,
+            completed_calls = self.completed_calls,
+            elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            payload_len = payload.len(),
+            "assetstudio native direct call completed"
+        );
+        Ok(NativeWorkerOutput {
+            status: status.to_string(),
+            status_success: status == 0,
+            response,
+            stderr: String::new(),
+            payload,
+            payload_file: None,
+        })
+    }
+}
+
+impl Drop for NativeDirectWorker {
+    fn drop(&mut self) {
+        let _ = self.sender.send(NativeDirectCommand::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn run_native_direct_worker(
+    library: LoadedAssetStudioNativeLibrary,
+    receiver: mpsc::Receiver<NativeDirectCommand>,
+) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            NativeDirectCommand::Call { request, reply } => {
+                let _ = reply.send(library.call_typed_request(&request));
+            }
+            NativeDirectCommand::Shutdown => break,
+        }
+    }
+}
+
 impl NativePooledWorker {
     async fn call(
         &mut self,
         id: u64,
-        operation: AssetStudioNativeOperation,
-        request_json: Option<&str>,
+        request: &AssetStudioNativeRequest,
     ) -> Result<NativeWorkerOutput, ExportPipelineError> {
         let started = Instant::now();
+        let operation = request.operation();
         let request = NativeWorkerServerRequest {
             id,
-            operation: operation.as_str().to_string(),
-            request_json: request_json.map(str::to_string),
+            request: request.clone(),
         };
         let request_bytes = sonic_rs::to_vec(&request)
             .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
@@ -3501,13 +5926,31 @@ impl NativePooledWorker {
             return Err(ExportPipelineError::AssetStudioNative { message: error });
         }
         let status = response.status.unwrap_or(100);
-        let response_json =
+        let typed_response =
             response
-                .response_json
+                .response
                 .ok_or_else(|| ExportPipelineError::AssetStudioNative {
-                    message: "native worker pool response is missing response_json".to_string(),
+                    message: "native worker pool response is missing typed response".to_string(),
                 })?;
-        let payload = if response.payload_len > 0 {
+        let payload_file = response.payload_file.as_ref().map(PathBuf::from);
+        let payload = if let Some(payload_file) = payload_file.as_ref() {
+            let metadata =
+                std::fs::metadata(payload_file).map_err(|source| ExportPipelineError::Io {
+                    path: payload_file.clone(),
+                    source,
+                })?;
+            if metadata.len() != response.payload_len as u64 {
+                return Err(ExportPipelineError::AssetStudioNative {
+                    message: format!(
+                        "native worker payload file length mismatch: expected {}, got {} at {}",
+                        response.payload_len,
+                        metadata.len(),
+                        payload_file.display()
+                    ),
+                });
+            }
+            Vec::new()
+        } else if response.payload_len > 0 {
             let payload = match read_native_worker_frame(&mut self.stdout).await {
                 Ok(bytes) => bytes,
                 Err(source) => return Err(self.protocol_error(source)),
@@ -3537,17 +5980,20 @@ impl NativePooledWorker {
             completed_calls = self.completed_calls,
             elapsed_ms,
             payload_len = payload.len(),
-            payload_file = response.payload_file.as_deref().unwrap_or(""),
+            payload_file = payload_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
             "assetstudio native worker call completed"
         );
 
         Ok(NativeWorkerOutput {
             status: status.to_string(),
             status_success: status == 0,
-            stdout: response_json,
+            response: typed_response,
             stderr: String::new(),
             payload,
-            payload_file: response.payload_file.map(PathBuf::from),
+            payload_file,
         })
     }
 
@@ -3661,7 +6107,7 @@ where
 struct NativeWorkerOutput {
     status: String,
     status_success: bool,
-    stdout: String,
+    response: AssetStudioNativeResponse,
     stderr: String,
     payload: Vec<u8>,
     payload_file: Option<PathBuf>,
@@ -3671,8 +6117,7 @@ struct NativeWorkerOutput {
 async fn run_assetstudio_native_worker(
     worker_path: &Path,
     native_library_path: &str,
-    operation: AssetStudioNativeOperation,
-    request_json: Option<&str>,
+    request: &AssetStudioNativeRequest,
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let response_file = tempfile::Builder::new()
         .prefix("haruki-assetstudio-native-response-")
@@ -3684,6 +6129,7 @@ async fn run_assetstudio_native_worker(
     let response_path = response_file.path().to_path_buf();
     let worker_program = absolute_command_path(worker_path);
     let mut command = Command::new(&worker_program);
+    let operation = request.operation();
     command
         .arg("--operation")
         .arg(operation.as_str())
@@ -3704,25 +6150,25 @@ async fn run_assetstudio_native_worker(
             source,
         })?;
 
-    if let Some(request_json) = request_json {
-        let mut stdin =
-            child
-                .stdin
-                .take()
-                .ok_or_else(|| ExportPipelineError::AssetStudioNative {
-                    message: format!(
-                        "failed to open stdin for native worker `{}`",
-                        worker_path.display()
-                    ),
-                })?;
-        stdin
-            .write_all(request_json.as_bytes())
-            .await
-            .map_err(|source| ExportPipelineError::Io {
-                path: worker_path.to_path_buf(),
-                source,
-            })?;
-    }
+    let request_bytes = sonic_rs::to_vec(request)
+        .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+            message: format!(
+                "failed to open stdin for native worker `{}`",
+                worker_path.display()
+            ),
+        })?;
+    stdin
+        .write_all(&request_bytes)
+        .await
+        .map_err(|source| ExportPipelineError::Io {
+            path: worker_path.to_path_buf(),
+            source,
+        })?;
+    drop(stdin);
 
     let output = child
         .wait_with_output()
@@ -3734,24 +6180,29 @@ async fn run_assetstudio_native_worker(
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let response_json =
+    let response_text =
         std::fs::read_to_string(&response_path).map_err(|source| ExportPipelineError::Io {
             path: response_path.clone(),
             source,
         })?;
-    let response_json = response_json.trim().to_string();
-    if response_json.is_empty() {
+    let response_text = response_text.trim().to_string();
+    if response_text.is_empty() {
         return Err(ExportPipelineError::CommandFailed {
             program: worker_path.display().to_string(),
             status: output.status.to_string(),
             stderr: format_worker_diagnostics(&stdout, &stderr),
         });
     }
+    let response = sonic_rs::from_str(&response_text).map_err(|source| {
+        ExportPipelineError::AssetStudioNative {
+            message: format!("failed to parse native worker typed response: {source}"),
+        }
+    })?;
 
     Ok(NativeWorkerOutput {
         status: output.status.to_string(),
         status_success: output.status.success(),
-        stdout: response_json,
+        response,
         stderr: format_worker_diagnostics(&stdout, &stderr),
         payload: Vec::new(),
         payload_file: None,
@@ -3804,19 +6255,6 @@ fn assetstudio_native_worker_executable_name() -> &'static str {
         "assetstudio_native_worker.exe"
     } else {
         "assetstudio_native_worker"
-    }
-}
-
-unsafe fn take_native_response_string(
-    response_ptr: *mut c_char,
-    free: AssetStudioFreeStringFn,
-) -> String {
-    if response_ptr.is_null() {
-        String::new()
-    } else {
-        let response = CStr::from_ptr(response_ptr).to_string_lossy().into_owned();
-        free(response_ptr);
-        response
     }
 }
 
@@ -3895,12 +6333,16 @@ unsafe fn load_assetstudio_native_dependency(
     libloading::Library::new(dependency_path)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn post_process_exported_files(
     app_config: &AppConfig,
     region_name: &str,
     region: &RegionConfig,
     export_path: &Path,
     upload_root: &Path,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+    acb_sources: Vec<NativeInMemoryMediaSource>,
 ) -> Result<PostProcessSummary, ExportPipelineError> {
     configure_cpu_budget_throttle(&app_config.concurrency, app_config.effective_cpu_budget());
     if !export_path.exists() {
@@ -3957,62 +6399,86 @@ pub async fn post_process_exported_files(
     );
 
     let phase_started = Instant::now();
-    summary
-        .generated_files
-        .extend(convert_native_surrogate_images_to_png(
-            export_path,
-            concurrency.images,
-            cpu_budget,
-        )?);
+    let surrogate_png_files = convert_native_surrogate_images_to_png(
+        export_path,
+        scoped_files,
+        concurrency.images,
+        cpu_budget,
+        scoped_post_process,
+    )?;
+    summary.generated_files.extend(surrogate_png_files.clone());
     record_phase_ms(
         &mut summary.post_process_phase_ms,
         "post_process.native_surrogate_images",
         phase_started,
     );
 
-    let phase_started = Instant::now();
-    summary.generated_files.extend(
-        handle_usm_files(
+    let acb_options = OwnedAcbPostProcessOptions {
+        output_dir: export_path.to_path_buf(),
+        region: region.clone(),
+        ffmpeg_path: app_config.tools.ffmpeg_path.clone(),
+        media_backend: app_config.tools.media_backend,
+        retry: app_config.execution.retry.clone(),
+        hca_concurrency: concurrency.hca,
+        media_encode_concurrency: concurrency.media_encode,
+        cpu_budget,
+    };
+    let acb_concurrency = concurrency.acb;
+    let acb_scoped_files = scoped_files.to_vec();
+    let usm_output = async {
+        let phase_started = Instant::now();
+        let mut output = handle_usm_files(
             export_path,
             region,
             &app_config.tools.ffmpeg_path,
             app_config.tools.media_backend,
             &app_config.execution.retry,
             concurrency.usm,
+            scoped_post_process,
+            scoped_files,
+        )
+        .await?;
+        record_phase_ms(&mut output.phase_ms, "post_process.usm", phase_started);
+        Ok::<_, ExportPipelineError>(output)
+    };
+    let acb_output = tokio::task::spawn_blocking(move || {
+        let phase_started = Instant::now();
+        let mut output = handle_acb_files_owned(
+            &acb_options,
+            acb_concurrency,
+            scoped_post_process,
+            &acb_scoped_files,
+            acb_sources,
+        )?;
+        record_phase_ms(&mut output.phase_ms, "post_process.acb", phase_started);
+        Ok::<_, ExportPipelineError>(output)
+    });
+    let (usm_output, acb_output) = tokio::join!(usm_output, acb_output);
+    let usm_output = usm_output?;
+    summary.generated_files.extend(usm_output.generated_files);
+    merge_raw_phase_ms(&mut summary.post_process_phase_ms, &usm_output.phase_ms);
+
+    let acb_output = acb_output.map_err(|source| ExportPipelineError::WorkerPanic {
+        worker: "acb post-process".to_string(),
+        message: source.to_string(),
+    })??;
+    summary.generated_files.extend(acb_output.generated_files);
+    merge_raw_phase_ms(&mut summary.post_process_phase_ms, &acb_output.phase_ms);
+
+    let phase_started = Instant::now();
+    let mut scoped_png_files = scoped_files.to_vec();
+    scoped_png_files.extend(surrogate_png_files);
+    summary.generated_files.extend(
+        handle_png_conversion(
+            export_path,
+            &scoped_png_files,
+            region,
+            concurrency.images,
+            cpu_budget,
+            scoped_post_process,
         )
         .await?,
     );
-    record_phase_ms(
-        &mut summary.post_process_phase_ms,
-        "post_process.usm",
-        phase_started,
-    );
-
-    let phase_started = Instant::now();
-    let acb_options = AcbPostProcessOptions {
-        output_dir: export_path,
-        region,
-        ffmpeg_path: &app_config.tools.ffmpeg_path,
-        media_backend: app_config.tools.media_backend,
-        retry: &app_config.execution.retry,
-        hca_concurrency: concurrency.hca,
-        media_encode_concurrency: concurrency.media_encode,
-        cpu_budget,
-    };
-    let acb_output = handle_acb_files(&acb_options, concurrency.acb);
-    let acb_output = acb_output.await?;
-    summary.generated_files.extend(acb_output.generated_files);
-    merge_raw_phase_ms(&mut summary.post_process_phase_ms, &acb_output.phase_ms);
-    record_phase_ms(
-        &mut summary.post_process_phase_ms,
-        "post_process.acb",
-        phase_started,
-    );
-
-    let phase_started = Instant::now();
-    summary
-        .generated_files
-        .extend(handle_png_conversion(export_path, region, concurrency.images, cpu_budget).await?);
     record_phase_ms(
         &mut summary.post_process_phase_ms,
         "post_process.png_conversion",
@@ -4134,26 +6600,120 @@ fn media_encode_limiter(concurrency: usize) -> Arc<MediaEncodeLimiter> {
         .clone()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_usm_files(
     export_path: &Path,
     region: &RegionConfig,
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     retry: &crate::core::config::RetryConfig,
-    _usm_concurrency: usize,
-) -> Result<Vec<PathBuf>, ExportPipelineError> {
-    let usm_files = find_files_by_extension(export_path, "usm")?;
+    usm_concurrency: usize,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+) -> Result<UsmPostProcessOutput, ExportPipelineError> {
+    let mut output = UsmPostProcessOutput::default();
+    let usm_files =
+        post_process_files_by_extension(export_path, scoped_post_process, scoped_files, "usm")?;
+    output.phase_ms.insert(
+        "media_scheduler.usm_file_count".to_string(),
+        usm_files.len() as u64,
+    );
     if !region.export.usm.export || !region.export.usm.decode || usm_files.is_empty() {
-        return Ok(Vec::new());
+        output
+            .phase_ms
+            .insert("media_scheduler.usm_worker_count".to_string(), 0);
+        output
+            .phase_ms
+            .insert("media_scheduler.usm_merged_count".to_string(), 0);
+        return Ok(output);
+    }
+
+    if scoped_post_process {
+        output
+            .phase_ms
+            .insert("media_scheduler.usm_merged_count".to_string(), 0);
+        output.phase_ms.insert(
+            "media_scheduler.usm_configured_concurrency".to_string(),
+            usm_concurrency.max(1) as u64,
+        );
+        let worker_count = usm_concurrency.max(1).min(usm_files.len());
+        output.phase_ms.insert(
+            "media_scheduler.usm_worker_count".to_string(),
+            worker_count as u64,
+        );
+        if usm_files.len() == 1 {
+            let usm_file = usm_files
+                .into_iter()
+                .next()
+                .expect("single scoped USM is present");
+            let output_dir = usm_file
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let file_output = process_usm_file_with_metrics(
+                &usm_file,
+                &output_dir,
+                region,
+                ffmpeg_path,
+                media_backend,
+                retry,
+            )
+            .await?;
+            output.generated_files.extend(file_output.generated_files);
+            merge_raw_phase_ms(&mut output.phase_ms, &file_output.phase_ms);
+            return Ok(output);
+        }
+        let region = region.clone();
+        let ffmpeg_path = ffmpeg_path.to_string();
+        let retry = retry.clone();
+        let outputs = run_tasks(usm_files, worker_count, move |usm_file| {
+            let output_dir = usm_file
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|source| ExportPipelineError::AssetStudioNative {
+                    message: format!("failed to create USM post-process runtime: {source}"),
+                })?;
+            runtime.block_on(process_usm_file_with_metrics(
+                &usm_file,
+                &output_dir,
+                &region,
+                &ffmpeg_path,
+                media_backend,
+                &retry,
+            ))
+        })?;
+        for file_output in outputs {
+            output.generated_files.extend(file_output.generated_files);
+            merge_raw_phase_ms(&mut output.phase_ms, &file_output.phase_ms);
+        }
+        return Ok(output);
     }
 
     let usm_input = if usm_files.len() == 1 {
+        output
+            .phase_ms
+            .insert("media_scheduler.usm_merged_count".to_string(), 0);
         usm_files[0].clone()
     } else {
+        output.phase_ms.insert(
+            "media_scheduler.usm_merged_count".to_string(),
+            usm_files.len() as u64,
+        );
         merge_usm_files(export_path, &usm_files)?
     };
+    output
+        .phase_ms
+        .insert("media_scheduler.usm_worker_count".to_string(), 1);
+    output.phase_ms.insert(
+        "media_scheduler.usm_configured_concurrency".to_string(),
+        usm_concurrency.max(1) as u64,
+    );
 
-    process_usm_file(
+    let file_output = process_usm_file_with_metrics(
         &usm_input,
         export_path,
         region,
@@ -4161,9 +6721,13 @@ async fn handle_usm_files(
         media_backend,
         retry,
     )
-    .await
+    .await?;
+    output.generated_files.extend(file_output.generated_files);
+    merge_raw_phase_ms(&mut output.phase_ms, &file_output.phase_ms);
+    Ok(output)
 }
 
+#[cfg(test)]
 async fn process_usm_file(
     usm_file: &Path,
     export_path: &Path,
@@ -4172,6 +6736,33 @@ async fn process_usm_file(
     media_backend: MediaBackend,
     retry: &crate::core::config::RetryConfig,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    Ok(process_usm_file_with_metrics(
+        usm_file,
+        export_path,
+        region,
+        ffmpeg_path,
+        media_backend,
+        retry,
+    )
+    .await?
+    .generated_files)
+}
+
+#[derive(Debug, Default)]
+struct UsmPostProcessOutput {
+    generated_files: Vec<PathBuf>,
+    phase_ms: HashMap<String, u64>,
+}
+
+async fn process_usm_file_with_metrics(
+    usm_file: &Path,
+    export_path: &Path,
+    region: &RegionConfig,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    retry: &crate::core::config::RetryConfig,
+) -> Result<UsmPostProcessOutput, ExportPipelineError> {
+    let mut output = UsmPostProcessOutput::default();
     let output_name = usm_file
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -4183,9 +6774,16 @@ async fn process_usm_file(
 
     if region.export.video.convert_to_mp4 && region.export.video.direct_usm_to_mp4_with_ffmpeg {
         let mp4 = export_path.join(format!("{output_name}.mp4"));
+        let phase_started = Instant::now();
         convert_usm_to_mp4_with_backend(usm_file, &mp4, ffmpeg_path, media_backend, retry).await?;
+        add_elapsed_phase_ms(
+            &mut output.phase_ms,
+            "post_process.usm.convert_mp4",
+            phase_started,
+        );
         remove_file_if_exists(usm_file)?;
-        return Ok(vec![mp4]);
+        output.generated_files.push(mp4);
+        return Ok(output);
     }
 
     let metadata = codec::read_usm_metadata(usm_file).ok();
@@ -4204,12 +6802,19 @@ async fn process_usm_file(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("input.usm");
+        let phase_started = Instant::now();
         let streams = codec::export_usm_to_memory(&usm_bytes, fallback_name.as_bytes(), false)?;
+        add_elapsed_phase_ms(
+            &mut output.phase_ms,
+            "post_process.usm.extract",
+            phase_started,
+        );
         if let Some(video) = streams
             .iter()
             .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
         {
             let mp4 = export_path.join(format!("{output_name}.mp4"));
+            let phase_started = Instant::now();
             convert_m2v_bytes_to_mp4_with_backend(
                 &video.data,
                 &mp4,
@@ -4219,12 +6824,24 @@ async fn process_usm_file(
                 retry,
             )
             .await?;
+            add_elapsed_phase_ms(
+                &mut output.phase_ms,
+                "post_process.usm.convert_mp4",
+                phase_started,
+            );
             remove_file_if_exists(usm_file)?;
-            return Ok(vec![mp4]);
+            output.generated_files.push(mp4);
+            return Ok(output);
         }
     }
 
+    let phase_started = Instant::now();
     let extracted = codec::export_usm(usm_file, export_path)?;
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.usm.extract",
+        phase_started,
+    );
     let mut generated = extracted.clone();
 
     if region.export.video.convert_to_mp4 {
@@ -4236,6 +6853,7 @@ async fn process_usm_file(
                 .unwrap_or(false)
             {
                 let mp4 = export_path.join(format!("{output_name}.mp4"));
+                let phase_started = Instant::now();
                 convert_m2v_to_mp4_with_backend(
                     &extracted_file,
                     &mp4,
@@ -4246,6 +6864,11 @@ async fn process_usm_file(
                     retry,
                 )
                 .await?;
+                add_elapsed_phase_ms(
+                    &mut output.phase_ms,
+                    "post_process.usm.convert_mp4",
+                    phase_started,
+                );
                 generated.push(mp4);
                 if region.export.video.remove_m2v {
                     generated.retain(|path| path != &extracted_file);
@@ -4255,22 +6878,70 @@ async fn process_usm_file(
     }
 
     remove_file_if_exists(usm_file)?;
-    Ok(generated)
+    output.generated_files = generated;
+    Ok(output)
 }
 
-async fn handle_acb_files(
+fn handle_acb_files_owned(
+    options: &OwnedAcbPostProcessOptions,
+    acb_concurrency: usize,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+    acb_sources: Vec<NativeInMemoryMediaSource>,
+) -> Result<AcbPostProcessOutput, ExportPipelineError> {
+    let borrowed = AcbPostProcessOptions {
+        output_dir: &options.output_dir,
+        region: &options.region,
+        ffmpeg_path: &options.ffmpeg_path,
+        media_backend: options.media_backend,
+        retry: &options.retry,
+        hca_concurrency: options.hca_concurrency,
+        media_encode_concurrency: options.media_encode_concurrency,
+        cpu_budget: options.cpu_budget,
+    };
+    handle_acb_files(
+        &borrowed,
+        acb_concurrency,
+        scoped_post_process,
+        scoped_files,
+        acb_sources,
+    )
+}
+
+fn handle_acb_files(
     options: &AcbPostProcessOptions<'_>,
     acb_concurrency: usize,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+    acb_sources: Vec<NativeInMemoryMediaSource>,
 ) -> Result<AcbPostProcessOutput, ExportPipelineError> {
-    let acb_files = find_files_by_extension(options.output_dir, "acb")?;
+    let acb_files = post_process_files_by_extension(
+        options.output_dir,
+        scoped_post_process,
+        scoped_files,
+        "acb",
+    )?;
     if !options.region.export.acb.export
         || !options.region.export.acb.decode
-        || acb_files.is_empty()
+        || (acb_files.is_empty() && acb_sources.is_empty())
     {
         return Ok(AcbPostProcessOutput::default());
     }
 
-    let acb_file_count = acb_files.len();
+    if acb_files.len() + acb_sources.len() == 1 || !options.region.export.hca.decode {
+        return handle_acb_files_batched(acb_files, acb_sources, options, acb_concurrency);
+    }
+    handle_acb_files_streaming(acb_files, acb_sources, options, acb_concurrency)
+}
+
+fn handle_acb_files_batched(
+    acb_files: Vec<PathBuf>,
+    acb_sources: Vec<NativeInMemoryMediaSource>,
+    options: &AcbPostProcessOptions<'_>,
+    acb_concurrency: usize,
+) -> Result<AcbPostProcessOutput, ExportPipelineError> {
+    let acb_inputs = acb_extraction_inputs(acb_files, acb_sources);
+    let acb_file_count = acb_inputs.len();
     let output_dir = options.output_dir.to_path_buf();
     let region = options.region.clone();
     let ffmpeg_path = options.ffmpeg_path.to_string();
@@ -4279,7 +6950,7 @@ async fn handle_acb_files(
     let hca_concurrency = options.hca_concurrency;
     let media_encode_concurrency = options.media_encode_concurrency;
     let cpu_budget = options.cpu_budget;
-    let extracted = run_tasks(acb_files, acb_concurrency, move |acb_file| {
+    let extracted = run_tasks(acb_inputs, acb_concurrency, move |acb_input| {
         let options = AcbPostProcessOptions {
             output_dir: &output_dir,
             region: &region,
@@ -4290,7 +6961,7 @@ async fn handle_acb_files(
             media_encode_concurrency,
             cpu_budget,
         };
-        extract_acb_tracks_from_file(&acb_file, &options)
+        extract_acb_tracks_from_input(acb_input, &options)
     })?;
     let mut merged = AcbPostProcessOutput::default();
     merged.phase_ms.insert(
@@ -4306,7 +6977,16 @@ async fn handle_acb_files(
     for output in extracted {
         merged.generated_files.extend(output.generated_files);
         merge_raw_phase_ms(&mut merged.phase_ms, &output.phase_ms);
-        hca_tracks.extend(output.hca_tracks);
+        let track_output_dir = output.output_dir.clone();
+        hca_tracks.extend(
+            output
+                .hca_tracks
+                .into_iter()
+                .map(|track| HcaTrackProcessJob {
+                    track,
+                    output_dir: track_output_dir.clone(),
+                }),
+        );
         if let Some(source_file) = output.source_file {
             source_files.push(source_file);
         }
@@ -4334,10 +7014,271 @@ async fn handle_acb_files(
     Ok(merged)
 }
 
+fn handle_acb_files_streaming(
+    acb_files: Vec<PathBuf>,
+    acb_sources: Vec<NativeInMemoryMediaSource>,
+    options: &AcbPostProcessOptions<'_>,
+    acb_concurrency: usize,
+) -> Result<AcbPostProcessOutput, ExportPipelineError> {
+    let acb_inputs = acb_extraction_inputs(acb_files, acb_sources);
+    let acb_file_count = acb_inputs.len();
+    let acb_worker_count = acb_concurrency.max(1).min(acb_file_count);
+    let hca_worker_count = options.hca_concurrency.max(1);
+    let queue_capacity = hca_worker_count.saturating_mul(2).max(1);
+    let (track_sender, track_receiver) =
+        std::sync::mpsc::sync_channel::<HcaTrackProcessJob>(queue_capacity);
+    let track_receiver = Arc::new(Mutex::new(track_receiver));
+    let results = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let phase_ms = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
+    let source_files = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+    let first_error = Arc::new(Mutex::new(None::<ExportPipelineError>));
+    let hca_track_count = Arc::new(AtomicUsize::new(0));
+    let hca_started = Instant::now();
+    let mut hca_handles = Vec::with_capacity(hca_worker_count);
+
+    for _ in 0..hca_worker_count {
+        let track_receiver = track_receiver.clone();
+        let results = results.clone();
+        let phase_ms = phase_ms.clone();
+        let first_error = first_error.clone();
+        let output_dir_for_error = options.output_dir.to_path_buf();
+        let region = options.region.clone();
+        let ffmpeg_path = options.ffmpeg_path.to_string();
+        let media_backend = options.media_backend;
+        let retry = options.retry.clone();
+        let media_encode_concurrency = options.media_encode_concurrency;
+        let cpu_budget = options.cpu_budget;
+        let handle = std::thread::Builder::new()
+            .name("hca-memory-export".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || loop {
+                if first_error.lock().unwrap().is_some() {
+                    break;
+                }
+
+                let next_track = track_receiver.lock().unwrap().recv();
+                let Ok(track_job) = next_track else {
+                    break;
+                };
+
+                let track_options = HcaTrackProcessOptions {
+                    output_dir: &track_job.output_dir,
+                    region: &region,
+                    ffmpeg_path: &ffmpeg_path,
+                    media_backend,
+                    retry: &retry,
+                    media_encode_concurrency,
+                    cpu_budget,
+                };
+                match process_hca_track(track_job.track, &track_options) {
+                    Ok(track_output) => {
+                        results.lock().unwrap().extend(track_output.generated_files);
+                        merge_raw_phase_ms(&mut phase_ms.lock().unwrap(), &track_output.phase_ms);
+                    }
+                    Err(err) => {
+                        set_first_error(&first_error, err);
+                        break;
+                    }
+                }
+            })
+            .map_err(|source| ExportPipelineError::Io {
+                path: output_dir_for_error,
+                source,
+            })?;
+        hca_handles.push(handle);
+    }
+
+    let acb_queue = Arc::new(Mutex::new(VecDeque::from(acb_inputs)));
+    let mut acb_handles = Vec::with_capacity(acb_worker_count);
+    for _ in 0..acb_worker_count {
+        let acb_queue = acb_queue.clone();
+        let track_sender = track_sender.clone();
+        let results = results.clone();
+        let phase_ms = phase_ms.clone();
+        let source_files = source_files.clone();
+        let first_error = first_error.clone();
+        let hca_track_count = hca_track_count.clone();
+        let output_dir_for_error = options.output_dir.to_path_buf();
+        let worker_output_dir = options.output_dir.to_path_buf();
+        let region = options.region.clone();
+        let ffmpeg_path = options.ffmpeg_path.to_string();
+        let media_backend = options.media_backend;
+        let retry = options.retry.clone();
+        let hca_concurrency = options.hca_concurrency;
+        let media_encode_concurrency = options.media_encode_concurrency;
+        let cpu_budget = options.cpu_budget;
+        let handle = std::thread::Builder::new()
+            .name("acb-track-extract".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || loop {
+                if first_error.lock().unwrap().is_some() {
+                    break;
+                }
+
+                let next_acb = acb_queue.lock().unwrap().pop_front();
+                let Some(acb_input) = next_acb else {
+                    break;
+                };
+
+                let worker_options = AcbPostProcessOptions {
+                    output_dir: &worker_output_dir,
+                    region: &region,
+                    ffmpeg_path: &ffmpeg_path,
+                    media_backend,
+                    retry: &retry,
+                    hca_concurrency,
+                    media_encode_concurrency,
+                    cpu_budget,
+                };
+                match extract_acb_tracks_from_input(acb_input, &worker_options) {
+                    Ok(output) => {
+                        results.lock().unwrap().extend(output.generated_files);
+                        merge_raw_phase_ms(&mut phase_ms.lock().unwrap(), &output.phase_ms);
+                        if let Some(source_file) = output.source_file {
+                            source_files.lock().unwrap().push(source_file);
+                        }
+                        let track_output_dir = output.output_dir;
+                        for track in output.hca_tracks {
+                            hca_track_count.fetch_add(1, Ordering::Relaxed);
+                            let job = HcaTrackProcessJob {
+                                track,
+                                output_dir: track_output_dir.clone(),
+                            };
+                            if !send_hca_track(&track_sender, job, &first_error) {
+                                break;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        set_first_error(&first_error, err);
+                        break;
+                    }
+                }
+            })
+            .map_err(|source| ExportPipelineError::Io {
+                path: output_dir_for_error,
+                source,
+            })?;
+        acb_handles.push(handle);
+    }
+    drop(track_sender);
+
+    for handle in acb_handles {
+        handle
+            .join()
+            .map_err(|panic| ExportPipelineError::WorkerPanic {
+                worker: "acb track extract".to_string(),
+                message: panic_message(panic),
+            })?;
+    }
+    for handle in hca_handles {
+        handle
+            .join()
+            .map_err(|panic| ExportPipelineError::WorkerPanic {
+                worker: "hca memory export".to_string(),
+                message: panic_message(panic),
+            })?;
+    }
+
+    if let Some(err) = first_error.lock().unwrap().take() {
+        return Err(err);
+    }
+
+    let mut merged = AcbPostProcessOutput::default();
+    merged.phase_ms.insert(
+        "media_scheduler.acb_file_count".to_string(),
+        acb_file_count as u64,
+    );
+    merged.phase_ms.insert(
+        "media_scheduler.acb_worker_count".to_string(),
+        acb_worker_count as u64,
+    );
+    merged.phase_ms.insert(
+        "media_scheduler.hca_track_count".to_string(),
+        hca_track_count.load(Ordering::Relaxed) as u64,
+    );
+    merged.phase_ms.insert(
+        "media_scheduler.hca_worker_count".to_string(),
+        hca_worker_count as u64,
+    );
+    merge_raw_phase_ms(&mut merged.phase_ms, &phase_ms.lock().unwrap());
+    add_elapsed_phase_ms(
+        &mut merged.phase_ms,
+        "post_process.acb.hca_tracks_wall",
+        hca_started,
+    );
+    merged.generated_files = results.lock().unwrap().clone();
+
+    for source_file in source_files.lock().unwrap().iter() {
+        let phase_started = Instant::now();
+        remove_file_if_exists(source_file)?;
+        add_elapsed_phase_ms(
+            &mut merged.phase_ms,
+            "post_process.acb.remove_source",
+            phase_started,
+        );
+    }
+    Ok(merged)
+}
+
+fn set_first_error(
+    first_error: &Arc<Mutex<Option<ExportPipelineError>>>,
+    err: ExportPipelineError,
+) {
+    let mut first = first_error.lock().unwrap();
+    if first.is_none() {
+        *first = Some(err);
+    }
+}
+
+fn send_hca_track(
+    sender: &std::sync::mpsc::SyncSender<HcaTrackProcessJob>,
+    track: HcaTrackProcessJob,
+    first_error: &Arc<Mutex<Option<ExportPipelineError>>>,
+) -> bool {
+    let mut track = Some(track);
+    loop {
+        if first_error.lock().unwrap().is_some() {
+            return false;
+        }
+        match sender.try_send(track.take().expect("track is retained until sent")) {
+            Ok(()) => return true,
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                track = Some(returned);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return false,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct AcbPostProcessOutput {
     generated_files: Vec<PathBuf>,
     phase_ms: HashMap<String, u64>,
+}
+
+struct HcaTrackProcessJob {
+    track: cridecoder::ExtractedAcbTrack,
+    output_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+enum AcbExtractionInput {
+    File(PathBuf),
+    Memory(NativeInMemoryMediaSource),
+}
+
+#[derive(Clone)]
+struct OwnedAcbPostProcessOptions {
+    output_dir: PathBuf,
+    region: RegionConfig,
+    ffmpeg_path: String,
+    media_backend: MediaBackend,
+    retry: crate::core::config::RetryConfig,
+    hca_concurrency: usize,
+    media_encode_concurrency: usize,
+    cpu_budget: usize,
 }
 
 #[derive(Clone)]
@@ -4357,31 +7298,88 @@ struct AcbTrackExtractionOutput {
     hca_tracks: Vec<cridecoder::ExtractedAcbTrack>,
     generated_files: Vec<PathBuf>,
     source_file: Option<PathBuf>,
+    output_dir: PathBuf,
     phase_ms: HashMap<String, u64>,
+}
+
+fn acb_extraction_inputs(
+    acb_files: Vec<PathBuf>,
+    acb_sources: Vec<NativeInMemoryMediaSource>,
+) -> Vec<AcbExtractionInput> {
+    acb_files
+        .into_iter()
+        .map(AcbExtractionInput::File)
+        .chain(acb_sources.into_iter().map(AcbExtractionInput::Memory))
+        .collect()
+}
+
+fn extract_acb_tracks_from_input(
+    input: AcbExtractionInput,
+    options: &AcbPostProcessOptions<'_>,
+) -> Result<AcbTrackExtractionOutput, ExportPipelineError> {
+    match input {
+        AcbExtractionInput::File(acb_file) => extract_acb_tracks_from_file(&acb_file, options),
+        AcbExtractionInput::Memory(source) => {
+            extract_acb_tracks_from_memory_source(source, options)
+        }
+    }
 }
 
 fn extract_acb_tracks_from_file(
     acb_file: &Path,
     options: &AcbPostProcessOptions<'_>,
 ) -> Result<AcbTrackExtractionOutput, ExportPipelineError> {
-    let mut output = AcbTrackExtractionOutput {
-        source_file: Some(acb_file.to_path_buf()),
-        ..AcbTrackExtractionOutput::default()
-    };
-
     let phase_started = Instant::now();
     let acb_reader = std::fs::File::open(acb_file).map_err(|source| ExportPipelineError::Io {
         path: acb_file.to_path_buf(),
         source,
     })?;
-    add_elapsed_phase_ms(
-        &mut output.phase_ms,
-        "post_process.acb.open_file",
-        phase_started,
-    );
+    let open_file_ms = phase_started
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+
+    let mut output = extract_acb_tracks_from_reader(
+        acb_reader,
+        acb_file,
+        Some(acb_file.to_path_buf()),
+        options,
+    )?;
+    *output
+        .phase_ms
+        .entry("post_process.acb.open_file".to_string())
+        .or_default() += open_file_ms;
+    Ok(output)
+}
+
+fn extract_acb_tracks_from_memory_source(
+    source: NativeInMemoryMediaSource,
+    options: &AcbPostProcessOptions<'_>,
+) -> Result<AcbTrackExtractionOutput, ExportPipelineError> {
+    extract_acb_tracks_from_reader(Cursor::new(source.payload), &source.target, None, options)
+}
+
+fn extract_acb_tracks_from_reader<R>(
+    acb_reader: R,
+    source_hint: &Path,
+    source_file: Option<PathBuf>,
+    options: &AcbPostProcessOptions<'_>,
+) -> Result<AcbTrackExtractionOutput, ExportPipelineError>
+where
+    R: Read + Seek,
+{
+    let output_dir = source_hint
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| options.output_dir.to_path_buf());
+    let mut output = AcbTrackExtractionOutput {
+        source_file,
+        output_dir,
+        ..AcbTrackExtractionOutput::default()
+    };
 
     let phase_started = Instant::now();
-    let mut hca_tracks = codec::export_acb_to_memory(acb_reader, Some(acb_file))?;
+    let mut hca_tracks = codec::export_acb_to_memory(acb_reader, Some(source_hint))?;
     add_elapsed_phase_ms(
         &mut output.phase_ms,
         "post_process.acb.extract_tracks",
@@ -4389,12 +7387,12 @@ fn extract_acb_tracks_from_file(
     );
 
     let phase_started = Instant::now();
-    let acb_path_lower = acb_file.to_string_lossy().replace('\\', "/").to_lowercase();
+    let acb_path_lower = source_hint
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase();
     if acb_path_lower.contains("music/long") {
-        hca_tracks.retain(|track| {
-            let lower = format!("{}.{}", track.name, track.extension).to_lowercase();
-            !(lower.ends_with("_vr.hca") || lower.ends_with("_screen.hca"))
-        });
+        hca_tracks.retain(|track| should_keep_music_long_hca_track(&track.name, &track.extension));
     }
     add_elapsed_phase_ms(
         &mut output.phase_ms,
@@ -4410,8 +7408,13 @@ fn extract_acb_tracks_from_file(
     Ok(output)
 }
 
+fn should_keep_music_long_hca_track(name: &str, extension: &str) -> bool {
+    let lower = format!("{name}.{extension}").to_lowercase();
+    !(lower.ends_with("_vr.hca") || lower.ends_with("_screen.hca"))
+}
+
 fn process_hca_tracks(
-    mut hca_tracks: Vec<cridecoder::ExtractedAcbTrack>,
+    mut hca_tracks: Vec<HcaTrackProcessJob>,
     options: &AcbPostProcessOptions<'_>,
 ) -> Result<AcbPostProcessOutput, ExportPipelineError> {
     let mut output = AcbPostProcessOutput::default();
@@ -4428,16 +7431,7 @@ fn process_hca_tracks(
             .phase_ms
             .insert("media_scheduler.hca_worker_count".to_string(), 1);
         let track = hca_tracks.pop().expect("single track is present");
-        let track_options = HcaTrackProcessOptions {
-            output_dir: options.output_dir,
-            region: options.region,
-            ffmpeg_path: options.ffmpeg_path,
-            media_backend: options.media_backend,
-            retry: options.retry,
-            media_encode_concurrency: options.media_encode_concurrency,
-            cpu_budget: options.cpu_budget,
-        };
-        let track_output = process_hca_track(track, &track_options)?;
+        let track_output = process_hca_track_job_on_large_stack(track, options)?;
         output.generated_files.extend(track_output.generated_files);
         merge_raw_phase_ms(&mut output.phase_ms, &track_output.phase_ms);
         return Ok(output);
@@ -4460,7 +7454,6 @@ fn process_hca_tracks(
         let phase_ms = phase_ms.clone();
         let first_error = first_error.clone();
         let output_dir_for_error = options.output_dir.to_path_buf();
-        let worker_output_dir = options.output_dir.to_path_buf();
         let region = options.region.clone();
         let ffmpeg_path = options.ffmpeg_path.to_string();
         let media_backend = options.media_backend;
@@ -4476,12 +7469,12 @@ fn process_hca_tracks(
                 }
 
                 let next_track = queue.lock().unwrap().pop_front();
-                let Some(track) = next_track else {
+                let Some(track_job) = next_track else {
                     break;
                 };
 
                 let track_options = HcaTrackProcessOptions {
-                    output_dir: &worker_output_dir,
+                    output_dir: &track_job.output_dir,
                     region: &region,
                     ffmpeg_path: &ffmpeg_path,
                     media_backend,
@@ -4489,7 +7482,7 @@ fn process_hca_tracks(
                     media_encode_concurrency,
                     cpu_budget,
                 };
-                match process_hca_track(track, &track_options) {
+                match process_hca_track(track_job.track, &track_options) {
                     Ok(track_output) => {
                         results.lock().unwrap().extend(track_output.generated_files);
                         merge_raw_phase_ms(&mut phase_ms.lock().unwrap(), &track_output.phase_ms);
@@ -4528,6 +7521,44 @@ fn process_hca_tracks(
 struct HcaTrackProcessOutput {
     generated_files: Vec<PathBuf>,
     phase_ms: HashMap<String, u64>,
+}
+
+fn process_hca_track_job_on_large_stack(
+    track: HcaTrackProcessJob,
+    options: &AcbPostProcessOptions<'_>,
+) -> Result<HcaTrackProcessOutput, ExportPipelineError> {
+    let output_dir_for_error = track.output_dir.clone();
+    let region = options.region.clone();
+    let ffmpeg_path = options.ffmpeg_path.to_string();
+    let media_backend = options.media_backend;
+    let retry = options.retry.clone();
+    let media_encode_concurrency = options.media_encode_concurrency;
+    let cpu_budget = options.cpu_budget;
+    let handle = std::thread::Builder::new()
+        .name("hca-memory-export".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let track_options = HcaTrackProcessOptions {
+                output_dir: &track.output_dir,
+                region: &region,
+                ffmpeg_path: &ffmpeg_path,
+                media_backend,
+                retry: &retry,
+                media_encode_concurrency,
+                cpu_budget,
+            };
+            process_hca_track(track.track, &track_options)
+        })
+        .map_err(|source| ExportPipelineError::Io {
+            path: output_dir_for_error,
+            source,
+        })?;
+    handle
+        .join()
+        .map_err(|panic| ExportPipelineError::WorkerPanic {
+            worker: "hca memory export".to_string(),
+            message: panic_message(panic),
+        })?
 }
 
 struct HcaTrackProcessOptions<'a> {
@@ -4738,15 +7769,18 @@ fn process_hca_track(
 
 async fn handle_png_conversion(
     export_path: &Path,
+    scoped_files: &[PathBuf],
     region: &RegionConfig,
     image_concurrency: usize,
     cpu_budget: usize,
+    scoped_post_process: bool,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     if !region.export.images.convert_to_webp {
         return Ok(Vec::new());
     }
 
-    let png_files = find_files_by_extension(export_path, "png")?;
+    let png_files =
+        post_process_files_by_extension(export_path, scoped_post_process, scoped_files, "png")?;
     let remove_png = region.export.images.remove_png;
     run_path_tasks(png_files, image_concurrency, move |png_file| {
         let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
@@ -4761,41 +7795,53 @@ async fn handle_png_conversion(
 
 fn convert_native_surrogate_images_to_png(
     export_path: &Path,
+    scoped_files: &[PathBuf],
     image_concurrency: usize,
     cpu_budget: usize,
+    scoped_post_process: bool,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     if !export_path.exists() {
         return Ok(Vec::new());
     }
 
-    let surrogate_files = find_files_by_extension(export_path, NATIVE_AOT_IMAGE_SURROGATE_FORMAT)?;
+    let surrogate_files = post_process_files_by_extension(
+        export_path,
+        scoped_post_process,
+        scoped_files,
+        NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+    )?;
     run_path_tasks(surrogate_files, image_concurrency, move |surrogate_file| {
         let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
         let png_file = surrogate_file.with_extension("png");
-        convert_image_to_png(&surrogate_file, &png_file)?;
+        match convert_image_to_png(&surrogate_file, &png_file) {
+            Ok(()) => {}
+            Err(ExportPipelineError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound && png_file.exists() =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error),
+        }
         remove_file_if_exists(&surrogate_file)?;
         Ok(vec![png_file])
     })
 }
 
 fn convert_image_to_png(source_file: &Path, png_file: &Path) -> Result<(), ExportPipelineError> {
-    let image = ImageReader::open(source_file)
-        .map_err(|source| ExportPipelineError::Io {
-            path: source_file.to_path_buf(),
-            source,
-        })?
-        .decode()
-        .map_err(|source| ExportPipelineError::Image {
-            path: source_file.to_path_buf(),
-            source,
+    let payload = std::fs::read(source_file).map_err(|source| ExportPipelineError::Io {
+        path: source_file.to_path_buf(),
+        source,
+    })?;
+    let image =
+        decode_image_payload_bytes(&payload, source_file).map_err(|source| match source {
+            ExportPipelineError::Image { source, .. } => ExportPipelineError::Image {
+                path: source_file.to_path_buf(),
+                source,
+            },
+            other => other,
         })?;
 
-    image
-        .save_with_format(png_file, ImageFormat::Png)
-        .map_err(|source| ExportPipelineError::Image {
-            path: png_file.to_path_buf(),
-            source,
-        })
+    write_dynamic_image_to_png_file_fast(&image, png_file)
 }
 
 fn convert_png_to_webp(png_file: &Path, webp_file: &Path) -> Result<(), ExportPipelineError> {
@@ -4809,6 +7855,13 @@ fn convert_png_to_webp(png_file: &Path, webp_file: &Path) -> Result<(), ExportPi
             path: png_file.to_path_buf(),
             source,
         })?;
+    write_dynamic_image_to_webp_file(&image, webp_file)
+}
+
+fn write_dynamic_image_to_webp_file(
+    image: &image::DynamicImage,
+    webp_file: &Path,
+) -> Result<(), ExportPipelineError> {
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();
     let writer = std::fs::File::create(webp_file).map_err(|source| ExportPipelineError::Io {
@@ -4821,6 +7874,50 @@ fn convert_png_to_webp(png_file: &Path, webp_file: &Path) -> Result<(), ExportPi
         .encode(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
         .map_err(|source| ExportPipelineError::Image {
             path: webp_file.to_path_buf(),
+            source,
+        })
+}
+
+fn write_dynamic_image_to_png_file_fast(
+    image: &image::DynamicImage,
+    png_file: &Path,
+) -> Result<(), ExportPipelineError> {
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let writer = std::fs::File::create(png_file).map_err(|source| ExportPipelineError::Io {
+        path: png_file.to_path_buf(),
+        source,
+    })?;
+    let writer = std::io::BufWriter::new(writer);
+
+    PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Adaptive)
+        .write_image(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
+        .map_err(|source| ExportPipelineError::Image {
+            path: png_file.to_path_buf(),
+            source,
+        })
+}
+
+fn write_native_rgba_ir_to_png_file_fast(
+    raw_rgba: &NativeRgbaIr<'_>,
+    png_file: &Path,
+) -> Result<(), ExportPipelineError> {
+    let pixels = native_rgba_ir_contiguous_pixels(raw_rgba);
+    let writer = std::fs::File::create(png_file).map_err(|source| ExportPipelineError::Io {
+        path: png_file.to_path_buf(),
+        source,
+    })?;
+    let writer = std::io::BufWriter::new(writer);
+
+    PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Adaptive)
+        .write_image(
+            pixels.as_ref(),
+            raw_rgba.width,
+            raw_rgba.height,
+            ExtendedColorType::Rgba8,
+        )
+        .map_err(|source| ExportPipelineError::Image {
+            path: png_file.to_path_buf(),
             source,
         })
 }
@@ -4979,14 +8076,15 @@ where
     Ok(results.into_iter().flatten().collect())
 }
 
-fn run_tasks<T, F>(
-    paths: Vec<PathBuf>,
+fn run_tasks<I, T, F>(
+    paths: Vec<I>,
     concurrency: usize,
     task: F,
 ) -> Result<Vec<T>, ExportPipelineError>
 where
+    I: Send + 'static,
     T: Send + 'static,
-    F: Fn(PathBuf) -> Result<T, ExportPipelineError> + Send + Sync + 'static,
+    F: Fn(I) -> Result<T, ExportPipelineError> + Send + Sync + 'static,
 {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -5120,6 +8218,28 @@ fn find_files_by_extension(dir: &Path, ext: &str) -> Result<Vec<PathBuf>, Export
     Ok(files)
 }
 
+fn post_process_files_by_extension(
+    export_path: &Path,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+    ext: &str,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    if !scoped_post_process {
+        return find_files_by_extension(export_path, ext);
+    }
+
+    Ok(scoped_files
+        .iter()
+        .filter(|path| {
+            path.extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case(ext))
+        })
+        .filter(|path| path.exists())
+        .cloned()
+        .collect())
+}
+
 fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<(), ExportPipelineError> {
     for entry in std::fs::read_dir(dir).map_err(|source| ExportPipelineError::Io {
         path: dir.to_path_buf(),
@@ -5167,6 +8287,7 @@ mod tests {
     use std::sync::{mpsc, Arc, Mutex, OnceLock};
     use std::time::Duration;
 
+    use sonic_rs::JsonValueTrait;
     use tempfile::tempdir;
 
     use crate::core::config::{
@@ -5178,23 +8299,31 @@ mod tests {
 
     use super::{
         acquire_cpu_budget_permit_blocking, assetstudio_cli_export_type_name,
-        assetstudio_object_mode_supported_type, assetstudio_type_selector_matches,
-        build_assetstudio_export_args, close_assetstudio_native_context,
-        convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
-        handle_png_conversion, inspect_assetstudio_native_bundle, merge_usm_files,
-        native_read_batch_size_for_assets, native_read_kind_for_asset,
-        native_skipped_unsupported_asset, open_assetstudio_native_context,
+        assetstudio_fix_file_name, assetstudio_object_mode_supported_type,
+        assetstudio_type_selector_matches, build_assetstudio_export_args,
+        close_assetstudio_native_context, convert_native_surrogate_images_to_png,
+        extract_unity_asset_bundle, get_export_group, handle_png_conversion,
+        inspect_assetstudio_native_bundle, merge_usm_files, native_read_batch_size_for_assets,
+        native_read_kind_for_asset, native_skipped_unsupported_asset,
+        open_assetstudio_native_context,
         parse_assetstudio_native_context_list_objects_worker_output,
         parse_assetstudio_native_object_read_batch_worker_output_recoverable,
         parse_assetstudio_native_object_read_worker_output_recoverable, parse_payload_bundle,
-        parse_payload_bundle_borrowed, post_process_exported_files, process_usm_file,
-        query_assetstudio_native_version, record_native_object_read_batch_diagnostics,
-        run_path_tasks, safe_payload_bundle_path, scan_all_files,
-        should_route_character_sprite_object, unitypy_object_output_extension,
-        unitypy_object_output_path, AssetStudioCliCapabilities, AssetStudioNativeAssetInfo,
+        parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
+        process_usm_file, query_assetstudio_native_version,
+        record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
+        scan_all_files, select_native_unitypy_readable_assets, should_keep_music_long_hca_track,
+        text_asset_media_bytes_target, unitypy_object_output_extension, unitypy_object_output_path,
+        write_assetstudio_export_manifest_entry, write_native_image_payload_final_files,
+        write_unitypy_object_payload, AssetStudioCliCapabilities, AssetStudioNativeAssetInfo,
         AssetStudioNativeContextCloseRequest, AssetStudioNativeInspectRequest,
-        NativeBatchPhaseStats, NativeObjectReadBatchParseOutput, NativeObjectReadParseResult,
-        NativeObjectReadPlanStats, NativeUnityPyUnpackSummary, NativeWorkerOutput,
+        AssetStudioNativeObjectReadOutput, AssetStudioNativeObjectReadResponse,
+        AssetStudioNativeResponse, AssetStudioNativeVersion, NativeBatchPhaseStats,
+        NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
+        NativeSemanticExportPathState, NativeUnityPyUnpackOptions, NativeUnityPyUnpackSummary,
+        NativeWorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+        NATIVE_AOT_DEFAULT_IMAGE_FORMAT, NATIVE_AOT_FAST_IMAGE_FORMAT,
+        NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
     };
 
     fn repo_root() -> PathBuf {
@@ -5225,106 +8354,545 @@ mod tests {
         fs::write(
             &source,
             r##"
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
+use std::mem::size_of;
+use std::os::raw::{c_char, c_int, c_longlong, c_uchar};
 use std::ptr;
 
-	#[no_mangle]
-	pub unsafe extern "C" fn haruki_assetstudio_version(response_json: *mut *mut c_char) -> c_int {
-    if response_json.is_null() {
+static UNITY_VERSION: &[u8] = b"2022.3.21f1";
+static STRING_DATA: &[u8] = b"assetassets/foo.pngTexture2D/tmp/input.bundle";
+const ASSETSTUDIO_TYPED_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_SCHEMA_VERSION: c_int = 2;
+const ASSETSTUDIO_TYPED_LAYOUT_VERSION: c_int = 2;
+const ASSETSTUDIO_TYPED_CONTEXT_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_LIMITS_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION: c_int = 3;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION: c_int = 3;
+const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_INTO_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_DIRECT_RETRY_ABI_VERSION: c_int = 1;
+
+#[repr(C)]
+struct ContextOpenRequest {
+    struct_size: c_int,
+    input_path_utf8: *const c_uchar,
+    input_path_utf8_len: c_int,
+    unity_version_utf8: *const c_uchar,
+    unity_version_utf8_len: c_int,
+    asset_types_csv_utf8: *const c_uchar,
+    asset_types_csv_utf8_len: c_int,
+    output_dir_utf8: *const c_uchar,
+    output_dir_utf8_len: c_int,
+    load_all_assets: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ContextOpenResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    context_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    assets_file_count: c_int,
+    exportable_asset_count: c_int,
+    object_index_count: c_int,
+    has_more_assets: c_int,
+    unity_version_utf8: *mut c_uchar,
+    unity_version_utf8_len: c_int,
+    buffer: *mut c_uchar,
+    buffer_len: c_longlong,
+    duration_ms: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct ContextCloseRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ContextCloseResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    context_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    duration_ms: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct LimitsResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    limits_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    max_native_utf8_bytes: c_int,
+    max_object_read_batch_count: c_int,
+    max_object_table_page_limit: c_int,
+    max_object_read_batch_payload_bytes: c_longlong,
+    max_cached_object_read_batch_payload_bytes: c_longlong,
+    max_active_contexts: c_int,
+    max_concurrent_operations: c_int,
+    supports_multiple_contexts: c_int,
+    supports_concurrent_operations: c_int,
+    legacy_static_engine: c_int,
+    native_console_capture: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct CapabilitiesResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    core_api_version_major: c_int,
+    core_api_version_minor: c_int,
+    context_abi_version: c_int,
+    object_table_abi_version: c_int,
+    object_table_into_abi_version: c_int,
+    object_lookup_abi_version: c_int,
+    object_lookup_into_abi_version: c_int,
+    object_read_abi_version: c_int,
+    object_read_batch_abi_version: c_int,
+    object_read_batch_handle_abi_version: c_int,
+    object_read_batch_into_abi_version: c_int,
+    object_read_batch_by_index_abi_version: c_int,
+    object_read_batch_direct_into_abi_version: c_int,
+    object_read_batch_direct_retry_abi_version: c_int,
+    supports_typed_object_table: c_int,
+    supports_caller_provided_object_table_buffers: c_int,
+    supports_typed_object_lookup: c_int,
+    supports_caller_provided_object_lookup_buffers: c_int,
+    supports_typed_object_read: c_int,
+    supports_typed_object_read_batch: c_int,
+    supports_result_handle: c_int,
+    supports_direct_object_read_retry: c_int,
+    supports_typed_context: c_int,
+    supports_native_dependency_resolver: c_int,
+    supports_abi_layout: c_int,
+    supports_multiple_contexts: c_int,
+    supports_concurrent_operations: c_int,
+    supports_context_lifetime_guards: c_int,
+    native_console_capture: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct AbiLayoutResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    layout_version: c_int,
+    context_open_request: c_int,
+    context_open_response: c_int,
+    context_close_request: c_int,
+    context_close_response: c_int,
+    limits_response: c_int,
+    capabilities_response: c_int,
+    object_list_request: c_int,
+    object_list_into_request_v3: c_int,
+    object_table: c_int,
+    asset_object: c_int,
+    object_read_item_request: c_int,
+    object_read_batch_into_request_v4: c_int,
+    object_read_item_response_v4: c_int,
+    object_read_batch_retry_response_v7: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct ObjectListRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    offset: c_int,
+    limit: c_int,
+    asset_types_csv_utf8: *const c_uchar,
+    asset_types_csv_utf8_len: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct ObjectListIntoRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    offset: c_int,
+    limit: c_int,
+    asset_types_csv_utf8: *const c_uchar,
+    asset_types_csv_utf8_len: c_int,
+    flags: c_int,
+    reserved: c_int,
+    buffer: *mut c_uchar,
+    buffer_len: c_longlong,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AssetObject {
+    index: c_int,
+    type_id: c_int,
+    path_id: c_longlong,
+    size: c_longlong,
+    estimated_payload_capacity: c_longlong,
+    raw_payload_capacity: c_longlong,
+    image_payload_capacity: c_longlong,
+    text_payload_capacity: c_longlong,
+    payload_capacity_flags: c_int,
+    reserved: c_int,
+    name_offset: c_int,
+    name_len: c_int,
+    container_offset: c_int,
+    container_len: c_int,
+    type_offset: c_int,
+    type_len: c_int,
+    unique_id_offset: c_int,
+    unique_id_len: c_int,
+    source_file_offset: c_int,
+    source_file_len: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ObjectTable {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    object_table_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    offset: c_int,
+    limit: c_int,
+    next_offset: c_int,
+    has_more: c_int,
+    total_count: c_int,
+    returned_count: c_int,
+    objects: *mut AssetObject,
+    string_data: *mut c_uchar,
+    string_data_len: c_int,
+    buffer: *mut c_uchar,
+    buffer_len: c_longlong,
+    duration_ms: c_longlong,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct ObjectReadItemRequest {
+    path_id: c_longlong,
+    kind_utf8: *const c_uchar,
+    kind_utf8_len: c_int,
+    image_format_utf8: *const c_uchar,
+    image_format_utf8_len: c_int,
+}
+
+#[repr(C)]
+struct ObjectReadBatchIntoRequest {
+    struct_size: c_int,
+    context_id: c_longlong,
+    items: *const ObjectReadItemRequest,
+    count: c_int,
+    flags: c_int,
+    items_buffer: *mut c_uchar,
+    items_buffer_len: c_longlong,
+    payload: *mut c_uchar,
+    payload_len: c_longlong,
+    reserved: c_int,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ObjectReadBatchRetryResponse {
+    struct_size: c_int,
+    abi_version: c_int,
+    schema_version: c_int,
+    object_read_batch_abi_version: c_int,
+    object_read_batch_into_abi_version: c_int,
+    object_read_batch_direct_retry_abi_version: c_int,
+    status: c_int,
+    error_code: c_int,
+    context_id: c_longlong,
+    requested_count: c_int,
+    returned_count: c_int,
+    failed_count: c_int,
+    items: *mut ObjectReadItemResponse,
+    string_data: *mut c_uchar,
+    string_data_len: c_int,
+    items_buffer: *mut c_uchar,
+    items_buffer_len: c_longlong,
+    payload: *mut c_uchar,
+    payload_len: c_longlong,
+    required_items_buffer_len: c_longlong,
+    required_string_data_len: c_int,
+    required_payload_len: c_longlong,
+    duration_ms: c_longlong,
+    result_handle: c_longlong,
+    ownership_flags: c_int,
+    flags: c_int,
+    reserved: c_int,
+}
+
+#[repr(C)]
+struct ObjectReadItemResponse {
+    index: c_int,
+    status: c_int,
+    error_code: c_int,
+    path_id: c_longlong,
+    type_id: c_int,
+    size: c_longlong,
+    payload_offset: c_longlong,
+    payload_len: c_longlong,
+    payload_kind_offset: c_int,
+    payload_kind_len: c_int,
+    suggested_extension_offset: c_int,
+    suggested_extension_len: c_int,
+    error_message_offset: c_int,
+    error_message_len: c_int,
+}
+
+static mut OBJECT: AssetObject = AssetObject {
+    index: 0,
+    type_id: 28,
+    path_id: 42,
+    size: 99,
+    estimated_payload_capacity: 0,
+    raw_payload_capacity: 0,
+    image_payload_capacity: 0,
+    text_payload_capacity: 0,
+    payload_capacity_flags: 0,
+    reserved: 0,
+    name_offset: 0,
+    name_len: 5,
+    container_offset: 5,
+    container_len: 14,
+    type_offset: 19,
+    type_len: 9,
+    unique_id_offset: 0,
+    unique_id_len: 0,
+    source_file_offset: 28,
+    source_file_len: 17,
+};
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_capabilities_v2(response: *mut CapabilitiesResponse) -> c_int {
+    if response.is_null() {
         return 20;
     }
-    *response_json = CString::new(
-        r#"{"success":true,"adapter_version":"shim-1","assetstudio_cli_version":"shim-cli-1"}"#,
-    )
-    .unwrap()
-    .into_raw();
+    *response = CapabilitiesResponse {
+        struct_size: size_of::<CapabilitiesResponse>() as c_int,
+        abi_version: ASSETSTUDIO_TYPED_ABI_VERSION,
+        schema_version: ASSETSTUDIO_TYPED_SCHEMA_VERSION,
+        core_api_version_major: 1,
+        context_abi_version: ASSETSTUDIO_TYPED_CONTEXT_ABI_VERSION,
+        object_table_abi_version: ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION,
+        object_table_into_abi_version: ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION,
+        object_read_batch_abi_version: ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_ABI_VERSION,
+        object_read_batch_into_abi_version: ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_INTO_ABI_VERSION,
+        object_read_batch_direct_retry_abi_version:
+            ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_DIRECT_RETRY_ABI_VERSION,
+        supports_typed_object_table: 1,
+        supports_caller_provided_object_table_buffers: 1,
+        supports_typed_object_read_batch: 1,
+        supports_direct_object_read_retry: 1,
+        supports_typed_context: 1,
+        supports_abi_layout: 1,
+        supports_multiple_contexts: 1,
+        supports_concurrent_operations: 1,
+        ..CapabilitiesResponse::default()
+    };
     0
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_inspect(
-    request_json: *const c_char,
-    response_json: *mut *mut c_char,
-) -> c_int {
-    if response_json.is_null() {
-        return 30;
+pub unsafe extern "C" fn haruki_assetstudio_abi_layout_v2(response: *mut AbiLayoutResponse) -> c_int {
+    if response.is_null() {
+        return 21;
     }
-    *response_json = ptr::null_mut();
-    if request_json.is_null() {
-        *response_json = CString::new(
-            r#"{"success":false,"assets_file_count":0,"exportable_asset_count":0,"assets":[],"warnings":[],"error":"null request","duration_ms":0}"#,
-        )
-        .unwrap()
-        .into_raw();
-        return 31;
-    }
-    *response_json = CString::new(
-        r#"{"success":true,"assets_file_count":1,"exportable_asset_count":1,"unity_version":"2022.3.21f1","assets":[{"index":0,"name":"asset","container":"assets/foo.png","type":"Texture2D","type_id":28,"path_id":42,"size":99,"source_file":"/tmp/input.bundle"}],"warnings":["inspect warning"],"error":null,"duration_ms":2}"#,
-    )
-    .unwrap()
-    .into_raw();
+    *response = AbiLayoutResponse {
+        struct_size: size_of::<AbiLayoutResponse>() as c_int,
+        abi_version: ASSETSTUDIO_TYPED_ABI_VERSION,
+        schema_version: ASSETSTUDIO_TYPED_SCHEMA_VERSION,
+        layout_version: ASSETSTUDIO_TYPED_LAYOUT_VERSION,
+        context_open_request: size_of::<ContextOpenRequest>() as c_int,
+        context_open_response: size_of::<ContextOpenResponse>() as c_int,
+        context_close_request: size_of::<ContextCloseRequest>() as c_int,
+        context_close_response: size_of::<ContextCloseResponse>() as c_int,
+        limits_response: size_of::<LimitsResponse>() as c_int,
+        capabilities_response: size_of::<CapabilitiesResponse>() as c_int,
+        object_list_request: size_of::<ObjectListRequest>() as c_int,
+        object_list_into_request_v3: size_of::<ObjectListIntoRequest>() as c_int,
+        object_table: size_of::<ObjectTable>() as c_int,
+        asset_object: size_of::<AssetObject>() as c_int,
+        object_read_item_request: size_of::<ObjectReadItemRequest>() as c_int,
+        object_read_batch_into_request_v4: size_of::<ObjectReadBatchIntoRequest>() as c_int,
+        object_read_item_response_v4: size_of::<ObjectReadItemResponse>() as c_int,
+        object_read_batch_retry_response_v7: size_of::<ObjectReadBatchRetryResponse>() as c_int,
+        ..AbiLayoutResponse::default()
+    };
     0
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_context_open(
-    request_json: *const c_char,
-    response_json: *mut *mut c_char,
-) -> c_int {
-    if response_json.is_null() {
-        return 40;
+pub unsafe extern "C" fn haruki_assetstudio_limits_v1(response: *mut LimitsResponse) -> c_int {
+    if response.is_null() {
+        return 1;
     }
-    *response_json = ptr::null_mut();
-    if request_json.is_null() {
-        *response_json = CString::new(
-            r#"{"success":false,"context_id":0,"assets_file_count":0,"exportable_asset_count":0,"assets":[],"warnings":[],"error":"null request","duration_ms":0}"#,
-        )
-        .unwrap()
-        .into_raw();
-        return 41;
-    }
-    *response_json = CString::new(
-        r#"{"success":true,"context_id":7,"assets_file_count":1,"exportable_asset_count":1,"unity_version":"2022.3.21f1","assets":[{"index":0,"name":"asset","container":"assets/foo.png","type":"Texture2D","type_id":28,"path_id":42,"size":99,"source_file":"/tmp/input.bundle"}],"warnings":["context open warning"],"error":null,"duration_ms":2}"#,
-    )
-    .unwrap()
-    .into_raw();
+    *response = LimitsResponse {
+        struct_size: size_of::<LimitsResponse>() as c_int,
+        abi_version: ASSETSTUDIO_TYPED_ABI_VERSION,
+        schema_version: ASSETSTUDIO_TYPED_SCHEMA_VERSION,
+        limits_abi_version: ASSETSTUDIO_TYPED_LIMITS_ABI_VERSION,
+        max_native_utf8_bytes: 1_000_000,
+        max_object_read_batch_count: 1024,
+        max_object_table_page_limit: 4096,
+        max_active_contexts: 8,
+        max_concurrent_operations: 8,
+        supports_multiple_contexts: 1,
+        supports_concurrent_operations: 1,
+        ..LimitsResponse::default()
+    };
     0
 }
 
-	#[no_mangle]
-	pub unsafe extern "C" fn haruki_assetstudio_context_close(
-    request_json: *const c_char,
-    response_json: *mut *mut c_char,
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_context_open_v2(
+    request: *const ContextOpenRequest,
+    response: *mut ContextOpenResponse,
 ) -> c_int {
-    if response_json.is_null() {
-        return 60;
+    if request.is_null() || response.is_null() {
+        return 1;
     }
-    *response_json = ptr::null_mut();
-    if request_json.is_null() {
-        *response_json = CString::new(
-            r#"{"success":false,"warnings":[],"error":"null request","duration_ms":0}"#,
-        )
-        .unwrap()
-        .into_raw();
-        return 61;
-    }
-    let request = CStr::from_ptr(request_json).to_string_lossy();
-    if !request.contains(r#""context_id":7"#) {
-        *response_json = CString::new(
-            r#"{"success":false,"warnings":[],"error":"wrong context","duration_ms":1}"#,
-        )
-        .unwrap()
-        .into_raw();
-        return 62;
-    }
-    *response_json = CString::new(
-        r#"{"success":true,"warnings":["context close warning"],"error":null,"duration_ms":1}"#,
-    )
-    .unwrap()
-    .into_raw();
+    *response = ContextOpenResponse {
+        struct_size: size_of::<ContextOpenResponse>() as c_int,
+        context_id: 7,
+        assets_file_count: 1,
+        exportable_asset_count: 1,
+        object_index_count: 1,
+        has_more_assets: 1,
+        unity_version_utf8: UNITY_VERSION.as_ptr() as *mut c_uchar,
+        unity_version_utf8_len: UNITY_VERSION.len() as c_int,
+        duration_ms: 2,
+        ..ContextOpenResponse::default()
+    };
     0
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_size_v3(
+    request: *const ObjectListRequest,
+    response: *mut ObjectTable,
+) -> c_int {
+    if request.is_null() || response.is_null() {
+        return 1;
+    }
+    *response = ObjectTable {
+        struct_size: size_of::<ObjectTable>() as c_int,
+        context_id: (*request).context_id,
+        offset: (*request).offset,
+        limit: (*request).limit,
+        total_count: 1,
+        returned_count: 1,
+        buffer_len: 1,
+        duration_ms: 1,
+        ..ObjectTable::default()
+    };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_into_v3(
+    request: *const ObjectListIntoRequest,
+    response: *mut ObjectTable,
+) -> c_int {
+    if request.is_null() || response.is_null() {
+        return 1;
+    }
+    *response = ObjectTable {
+        struct_size: size_of::<ObjectTable>() as c_int,
+        context_id: (*request).context_id,
+        offset: (*request).offset,
+        limit: (*request).limit,
+        total_count: 1,
+        returned_count: 1,
+        objects: ptr::addr_of_mut!(OBJECT),
+        string_data: STRING_DATA.as_ptr() as *mut c_uchar,
+        string_data_len: STRING_DATA.len() as c_int,
+        buffer: (*request).buffer,
+        buffer_len: (*request).buffer_len,
+        duration_ms: 1,
+        ..ObjectTable::default()
+    };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_context_close_v2(
+    request: *const ContextCloseRequest,
+    response: *mut ContextCloseResponse,
+) -> c_int {
+    if request.is_null() || response.is_null() {
+        return 1;
+    }
+    *response = ContextCloseResponse {
+        struct_size: size_of::<ContextCloseResponse>() as c_int,
+        context_id: (*request).context_id,
+        duration_ms: 1,
+        ..ContextCloseResponse::default()
+    };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_context_read_objects_direct_retry_v7(
+    request: *const ObjectReadBatchIntoRequest,
+    response: *mut ObjectReadBatchRetryResponse,
+) -> c_int {
+    if request.is_null() || response.is_null() {
+        return 1;
+    }
+    *response = ObjectReadBatchRetryResponse {
+        struct_size: size_of::<ObjectReadBatchRetryResponse>() as c_int,
+        context_id: (*request).context_id,
+        requested_count: (*request).count,
+        returned_count: 0,
+        duration_ms: 1,
+        ..ObjectReadBatchRetryResponse::default()
+    };
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_result_free(_handle: c_longlong) -> c_int {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn haruki_assetstudio_free_buffer(_value: *mut c_uchar) {}
 
 #[no_mangle]
 pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
@@ -5332,7 +8900,6 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         if let Ok(path) = std::env::var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER") {
             let _ = std::fs::write(path, b"freed");
         }
-        drop(CString::from_raw(value));
     }
 }
 "##,
@@ -5489,12 +9056,36 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
                         &region,
                         dir.path(),
                         dir.path(),
+                        false,
+                        &[],
+                        Vec::new(),
                     ))
                     .unwrap();
 
                 assert!(dir.path().join("0703.m2v").exists());
                 assert!(dir.path().join("se_0126_01_BGM.wav").exists());
                 assert!(!summary.generated_files.is_empty());
+                assert_eq!(
+                    summary
+                        .post_process_phase_ms
+                        .get("media_scheduler.usm_file_count"),
+                    Some(&1)
+                );
+                assert_eq!(
+                    summary
+                        .post_process_phase_ms
+                        .get("media_scheduler.usm_worker_count"),
+                    Some(&1)
+                );
+                assert!(summary
+                    .post_process_phase_ms
+                    .contains_key("post_process.usm.extract"));
+                assert!(summary
+                    .post_process_phase_ms
+                    .contains_key("post_process.acb.hca_tracks_wall"));
+                assert!(summary
+                    .post_process_phase_ms
+                    .contains_key("media_scheduler.hca_track_count"));
             })
             .unwrap()
             .join()
@@ -5565,32 +9156,23 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
     }
 
     #[test]
-    fn native_backend_queries_version_and_releases_response_string() {
+    fn native_backend_queries_version_through_typed_capabilities() {
         let _env_lock = native_shim_env_lock();
         let dir = tempdir().unwrap();
         let library = build_native_shim(dir.path());
-        let free_marker = dir.path().join("version-freed.txt");
-        std::env::set_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER", &free_marker);
 
         let version = query_assetstudio_native_version(&library.to_string_lossy()).unwrap();
 
-        assert_eq!(version.adapter_version.as_deref(), Some("shim-1"));
-        assert_eq!(
-            version.assetstudio_cli_version.as_deref(),
-            Some("shim-cli-1")
-        );
-        assert_eq!(fs::read_to_string(&free_marker).unwrap(), "freed");
-
-        std::env::remove_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER");
+        assert!(version.success);
+        assert!(version.adapter_version.is_none());
+        assert!(version.assetstudio_cli_version.is_none());
     }
 
     #[test]
-    fn native_backend_inspects_assets_and_releases_response_string() {
+    fn native_backend_inspects_assets_through_typed_context() {
         let _env_lock = native_shim_env_lock();
         let dir = tempdir().unwrap();
         let library = build_native_shim(dir.path());
-        let free_marker = dir.path().join("inspect-freed.txt");
-        std::env::set_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER", &free_marker);
 
         let request = AssetStudioNativeInspectRequest {
             input_path: "/tmp/input.bundle".to_string(),
@@ -5615,19 +9197,14 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         assert_eq!(response.assets[0].name.as_deref(), Some("asset"));
         assert_eq!(response.assets[0].asset_type.as_deref(), Some("Texture2D"));
         assert_eq!(response.assets[0].path_id, 42);
-        assert_eq!(response.warnings, vec!["inspect warning".to_string()]);
-        assert_eq!(fs::read_to_string(&free_marker).unwrap(), "freed");
-
-        std::env::remove_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER");
+        assert!(response.warnings.is_empty());
     }
 
     #[test]
-    fn native_context_uses_json_abi_and_releases_response_strings() {
+    fn native_context_uses_typed_abi() {
         let _env_lock = native_shim_env_lock();
         let dir = tempdir().unwrap();
         let library = build_native_shim(dir.path());
-        let free_marker = dir.path().join("context-freed.txt");
-        std::env::set_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER", &free_marker);
 
         let inspect_request = AssetStudioNativeInspectRequest {
             input_path: "/tmp/input.bundle".to_string(),
@@ -5644,8 +9221,9 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let context =
             open_assetstudio_native_context(&library.to_string_lossy(), &inspect_request).unwrap();
         assert_eq!(context.context_id, 7);
-        assert_eq!(context.assets.len(), 1);
-        assert_eq!(context.warnings, vec!["context open warning".to_string()]);
+        assert!(context.assets.is_empty());
+        assert!(context.has_more_assets);
+        assert!(context.warnings.is_empty());
 
         let close_response = close_assetstudio_native_context(
             &library.to_string_lossy(),
@@ -5654,13 +9232,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             },
         )
         .unwrap();
-        assert_eq!(
-            close_response.warnings,
-            vec!["context close warning".to_string()]
-        );
-        assert_eq!(fs::read_to_string(&free_marker).unwrap(), "freed");
-
-        std::env::remove_var("HARUKI_ASSET_STUDIO_SHIM_FREE_MARKER");
+        assert!(close_response.warnings.is_empty());
     }
 
     #[test]
@@ -5823,7 +9395,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let generated = runtime
-            .block_on(handle_png_conversion(dir.path(), &region, 2, 2))
+            .block_on(handle_png_conversion(dir.path(), &[], &region, 2, 2, false))
             .unwrap();
 
         let webp = dir.path().join("sample.webp");
@@ -5837,6 +9409,141 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
+    fn native_aot_default_image_format_preserves_alpha() {
+        assert_eq!(NATIVE_AOT_DEFAULT_IMAGE_FORMAT, "raw_rgba");
+        assert_eq!(
+            NATIVE_AOT_FAST_IMAGE_FORMAT,
+            NATIVE_AOT_DEFAULT_IMAGE_FORMAT
+        );
+        assert_eq!(NATIVE_AOT_IMAGE_SURROGATE_FORMAT, "bmp");
+    }
+
+    #[test]
+    fn native_image_format_always_uses_raw_rgba() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("normal".to_string()),
+            container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
+            asset_type: Some("Texture2D".to_string()),
+            type_id: 28,
+            path_id: 43,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        assert_eq!(
+            super::native_image_format_for_asset(&asset, "raw_rgba"),
+            "raw_rgba"
+        );
+        assert_eq!(super::native_image_format_for_asset(&asset, ""), "raw_rgba");
+        assert_eq!(
+            super::native_image_format_for_asset(&asset, "png"),
+            "raw_rgba"
+        );
+    }
+
+    #[test]
+    fn native_object_read_subchunks_split_non_bmp_images() {
+        let texture = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("normal".to_string()),
+            container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
+            asset_type: Some("Texture2D".to_string()),
+            type_id: 28,
+            path_id: 10,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+        let sprite = AssetStudioNativeAssetInfo {
+            index: 1,
+            name: Some("full".to_string()),
+            container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
+            asset_type: Some("Sprite".to_string()),
+            type_id: 213,
+            path_id: 11,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+        let mono = AssetStudioNativeAssetInfo {
+            index: 2,
+            name: Some("data".to_string()),
+            container: Some("assets/sekai/assetbundle/resources/startapp/foo/data.json".into()),
+            asset_type: Some("MonoBehaviour".to_string()),
+            type_id: 114,
+            path_id: 12,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+        let assets = vec![&texture, &sprite, &mono];
+
+        let source_chunks = super::native_object_read_subchunks(&assets, "raw_rgba");
+        assert_eq!(source_chunks.len(), 3);
+        assert_eq!(source_chunks[0][0].path_id, 10);
+        assert_eq!(source_chunks[1][0].path_id, 11);
+        assert_eq!(source_chunks[2][0].path_id, 12);
+
+        let configured_chunks = super::native_object_read_subchunks(&assets, "bmp");
+        assert_eq!(configured_chunks.len(), 3);
+        assert_eq!(configured_chunks[0][0].path_id, 10);
+        assert_eq!(configured_chunks[1][0].path_id, 11);
+        assert_eq!(configured_chunks[2][0].path_id, 12);
+    }
+
+    #[test]
+    fn native_image_format_ignores_container_extension() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("banner".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/foo/banner.jpg.bytes".into(),
+            ),
+            asset_type: Some("Texture2D".to_string()),
+            type_id: 28,
+            path_id: 43,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        assert_eq!(
+            super::native_image_format_for_asset(&asset, "raw_rgba"),
+            "raw_rgba"
+        );
+        assert_eq!(
+            super::native_image_format_for_asset(&asset, "jpg"),
+            "raw_rgba"
+        );
+    }
+
+    #[test]
+    fn native_raw_rgba_payload_is_encoded_to_png() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("normal.png");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(super::NATIVE_AOT_RGBA_IR_MAGIC);
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&8u32.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(&[255, 0, 0, 255, 0, 255, 0, 128]);
+
+        let (_config, region) = processing_config();
+        let written = write_native_image_payload_final_files(&target, &payload, &region).unwrap();
+        assert_eq!(written, vec![target.clone()]);
+        let decoded = image::ImageReader::open(&target).unwrap().decode().unwrap();
+        let rgba = decoded.to_rgba8();
+        assert_eq!(rgba.width(), 2);
+        assert_eq!(rgba.height(), 1);
+        assert_eq!(rgba.get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(rgba.get_pixel(1, 0).0, [0, 255, 0, 128]);
+    }
+
+    #[test]
     fn native_surrogate_bmp_is_converted_to_png() {
         let dir = tempdir().unwrap();
         let bmp = dir.path().join("sample.bmp");
@@ -5845,7 +9552,8 @@ printf fallback > "$OUT/fallback/path/done.txt"
             .save_with_format(&bmp, image::ImageFormat::Bmp)
             .unwrap();
 
-        let generated = convert_native_surrogate_images_to_png(dir.path(), 2, 2).unwrap();
+        let generated =
+            convert_native_surrogate_images_to_png(dir.path(), &[], 2, 2, false).unwrap();
 
         let png = dir.path().join("sample.png");
         assert_eq!(generated, vec![png.clone()]);
@@ -5855,6 +9563,375 @@ printf fallback > "$OUT/fallback/path/done.txt"
         let decoded = image::ImageReader::open(&png).unwrap().decode().unwrap();
         assert_eq!(decoded.width(), 3);
         assert_eq!(decoded.height(), 2);
+    }
+
+    #[test]
+    fn scoped_native_surrogate_conversion_ignores_unlisted_bmp_files() {
+        let dir = tempdir().unwrap();
+        let own_bmp = dir.path().join("own.bmp");
+        let other_bmp = dir.path().join("other.bmp");
+        let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+        image
+            .save_with_format(&own_bmp, image::ImageFormat::Bmp)
+            .unwrap();
+        image
+            .save_with_format(&other_bmp, image::ImageFormat::Bmp)
+            .unwrap();
+
+        let generated = convert_native_surrogate_images_to_png(
+            dir.path(),
+            std::slice::from_ref(&own_bmp),
+            2,
+            2,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(generated, vec![dir.path().join("own.png")]);
+        assert!(!own_bmp.exists());
+        assert!(other_bmp.exists());
+        assert!(!dir.path().join("other.png").exists());
+    }
+
+    #[test]
+    fn surrogate_conversion_sniffs_png_payload_with_bmp_extension() {
+        let dir = tempdir().unwrap();
+        let disguised = dir.path().join("disguised.bmp");
+        let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 255, 0, 255]));
+        image
+            .save_with_format(&disguised, image::ImageFormat::Png)
+            .unwrap();
+
+        let generated = convert_native_surrogate_images_to_png(
+            dir.path(),
+            std::slice::from_ref(&disguised),
+            1,
+            1,
+            true,
+        )
+        .unwrap();
+
+        let png = dir.path().join("disguised.png");
+        assert_eq!(generated, vec![png.clone()]);
+        assert!(png.exists());
+        assert!(!disguised.exists());
+    }
+
+    #[test]
+    fn native_image_payload_writes_png_directly_without_bmp_surrogate() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.bmp");
+        let image = image::RgbaImage::from_pixel(3, 2, image::Rgba([0, 255, 0, 255]));
+        image
+            .save_with_format(&source, image::ImageFormat::Bmp)
+            .unwrap();
+        let payload = fs::read(source).unwrap();
+        let (_config, region) = processing_config();
+        let target = dir.path().join("normal.png");
+
+        let written = write_native_image_payload_final_files(&target, &payload, &region).unwrap();
+
+        assert_eq!(written, vec![target.clone()]);
+        assert!(target.exists());
+        assert!(!dir.path().join("normal.bmp").exists());
+    }
+
+    #[test]
+    fn native_image_payload_writes_webp_from_memory_when_configured() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.bmp");
+        let image = image::RgbaImage::from_pixel(3, 2, image::Rgba([0, 255, 0, 255]));
+        image
+            .save_with_format(&source, image::ImageFormat::Bmp)
+            .unwrap();
+        let payload = fs::read(source).unwrap();
+        let (_config, mut region) = processing_config();
+        region.export.images.convert_to_webp = true;
+        region.export.images.remove_png = true;
+        let target = dir.path().join("normal.png");
+        let webp = dir.path().join("normal.webp");
+
+        let written = write_native_image_payload_final_files(&target, &payload, &region).unwrap();
+
+        assert_eq!(written, vec![webp.clone()]);
+        assert!(webp.exists());
+        assert!(!target.exists());
+        assert!(!dir.path().join("normal.bmp").exists());
+    }
+
+    #[test]
+    fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
+        let dir = tempdir().unwrap();
+        let (_config, mut region) = processing_config();
+        region.export.by_category = true;
+        let read_kinds = BTreeMap::new();
+        let options = NativeUnityPyUnpackOptions {
+            output_dir: dir.path(),
+            export_path: "sound/foo",
+            strip_path_prefix: "assets/sekai/assetbundle/resources",
+            region: &region,
+            read_kinds: &read_kinds,
+            image_format: "bmp",
+            read_batch_size: 16,
+            cli_parity_mode: false,
+        };
+        let mut path_state = NativeSemanticExportPathState::default();
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("se_0126_01".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/ondemand/sound/se_0126_01.acb.bytes"
+                    .to_string(),
+            ),
+            asset_type: Some("TextAsset".to_string()),
+            type_id: 49,
+            path_id: 123,
+            unique_id: None,
+            size: 4,
+            source_file: None,
+        };
+        let read_output = AssetStudioNativeObjectReadOutput {
+            response: AssetStudioNativeObjectReadResponse {
+                success: true,
+                asset: Some(asset.clone()),
+                payload_kind: Some("text_bytes".to_string()),
+                payload_len: 4,
+                suggested_extension: Some(".bytes".to_string()),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: None,
+                duration_ms: None,
+            },
+            payload: b"acb!".to_vec(),
+        };
+
+        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+        let expected_target = dir.path().join("ondemand/sound/se_0126_01.acb");
+        assert!(!expected_target.exists());
+        assert!(path_state.written_files.is_empty());
+        assert_eq!(path_state.acb_sources.len(), 1);
+        assert_eq!(path_state.acb_sources[0].target, expected_target);
+        assert_eq!(path_state.acb_sources[0].payload, b"acb!");
+
+        assert!(!dir
+            .path()
+            .join(".assetstudio-export-manifest.jsonl")
+            .exists());
+    }
+
+    #[test]
+    fn assetbundle_typetree_routes_to_container_bundle_record_path() {
+        let dir = tempdir().unwrap();
+        let (_config, mut region) = processing_config();
+        region.export.by_category = true;
+        let read_kinds = BTreeMap::new();
+        let options = NativeUnityPyUnpackOptions {
+            output_dir: dir.path(),
+            export_path: "actionset/group0",
+            strip_path_prefix: "assets/sekai/assetbundle/resources",
+            region: &region,
+            read_kinds: &read_kinds,
+            image_format: "bmp",
+            read_batch_size: 16,
+            cli_parity_mode: false,
+        };
+        let mut path_state = NativeSemanticExportPathState::default();
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("actionset/group0".to_string()),
+            container: None,
+            asset_type: Some("AssetBundle".to_string()),
+            type_id: 142,
+            path_id: 1,
+            unique_id: None,
+            size: 0,
+            source_file: None,
+        };
+        let payload = br#"{
+            "m_Name":"actionset/group0",
+            "m_AssetBundleName":"actionset/group0",
+            "m_Container":[
+                {
+                    "key":"assets/sekai/assetbundle/resources/startapp/actionset/group0/as_2_007.asset",
+                    "value":{"asset":{"m_FileID":0,"m_PathID":1}}
+                }
+            ]
+        }"#;
+        let read_output = AssetStudioNativeObjectReadOutput {
+            response: AssetStudioNativeObjectReadResponse {
+                success: true,
+                asset: Some(asset.clone()),
+                payload_kind: Some("typetree_json".to_string()),
+                payload_len: payload.len() as i64,
+                suggested_extension: Some(".json".to_string()),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: None,
+                duration_ms: None,
+            },
+            payload: payload.to_vec(),
+        };
+
+        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+        let expected = dir.path().join("startapp/actionset/group0/_bundle.json");
+        assert!(expected.exists());
+        assert!(!dir.path().join("actionset/group0.json").exists());
+        let manifest =
+            fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+        let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
+        assert_eq!(
+            entry.get("path").and_then(|value| value.as_str()),
+            Some("startapp/actionset/group0/_bundle.json")
+        );
+    }
+
+    #[test]
+    fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
+        let dir = tempdir().unwrap();
+        let (_config, mut region) = processing_config();
+        region.export.by_category = true;
+        let read_kinds = BTreeMap::new();
+        let options = NativeUnityPyUnpackOptions {
+            output_dir: dir.path(),
+            export_path: "crystal_shop/thumbnail/mysekai_mission_pass5",
+            strip_path_prefix: "assets/sekai/assetbundle/resources",
+            region: &region,
+            read_kinds: &read_kinds,
+            image_format: "bmp",
+            read_batch_size: 16,
+            cli_parity_mode: false,
+        };
+        let mut path_state = NativeSemanticExportPathState::default();
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("crystal_shop/thumbnail/mysekai_mission_pass5".to_string()),
+            container: None,
+            asset_type: Some("AssetBundle".to_string()),
+            type_id: 142,
+            path_id: 1,
+            unique_id: None,
+            size: 0,
+            source_file: None,
+        };
+        let payload = br#"{
+            "m_Name":"crystal_shop/thumbnail/mysekai_mission_pass5",
+            "m_AssetBundleName":"crystal_shop/thumbnail/mysekai_mission_pass5",
+            "m_Container":[
+                {
+                    "key":"assets/sekai/assetbundle/resources/startapp/crystal_shop/thumbnail/mysekai_mission_pass5/banner.asset",
+                    "value":{"asset":{"m_FileID":0,"m_PathID":1}}
+                },
+                {
+                    "key":"assets/sekai/assetbundle/resources/ondemand/crystal_shop/thumbnail/mysekai_mission_pass5/detail.asset",
+                    "value":{"asset":{"m_FileID":0,"m_PathID":2}}
+                }
+            ]
+        }"#;
+        let read_output = AssetStudioNativeObjectReadOutput {
+            response: AssetStudioNativeObjectReadResponse {
+                success: true,
+                asset: Some(asset.clone()),
+                payload_kind: Some("typetree_json".to_string()),
+                payload_len: payload.len() as i64,
+                suggested_extension: Some(".json".to_string()),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: None,
+                duration_ms: None,
+            },
+            payload: payload.to_vec(),
+        };
+
+        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+        let expected = dir
+            .path()
+            .join("crystal_shop/thumbnail/mysekai_mission_pass5/_bundle.json");
+        assert!(expected.exists());
+        let manifest =
+            fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+        let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
+        assert_eq!(
+            entry.get("path").and_then(|value| value.as_str()),
+            Some("crystal_shop/thumbnail/mysekai_mission_pass5/_bundle.json")
+        );
+    }
+
+    #[test]
+    fn monoscript_typetree_routes_to_container_subasset_path() {
+        let dir = tempdir().unwrap();
+        let (_config, mut region) = processing_config();
+        region.export.by_category = true;
+        let read_kinds = BTreeMap::new();
+        let options = NativeUnityPyUnpackOptions {
+            output_dir: dir.path(),
+            export_path: "actionset/group0",
+            strip_path_prefix: "assets/sekai/assetbundle/resources",
+            region: &region,
+            read_kinds: &read_kinds,
+            image_format: "bmp",
+            read_batch_size: 16,
+            cli_parity_mode: false,
+        };
+        let mut path_state = NativeSemanticExportPathState::default();
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("ActionSetData".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/actionset/group0/shoppingmall_staff.asset"
+                    .to_string(),
+            ),
+            asset_type: Some("MonoScript".to_string()),
+            type_id: 115,
+            path_id: 2,
+            unique_id: None,
+            size: 0,
+            source_file: None,
+        };
+        let payload = br#"{"m_Name":"ActionSetData"}"#;
+        let read_output = AssetStudioNativeObjectReadOutput {
+            response: AssetStudioNativeObjectReadResponse {
+                success: true,
+                asset: Some(asset.clone()),
+                payload_kind: Some("typetree_json".to_string()),
+                payload_len: payload.len() as i64,
+                suggested_extension: Some(".json".to_string()),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: None,
+                duration_ms: None,
+            },
+            payload: payload.to_vec(),
+        };
+
+        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+        let expected = dir.path().join(
+            "startapp/actionset/group0/shoppingmall_staff.assets/monoscript/ActionSetData.json",
+        );
+        assert!(expected.exists());
+        assert!(!dir
+            .path()
+            .join("startapp/actionset/group0/shoppingmall_staff.json")
+            .exists());
+        let manifest =
+            fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+        let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
+        assert_eq!(
+            entry.get("path").and_then(|value| value.as_str()),
+            Some(
+                "startapp/actionset/group0/shoppingmall_staff.assets/monoscript/ActionSetData.json"
+            )
+        );
+    }
+
+    #[test]
+    fn music_long_hca_filter_drops_duplicate_vr_and_screen_tracks() {
+        assert!(should_keep_music_long_hca_track("0001", "hca"));
+        assert!(!should_keep_music_long_hca_track("0001_VR", "hca"));
+        assert!(!should_keep_music_long_hca_track("0001_SCREEN", "HCA"));
     }
 
     #[test]
@@ -6120,7 +10197,138 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
-    fn character_sprite_objects_route_under_container_sprite_directory() {
+    fn text_asset_media_bytes_target_strips_known_media_suffixes() {
+        let mut asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("asset".to_string()),
+            container: Some("assets/foo".to_string()),
+            asset_type: Some("TextAsset".to_string()),
+            type_id: 49,
+            path_id: 7,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        assert_eq!(
+            text_asset_media_bytes_target(Path::new("out/foo.acb.bytes"), &asset).unwrap(),
+            PathBuf::from("out/foo.acb")
+        );
+        assert_eq!(
+            text_asset_media_bytes_target(Path::new("out/foo.usm.bytes"), &asset).unwrap(),
+            PathBuf::from("out/foo.usm")
+        );
+        assert!(text_asset_media_bytes_target(Path::new("out/foo.bytes"), &asset).is_none());
+
+        asset.asset_type = Some("MonoBehaviour".to_string());
+        assert!(text_asset_media_bytes_target(Path::new("out/foo.usm.bytes"), &asset).is_none());
+    }
+
+    #[test]
+    fn mono_behaviour_primary_asset_uses_container_json_path() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("005005_minori02_kari".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/character/member/res005_no005/005005_minori02_kari.asset"
+                    .to_string(),
+            ),
+            asset_type: Some("MonoBehaviour".to_string()),
+            type_id: 114,
+            path_id: 42,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "character/member/res005_no005",
+            "assets/sekai/assetbundle/resources",
+            true,
+            &asset,
+            Some("typetree_json"),
+            Some(".json"),
+        );
+
+        assert_eq!(
+            target,
+            PathBuf::from(
+                "/tmp/out/startapp/character/member/res005_no005/005005_minori02_kari.json"
+            )
+        );
+    }
+
+    #[test]
+    fn mono_behaviour_bundledata_uses_container_json_path() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("SoundBundleBuildData".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/ondemand/music/long/0001_01/soundbundlebuilddata.asset"
+                    .to_string(),
+            ),
+            asset_type: Some("MonoBehaviour".to_string()),
+            type_id: 114,
+            path_id: 42,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "music/long/0001_01",
+            "assets/sekai/assetbundle/resources",
+            true,
+            &asset,
+            Some("typetree_json"),
+            Some(".json"),
+        );
+
+        assert_eq!(
+            target,
+            PathBuf::from("/tmp/out/ondemand/music/long/0001_01/soundbundlebuilddata.json")
+        );
+    }
+
+    #[test]
+    fn mono_script_stays_in_container_subasset_path() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("ScenarioSceneData".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/character/member/res005_no005/005005_minori02_kari.asset"
+                    .to_string(),
+            ),
+            asset_type: Some("MonoScript".to_string()),
+            type_id: 115,
+            path_id: 43,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "character/member/res005_no005",
+            "assets/sekai/assetbundle/resources",
+            true,
+            &asset,
+            Some("typetree_json"),
+            Some(".json"),
+        );
+
+        assert_eq!(
+            target,
+            PathBuf::from(
+                "/tmp/out/startapp/character/member/res005_no005/005005_minori02_kari.assets/monoscript/ScenarioSceneData.json"
+            )
+        );
+    }
+
+    #[test]
+    fn member_cutout_sprite_objects_use_resolved_cutout_path() {
         let asset = AssetStudioNativeAssetInfo {
             index: 0,
             name: Some("deck".to_string()),
@@ -6139,22 +10347,23 @@ printf fallback > "$OUT/fallback/path/done.txt"
         let target = unitypy_object_output_path(
             Path::new("/tmp/out"),
             "character/member_cutout/res001_no001",
-            "assets/sekai/assetbundle/resources/startapp/",
+            "assets/sekai/assetbundle/resources",
             true,
             &asset,
             Some("image_png"),
             Some(".png"),
         );
 
-        assert!(should_route_character_sprite_object(&asset));
         assert_eq!(
-            super::character_sprite_object_output_path(&target, &asset),
-            PathBuf::from("/tmp/out/character/member_cutout/res001_no001/normal_sprites/deck.png")
+            target,
+            PathBuf::from(
+                "/tmp/out/startapp/character/member_cutout/res001_no001/normal.assets/sprite/deck.png"
+            )
         );
     }
 
     #[test]
-    fn character_texture_objects_keep_container_path() {
+    fn member_cutout_texture_objects_use_resolved_cutout_path() {
         let asset = AssetStudioNativeAssetInfo {
             index: 0,
             name: Some("normal".to_string()),
@@ -6173,22 +10382,145 @@ printf fallback > "$OUT/fallback/path/done.txt"
         let target = unitypy_object_output_path(
             Path::new("/tmp/out"),
             "character/member_cutout/res001_no001",
-            "assets/sekai/assetbundle/resources/startapp/",
+            "assets/sekai/assetbundle/resources",
             true,
             &asset,
             Some("image_png"),
             Some(".png"),
         );
 
-        assert!(!should_route_character_sprite_object(&asset));
         assert_eq!(
             target,
-            PathBuf::from("/tmp/out/character/member_cutout/res001_no001/normal.png")
+            PathBuf::from("/tmp/out/startapp/character/member_cutout/res001_no001/normal.png")
         );
     }
 
     #[test]
-    fn non_character_sprite_objects_keep_container_path() {
+    fn by_category_object_paths_follow_container_category_not_info_category() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("normal".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/mysekai/foo/normal.png".to_string(),
+            ),
+            asset_type: Some("Texture2D".to_string()),
+            type_id: 28,
+            path_id: 43,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "mysekai/foo",
+            "assets/sekai/assetbundle/resources",
+            true,
+            &asset,
+            Some("image_png"),
+            Some(".png"),
+        );
+
+        assert_eq!(
+            target,
+            PathBuf::from("/tmp/out/startapp/mysekai/foo/normal.png")
+        );
+    }
+
+    #[test]
+    fn manifest_records_native_surrogate_image_public_png_path() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("startapp/foo/normal.bmp");
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("normal".to_string()),
+            container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
+            asset_type: Some("Texture2D".to_string()),
+            type_id: 28,
+            path_id: 43,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+        let read_output = AssetStudioNativeObjectReadOutput {
+            response: AssetStudioNativeObjectReadResponse {
+                success: true,
+                asset: Some(asset.clone()),
+                payload_kind: Some("image_bmp".to_string()),
+                payload_len: 4,
+                suggested_extension: Some(".bmp".to_string()),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: None,
+                duration_ms: None,
+            },
+            payload: Vec::new(),
+        };
+
+        write_assetstudio_export_manifest_entry(dir.path(), &target, &asset, &read_output).unwrap();
+
+        let manifest =
+            fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+        let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
+        assert_eq!(
+            entry.get("path").and_then(|value| value.as_str()),
+            Some("startapp/foo/normal.png")
+        );
+    }
+
+    #[test]
+    fn manifest_records_animator_bundle_public_fbx_path() {
+        let dir = tempdir().unwrap();
+        let target = dir
+            .path()
+            .join("ondemand/foo/foo.assets/animator/model.prefab");
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("model".to_string()),
+            container: Some("assets/sekai/assetbundle/resources/ondemand/foo/model.prefab".into()),
+            asset_type: Some("Animator".to_string()),
+            type_id: 95,
+            path_id: 43,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+        let mut payload = Vec::new();
+        payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        let entry_name = "FBX_Animator/model/model.fbx";
+        payload.extend_from_slice(&(entry_name.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&3u64.to_le_bytes());
+        payload.extend_from_slice(entry_name.as_bytes());
+        payload.extend_from_slice(b"fbx");
+        let read_output = AssetStudioNativeObjectReadOutput {
+            response: AssetStudioNativeObjectReadResponse {
+                success: true,
+                asset: Some(asset.clone()),
+                payload_kind: Some("animator_bundle_fbx".to_string()),
+                payload_len: payload.len() as i64,
+                suggested_extension: Some(".fbx".to_string()),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: None,
+                duration_ms: None,
+            },
+            payload,
+        };
+
+        write_assetstudio_export_manifest_entry(dir.path(), &target, &asset, &read_output).unwrap();
+
+        let manifest =
+            fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+        let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
+        assert_eq!(
+            entry.get("path").and_then(|value| value.as_str()),
+            Some("ondemand/foo/foo.assets/animator/model/FBX_Animator/model/model.fbx")
+        );
+    }
+
+    #[test]
+    fn non_character_sprite_objects_route_under_container_sprite_directory() {
         let asset = AssetStudioNativeAssetInfo {
             index: 0,
             name: Some("deck".to_string()),
@@ -6213,8 +10545,142 @@ printf fallback > "$OUT/fallback/path/done.txt"
             Some(".png"),
         );
 
-        assert!(!should_route_character_sprite_object(&asset));
-        assert_eq!(target, PathBuf::from("/tmp/out/event/foo/normal.png"));
+        assert_eq!(
+            target,
+            PathBuf::from("/tmp/out/event/foo/normal.assets/sprite/deck.png")
+        );
+    }
+
+    #[test]
+    fn mesh_objects_route_under_container_mesh_directory() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("body".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/mysekai/effect/common/fbx/model.prefab"
+                    .to_string(),
+            ),
+            asset_type: Some("Mesh".to_string()),
+            type_id: 43,
+            path_id: 45,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "mysekai/effect/common/fbx",
+            "assets/sekai/assetbundle/resources/startapp/",
+            true,
+            &asset,
+            Some("mesh_obj"),
+            Some(".obj"),
+        );
+
+        assert_eq!(
+            target,
+            PathBuf::from("/tmp/out/mysekai/effect/common/fbx/model.assets/mesh/body.obj")
+        );
+    }
+
+    #[test]
+    fn font_objects_use_named_file_in_container_parent_directory() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("FOT-RodinNTLGPro-DB".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/custom_profile/font/fot-yurukastd-ub.prefab"
+                    .to_string(),
+            ),
+            asset_type: Some("Font".to_string()),
+            type_id: 128,
+            path_id: 45,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+        let target = unitypy_object_output_path(
+            Path::new("/tmp/out"),
+            "custom_profile/font",
+            "assets/sekai/assetbundle/resources",
+            true,
+            &asset,
+            Some("font"),
+            Some(".otf"),
+        );
+
+        assert_eq!(
+            target,
+            PathBuf::from("/tmp/out/startapp/custom_profile/font/FOT-RodinNTLGPro-DB.otf")
+        );
+    }
+
+    #[test]
+    fn semantic_export_path_state_disambiguates_without_path_id() {
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("shared".to_string()),
+            container: Some("assets/shared.prefab".to_string()),
+            asset_type: Some("MonoBehaviour".to_string()),
+            type_id: 114,
+            path_id: 12345,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+        let mut state = NativeSemanticExportPathState::default();
+        let base = PathBuf::from("/tmp/out/shared.assets/monobehaviour/shared.json");
+
+        let first = state.claim(base.clone(), &asset);
+        let second = state.claim(base, &asset);
+
+        assert_eq!(
+            first,
+            PathBuf::from("/tmp/out/shared.assets/monobehaviour/shared.json")
+        );
+        assert_eq!(
+            second,
+            PathBuf::from("/tmp/out/shared.assets/monobehaviour/shared__dup2.json")
+        );
+        assert!(!second.to_string_lossy().contains("12345"));
+    }
+
+    #[test]
+    fn semantic_file_stem_compresses_repeated_clone_suffixes() {
+        let name = "CharacterMotionClip(Clone)(Clone)(Clone)(Clone)";
+
+        assert_eq!(
+            assetstudio_fix_file_name(name),
+            "CharacterMotionClip__clone4"
+        );
+    }
+
+    #[test]
+    fn semantic_file_stem_truncates_long_names_without_path_id_or_hash() {
+        let name = format!("{}{}", "VeryLongName".repeat(40), "(Clone)(Clone)");
+        let fixed = assetstudio_fix_file_name(&name);
+
+        assert!(fixed.ends_with("__truncated"));
+        assert!(fixed.chars().count() <= ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS);
+        assert!(!fixed.contains("12345"));
+    }
+
+    #[test]
+    fn playable_container_routes_to_single_public_json_path() {
+        let target = playable_container_output_path(
+            Path::new("/tmp/out"),
+            "virtual_live/mc/timeline/foo",
+            "assets/sekai/assetbundle/resources/ondemand/",
+            true,
+            "assets/sekai/assetbundle/resources/ondemand/virtual_live/mc/timeline/foo/foo.playable",
+        );
+
+        assert_eq!(
+            target,
+            PathBuf::from("/tmp/out/virtual_live/mc/timeline/foo/foo.json")
+        );
     }
 
     #[test]
@@ -6334,6 +10800,29 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
+    fn native_payload_bundle_parser_reads_legacy_grouped_entries() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        payload.extend_from_slice(&("layer_0000.bmp".len() as u32).to_le_bytes());
+        payload.extend_from_slice(&3u64.to_le_bytes());
+        payload.extend_from_slice(b"layer_0000.bmp");
+        payload.extend_from_slice(&("nested/layer_0001.bmp".len() as u32).to_le_bytes());
+        payload.extend_from_slice(&3u64.to_le_bytes());
+        payload.extend_from_slice(b"nested/layer_0001.bmp");
+        payload.extend_from_slice(b"one");
+        payload.extend_from_slice(b"two");
+
+        let entries = parse_payload_bundle(&payload).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "layer_0000.bmp");
+        assert_eq!(entries[0].1, b"one");
+        assert_eq!(entries[1].0, "nested/layer_0001.bmp");
+        assert_eq!(entries[1].1, b"two");
+    }
+
+    #[test]
     fn native_payload_bundle_borrowed_parser_reuses_payload_slices() {
         let mut payload = Vec::new();
         payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
@@ -6367,6 +10856,163 @@ printf fallback > "$OUT/fallback/path/done.txt"
             PathBuf::from("abs.bin")
         );
         assert_eq!(safe_payload_bundle_path(".."), PathBuf::from("payload.bin"));
+    }
+
+    #[test]
+    fn typed_context_list_response_reads_string_table() {
+        let mut strings = b"asset\0assets/a.bytes\0TextAsset\0_#1\0/tmp/a.bundle\0".to_vec();
+        let mut objects = [super::AssetStudioTypedAssetObject {
+            index: 1,
+            type_id: 49,
+            path_id: -2917928468481106214,
+            size: 123,
+            estimated_payload_capacity: 0,
+            raw_payload_capacity: 0,
+            image_payload_capacity: 0,
+            text_payload_capacity: 0,
+            payload_capacity_flags: 0,
+            reserved: 0,
+            name_offset: 0,
+            name_len: 5,
+            container_offset: 6,
+            container_len: 14,
+            type_offset: 21,
+            type_len: 9,
+            unique_id_offset: 31,
+            unique_id_len: 3,
+            source_file_offset: 35,
+            source_file_len: 13,
+        }];
+        let response = super::AssetStudioTypedObjectTable {
+            status: 0,
+            context_id: 7,
+            offset: 0,
+            limit: 1,
+            next_offset: 1,
+            has_more: 1,
+            total_count: 2,
+            returned_count: 1,
+            objects: objects.as_mut_ptr(),
+            string_data: strings.as_mut_ptr(),
+            string_data_len: strings.len() as i32,
+            duration_ms: 3,
+            ..Default::default()
+        };
+
+        let parsed = super::typed_list_success_response(&response);
+
+        assert!(parsed.success);
+        assert_eq!(parsed.context_id, 7);
+        assert_eq!(parsed.next_offset, Some(1));
+        assert_eq!(parsed.total_count, 2);
+        assert_eq!(parsed.assets.len(), 1);
+        assert_eq!(parsed.assets[0].path_id, -2917928468481106214);
+        assert_eq!(parsed.assets[0].name.as_deref(), Some("asset"));
+        assert_eq!(
+            parsed.assets[0].container.as_deref(),
+            Some("assets/a.bytes")
+        );
+        assert_eq!(parsed.assets[0].asset_type.as_deref(), Some("TextAsset"));
+        assert_eq!(parsed.assets[0].unique_id.as_deref(), Some("_#1"));
+        assert_eq!(
+            parsed.assets[0].source_file.as_deref(),
+            Some("/tmp/a.bundle")
+        );
+        assert_eq!(parsed.duration_ms, Some(3));
+    }
+
+    #[test]
+    fn typed_read_response_builds_payload_bundle_by_path_id() {
+        let mut strings = b"text_bytes\0.bytes\0unsupported\0".to_vec();
+        let mut payload = b"abcdef".to_vec();
+        let mut items = [
+            super::AssetStudioTypedObjectReadItemResponse {
+                index: 0,
+                status: 0,
+                error_code: 0,
+                path_id: -2917928468481106214,
+                type_id: 49,
+                size: 6,
+                payload_offset: 1,
+                payload_len: 3,
+                payload_kind_offset: 0,
+                payload_kind_len: 10,
+                suggested_extension_offset: 11,
+                suggested_extension_len: 6,
+                error_message_offset: 0,
+                error_message_len: 0,
+            },
+            super::AssetStudioTypedObjectReadItemResponse {
+                index: 1,
+                status: 5,
+                error_code: 99,
+                path_id: 5328417417928009774,
+                type_id: 48,
+                size: 0,
+                payload_offset: 0,
+                payload_len: 0,
+                payload_kind_offset: 0,
+                payload_kind_len: 0,
+                suggested_extension_offset: 0,
+                suggested_extension_len: 0,
+                error_message_offset: 18,
+                error_message_len: 11,
+            },
+        ];
+        let response = super::AssetStudioTypedObjectReadBatchRetryResponse {
+            status: 9,
+            context_id: 7,
+            requested_count: 2,
+            returned_count: 2,
+            failed_count: 1,
+            items: items.as_mut_ptr(),
+            string_data: strings.as_mut_ptr(),
+            string_data_len: strings.len() as i32,
+            payload: payload.as_mut_ptr(),
+            payload_len: payload.len() as i64,
+            duration_ms: 4,
+            ..Default::default()
+        };
+        let request = super::AssetStudioNativeContextReadObjectsRequest {
+            context_id: 7,
+            objects: Vec::new(),
+        };
+
+        let parsed = super::typed_read_objects_response(&request, 9, &response);
+        let bundle = super::typed_read_objects_payload_bundle(&response).unwrap();
+        let entries = parse_payload_bundle(&bundle).unwrap();
+
+        assert!(parsed.success);
+        assert_eq!(parsed.reads.len(), 2);
+        assert_eq!(parsed.failed_count, 1);
+        assert_eq!(parsed.payload_kind_counts.get("text_bytes"), Some(&1));
+        assert_eq!(parsed.payload_bytes_by_kind.get("text_bytes"), Some(&3));
+        assert_eq!(parsed.reads[0].payload_kind.as_deref(), Some("text_bytes"));
+        assert_eq!(
+            parsed.reads[0].suggested_extension.as_deref(),
+            Some(".bytes")
+        );
+        assert_eq!(parsed.reads[1].error.as_deref(), Some("unsupported"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "-2917928468481106214");
+        assert_eq!(entries[0].1, b"bcd");
+    }
+
+    #[test]
+    fn native_version_response_reports_failed_status() {
+        let error = super::parse_assetstudio_native_version_response(
+            false,
+            AssetStudioNativeResponse::Version(AssetStudioNativeVersion {
+                success: false,
+                adapter_version: None,
+                assetstudio_cli_version: None,
+                error: Some("bad version".to_string()),
+            }),
+            "signal: 11".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("bad version"));
     }
 
     #[test]
@@ -6413,11 +11059,65 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
+    fn readable_assets_skip_texture2d_array_images_when_parent_is_present() {
+        let parent = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("tex_array".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/ondemand/fx/tex_array.png".to_string(),
+            ),
+            asset_type: Some("Texture2DArray".to_string()),
+            type_id: 187,
+            path_id: 1,
+            unique_id: None,
+            size: 0,
+            source_file: None,
+        };
+        let child = AssetStudioNativeAssetInfo {
+            index: 1,
+            name: Some("tex_array_1".to_string()),
+            asset_type: Some("Texture2DArrayImage".to_string()),
+            path_id: 2,
+            ..parent.clone()
+        };
+        let standalone_child = AssetStudioNativeAssetInfo {
+            index: 2,
+            name: Some("other_array_1".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/ondemand/fx/other_array.png".to_string(),
+            ),
+            asset_type: Some("Texture2DArrayImage".to_string()),
+            path_id: 3,
+            ..parent.clone()
+        };
+        let mut summary = NativeUnityPyUnpackSummary::default();
+        let assets = vec![parent, child, standalone_child];
+        let readable =
+            select_native_unitypy_readable_assets(&assets, &["all".to_string()], &mut summary);
+
+        let path_ids = readable
+            .iter()
+            .map(|asset| asset.path_id)
+            .collect::<Vec<_>>();
+        assert_eq!(path_ids, vec![1, 3]);
+        assert_eq!(summary.skipped_object_reads.len(), 1);
+        assert_eq!(summary.skipped_object_reads[0].path_id, 2);
+        assert_eq!(
+            summary.skipped_object_reads[0].error,
+            "Texture2DArrayImage is covered by its Texture2DArray parent"
+        );
+        assert_eq!(summary.object_read_plan.planned_objects, 2);
+        assert_eq!(summary.object_read_plan.skipped_reads, 1);
+    }
+
+    #[test]
     fn context_list_objects_worker_output_parses_pages() {
         let output = NativeWorkerOutput {
             status: "0".to_string(),
             status_success: true,
-            stdout: r#"{"success":true,"context_id":11,"assets":[{"index":0,"name":"asset","container":"assets/a.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null}],"offset":0,"limit":1,"next_offset":1,"total_count":2,"returned_count":1,"warnings":["paged"],"error":null,"duration_ms":3}"#.to_string(),
+            response: AssetStudioNativeResponse::ContextListObjects(
+                sonic_rs::from_str(r#"{"success":true,"context_id":11,"assets":[{"index":0,"name":"asset","container":"assets/a.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null}],"offset":0,"limit":1,"next_offset":1,"total_count":2,"returned_count":1,"warnings":["paged"],"error":null,"duration_ms":3}"#).unwrap(),
+            ),
             stderr: String::new(),
             payload: Vec::new(),
             payload_file: None,
@@ -6451,7 +11151,9 @@ printf fallback > "$OUT/fallback/path/done.txt"
         let output = NativeWorkerOutput {
             status: "100".to_string(),
             status_success: false,
-            stdout: r#"{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"boom","duration_ms":1}"#.to_string(),
+            response: AssetStudioNativeResponse::ContextReadObject(
+                sonic_rs::from_str(r#"{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"boom","duration_ms":1}"#).unwrap(),
+            ),
             stderr: String::new(),
             payload: Vec::new(),
             payload_file: None,
@@ -6484,7 +11186,9 @@ printf fallback > "$OUT/fallback/path/done.txt"
         let output = NativeWorkerOutput {
             status: "0".to_string(),
             status_success: true,
-            stdout: r#"{"success":true,"asset":{"index":0,"name":"ok","container":null,"asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}"#.to_string(),
+            response: AssetStudioNativeResponse::ContextReadObject(
+                sonic_rs::from_str(r#"{"success":true,"asset":{"index":0,"name":"ok","container":null,"asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}"#).unwrap(),
+            ),
             stderr: String::new(),
             payload: b"abc".to_vec(),
             payload_file: None,
@@ -6497,6 +11201,42 @@ printf fallback > "$OUT/fallback/path/done.txt"
         };
         assert_eq!(read.payload, b"abc");
         assert_eq!(read.response.payload_len, 3);
+    }
+
+    #[test]
+    fn object_read_loads_payload_file_and_removes_it() {
+        let dir = tempdir().unwrap();
+        let payload_file = dir.path().join("payload.bin");
+        fs::write(&payload_file, b"abc").unwrap();
+        let asset = AssetStudioNativeAssetInfo {
+            index: 0,
+            name: Some("ok".to_string()),
+            container: None,
+            asset_type: Some("TextAsset".to_string()),
+            type_id: 49,
+            path_id: 7,
+            unique_id: None,
+            size: 3,
+            source_file: None,
+        };
+        let output = NativeWorkerOutput {
+            status: "0".to_string(),
+            status_success: true,
+            response: AssetStudioNativeResponse::ContextReadObject(
+                sonic_rs::from_str(r#"{"success":true,"asset":{"index":0,"name":"ok","container":null,"asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}"#).unwrap(),
+            ),
+            stderr: String::new(),
+            payload: Vec::new(),
+            payload_file: Some(payload_file.clone()),
+        };
+
+        let parsed =
+            parse_assetstudio_native_object_read_worker_output_recoverable(output, &asset).unwrap();
+        let NativeObjectReadParseResult::Read(read) = parsed else {
+            panic!("expected successful object read");
+        };
+        assert_eq!(read.payload, b"abc");
+        assert!(!payload_file.exists());
     }
 
     #[test]
@@ -6533,7 +11273,9 @@ printf fallback > "$OUT/fallback/path/done.txt"
         let output = NativeWorkerOutput {
             status: "0".to_string(),
             status_success: true,
-            stdout: r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{"read_object.read_payload":4},"error":null,"duration_ms":5},{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"shader unsupported","duration_ms":1}],"warnings":["batch warning"],"payload_len":3,"object_count":2,"payload_bundle_bytes":123,"failed_count":1,"read_payload_ms":4,"worker_id":"worker-a","call_seq":42,"phase_stats":{"read_payload":{"p50_ms":2,"p95_ms":7}},"error":null,"duration_ms":6}"#.to_string(),
+            response: AssetStudioNativeResponse::ContextReadObjects(
+                sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{"read_object.read_payload":4},"error":null,"duration_ms":5},{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"shader unsupported","duration_ms":1}],"warnings":["batch warning"],"payload_len":3,"object_count":2,"payload_bundle_bytes":123,"failed_count":1,"read_payload_ms":4,"worker_id":"worker-a","call_seq":42,"phase_stats":{"read_payload":{"p50_ms":2,"p95_ms":7}},"error":null,"duration_ms":6}"#).unwrap(),
+            ),
             stderr: String::new(),
             payload,
             payload_file: None,
@@ -6584,6 +11326,8 @@ printf fallback > "$OUT/fallback/path/done.txt"
             source_file: None,
         };
         let mut summary = NativeUnityPyUnpackSummary {
+            written_files: Vec::new(),
+            acb_sources: Vec::new(),
             phase_ms: HashMap::from([
                 ("read_batch.read_payload.p50".to_string(), 5),
                 ("read_batch.read_payload.p95".to_string(), 5),

@@ -4,14 +4,14 @@ use std::str::FromStr;
 use crate::core::config::DEFAULT_ASSET_STUDIO_EXPORT_TYPES;
 use crate::core::errors::ExportPipelineError;
 use crate::core::export_pipeline::{
-    call_assetstudio_native_read_object_raw, call_assetstudio_native_read_objects_raw,
-    close_assetstudio_native_context, inspect_assetstudio_native_bundle,
-    list_assetstudio_native_context_objects, open_assetstudio_native_context,
-    query_assetstudio_native_version, AssetStudioNativeContextCloseRequest,
-    AssetStudioNativeContextListObjectsRequest, AssetStudioNativeContextListObjectsResponse,
-    AssetStudioNativeContextReadObjectItemRequest, AssetStudioNativeContextReadObjectRequest,
-    AssetStudioNativeContextReadObjectsRequest, AssetStudioNativeInspectRequest,
-    AssetStudioNativeObjectReadBatchResponse, AssetStudioNativeObjectReadResponse,
+    call_assetstudio_native_typed_request, close_assetstudio_native_context,
+    inspect_assetstudio_native_bundle, list_assetstudio_native_context_objects,
+    open_assetstudio_native_context, query_assetstudio_native_version,
+    AssetStudioNativeContextCloseRequest, AssetStudioNativeContextListObjectsRequest,
+    AssetStudioNativeContextListObjectsResponse, AssetStudioNativeContextReadObjectItemRequest,
+    AssetStudioNativeContextReadObjectRequest, AssetStudioNativeContextReadObjectsRequest,
+    AssetStudioNativeInspectRequest, AssetStudioNativeObjectReadBatchResponse,
+    AssetStudioNativeObjectReadResponse, AssetStudioNativeRequest, AssetStudioNativeResponse,
 };
 
 pub use crate::core::export_pipeline::{
@@ -176,12 +176,15 @@ impl AssetStudioContext {
             kind: options.kind.as_abi_str().to_string(),
             image_format: options.image_format.clone(),
         };
-        let request_json = sonic_rs::to_string(&request)
-            .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-        let (status, response_json, payload) =
-            call_assetstudio_native_read_object_raw(&self.library_path_string(), &request_json)?;
-        let response: AssetStudioNativeObjectReadResponse = sonic_rs::from_str(&response_json)
-            .map_err(|source| ExportPipelineError::NativeParse { source })?;
+        let (status, response, payload) = call_assetstudio_native_typed_request(
+            &self.library_path_string(),
+            &AssetStudioNativeRequest::ContextReadObject(request),
+        )?;
+        let AssetStudioNativeResponse::ContextReadObject(response) = response else {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: "native context_read_object returned unexpected response".to_string(),
+            });
+        };
         if status == 0 && response.success {
             Ok(AssetStudioObjectReadOutput { response, payload })
         } else {
@@ -208,12 +211,15 @@ impl AssetStudioContext {
                 })
                 .collect(),
         };
-        let request_json = sonic_rs::to_string(&request)
-            .map_err(|source| ExportPipelineError::NativeSerialize { source })?;
-        let (status, response_json, payload) =
-            call_assetstudio_native_read_objects_raw(&self.library_path_string(), &request_json)?;
-        let response: AssetStudioNativeObjectReadBatchResponse = sonic_rs::from_str(&response_json)
-            .map_err(|source| ExportPipelineError::NativeParse { source })?;
+        let (status, response, payload) = call_assetstudio_native_typed_request(
+            &self.library_path_string(),
+            &AssetStudioNativeRequest::ContextReadObjects(request),
+        )?;
+        let AssetStudioNativeResponse::ContextReadObjects(response) = response else {
+            return Err(ExportPipelineError::AssetStudioNative {
+                message: "native context_read_objects returned unexpected response".to_string(),
+            });
+        };
         if status == 0 && response.success {
             Ok(AssetStudioObjectReadBatchOutput { response, payload })
         } else {
@@ -445,13 +451,12 @@ impl AssetStudioObjectReadOutput {
                 extension: suggested_extension,
                 response: self.response,
             },
-            "image_bmp" | "image_png" | "image_tga" | "image_jpeg" | "image_webp" => {
-                AssetStudioObjectPayload::Image {
-                    bytes: self.payload,
-                    format: payload_kind.trim_start_matches("image_").to_string(),
-                    response: self.response,
-                }
-            }
+            "image_bmp" | "image_png" | "image_tga" | "image_jpeg" | "image_webp"
+            | "image_raw_rgba" => AssetStudioObjectPayload::Image {
+                bytes: self.payload,
+                format: payload_kind.trim_start_matches("image_").to_string(),
+                response: self.response,
+            },
             kind if kind.starts_with("image_array_bundle_") => {
                 AssetStudioObjectPayload::ImageArrayBundle {
                     bytes: self.payload,
@@ -722,11 +727,11 @@ mod tests {
 
     #[test]
     fn native_client_keeps_library_path() {
-        let client = AssetStudioNativeClient::new("/tmp/libHarukiAssetStudioNative.dylib");
+        let client = AssetStudioNativeClient::new("/tmp/libHarukiAssetStudioFFI.dylib");
 
         assert_eq!(
             client.library_path().display().to_string(),
-            "/tmp/libHarukiAssetStudioNative.dylib"
+            "/tmp/libHarukiAssetStudioFFI.dylib"
         );
     }
 
