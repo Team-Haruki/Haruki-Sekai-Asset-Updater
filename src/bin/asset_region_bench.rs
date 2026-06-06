@@ -133,9 +133,9 @@ struct BundleTiming {
     deobfuscate_ms: Option<u128>,
     temp_write_ms: Option<u128>,
     export_ms: Option<u128>,
-    native_phase_ms: BTreeMap<String, u64>,
-    native_skipped_object_reads: usize,
-    native_object_read_plan: NativeObjectReadPlanStats,
+    ffi_phase_ms: BTreeMap<String, u64>,
+    ffi_skipped_object_reads: usize,
+    ffi_object_read_plan: NativeObjectReadPlanStats,
     total_ms: Option<u128>,
     error: Option<String>,
 }
@@ -183,15 +183,15 @@ struct BackendReport {
     bundle_export_active_ms: TimingStats,
     bundle_worker_wait_ms: TimingStats,
     bundle_post_process_ms: TimingStats,
-    bundle_native_call_ms: TimingStats,
+    bundle_ffi_call_ms: TimingStats,
     bundle_fetch_sources: BTreeMap<String, usize>,
-    native_phase_ms: BTreeMap<String, TimingStats>,
-    native_export_phase_ms: BTreeMap<String, TimingStats>,
+    ffi_phase_ms: BTreeMap<String, TimingStats>,
+    ffi_export_phase_ms: BTreeMap<String, TimingStats>,
     post_process_phase_ms: BTreeMap<String, TimingStats>,
     scheduler_phase_ms: BTreeMap<String, TimingStats>,
     media_scheduler_phase_ms: BTreeMap<String, TimingStats>,
-    native_object_read_plan: NativeObjectReadPlanStats,
-    native_batch_diagnostics: NativeBatchDiagnostics,
+    ffi_object_read_plan: NativeObjectReadPlanStats,
+    ffi_batch_diagnostics: NativeBatchDiagnostics,
     first_completed_bundle: Option<BundleTiming>,
     slowest_bundle: Option<BundleTiming>,
     failed_bundles: Vec<BundleTiming>,
@@ -294,15 +294,15 @@ async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::E
         bundle_export_active_ms: stats(progress.export_active_values()),
         bundle_worker_wait_ms: stats(progress.phase_values("worker_pool.wait")),
         bundle_post_process_ms: stats(progress.phase_prefix_sum_values("post_process.")),
-        bundle_native_call_ms: stats(progress.native_call_values()),
+        bundle_ffi_call_ms: stats(progress.ffi_call_values()),
         bundle_fetch_sources: progress.fetch_source_counts(),
-        native_phase_ms: progress.native_phase_stats(),
-        native_export_phase_ms: progress.native_export_phase_stats(),
+        ffi_phase_ms: progress.ffi_phase_stats(),
+        ffi_export_phase_ms: progress.ffi_export_phase_stats(),
         post_process_phase_ms: progress.post_process_phase_stats(),
         scheduler_phase_ms: progress.scheduler_phase_stats(),
         media_scheduler_phase_ms: progress.media_scheduler_phase_stats(),
-        native_object_read_plan: progress.native_object_read_plan(),
-        native_batch_diagnostics: progress.native_batch_diagnostics(),
+        ffi_object_read_plan: progress.ffi_object_read_plan(),
+        ffi_batch_diagnostics: progress.ffi_batch_diagnostics(),
         first_completed_bundle: progress.first_completed_bundle(),
         slowest_bundle: progress.slowest_bundle(),
         failed_bundles: progress.failed_bundles(),
@@ -490,15 +490,15 @@ impl ProgressCollector {
             .collect()
     }
 
-    fn native_phase_stats(&self) -> BTreeMap<String, TimingStats> {
-        self.phase_stats(|phase| !is_native_batch_count_diagnostic(phase))
+    fn ffi_phase_stats(&self) -> BTreeMap<String, TimingStats> {
+        self.phase_stats(|phase| !is_ffi_batch_count_diagnostic(phase))
     }
 
-    fn native_export_phase_stats(&self) -> BTreeMap<String, TimingStats> {
+    fn ffi_export_phase_stats(&self) -> BTreeMap<String, TimingStats> {
         self.phase_stats(|phase| {
             !phase.starts_with("post_process.")
                 && !phase.starts_with("scheduler.")
-                && !is_native_batch_count_diagnostic(phase)
+                && !is_ffi_batch_count_diagnostic(phase)
         })
     }
 
@@ -514,16 +514,16 @@ impl ProgressCollector {
         self.phase_stats(|phase| phase.starts_with("media_scheduler."))
     }
 
-    fn native_object_read_plan(&self) -> NativeObjectReadPlanStats {
+    fn ffi_object_read_plan(&self) -> NativeObjectReadPlanStats {
         self.bundles
             .values()
             .fold(NativeObjectReadPlanStats::default(), |mut acc, bundle| {
-                add_native_object_read_plan(&mut acc, &bundle.native_object_read_plan);
+                add_ffi_object_read_plan(&mut acc, &bundle.ffi_object_read_plan);
                 acc
             })
     }
 
-    fn native_batch_diagnostics(&self) -> NativeBatchDiagnostics {
+    fn ffi_batch_diagnostics(&self) -> NativeBatchDiagnostics {
         NativeBatchDiagnostics {
             asset_type_counts: self.sum_phase_prefix("read_batch.asset_type_count."),
             payload_kind_counts: self.sum_phase_prefix("read_batch.payload_kind_count."),
@@ -538,7 +538,7 @@ impl ProgressCollector {
     fn sum_phase_prefix(&self, prefix: &str) -> BTreeMap<String, u64> {
         let mut values = BTreeMap::new();
         for bundle in self.bundles.values() {
-            for (phase, value) in &bundle.native_phase_ms {
+            for (phase, value) in &bundle.ffi_phase_ms {
                 if let Some(key) = phase.strip_prefix(prefix) {
                     *values.entry(key.to_string()).or_default() += *value;
                 }
@@ -550,21 +550,21 @@ impl ProgressCollector {
     fn sum_phase_value(&self, phase: &str) -> u64 {
         self.bundles
             .values()
-            .filter_map(|bundle| bundle.native_phase_ms.get(phase))
+            .filter_map(|bundle| bundle.ffi_phase_ms.get(phase))
             .sum()
     }
 
     fn max_phase_value(&self, phase: &str) -> Option<u64> {
         self.bundles
             .values()
-            .filter_map(|bundle| bundle.native_phase_ms.get(phase).copied())
+            .filter_map(|bundle| bundle.ffi_phase_ms.get(phase).copied())
             .max()
     }
 
     fn phase_stats(&self, include: impl Fn(&str) -> bool) -> BTreeMap<String, TimingStats> {
         let mut values_by_phase: BTreeMap<String, Vec<u128>> = BTreeMap::new();
         for bundle in self.bundles.values() {
-            for (phase, elapsed_ms) in &bundle.native_phase_ms {
+            for (phase, elapsed_ms) in &bundle.ffi_phase_ms {
                 if !include(phase) {
                     continue;
                 }
@@ -583,7 +583,7 @@ impl ProgressCollector {
     fn phase_values(&self, phase: &str) -> Vec<u128> {
         self.bundles
             .values()
-            .filter_map(|bundle| bundle.native_phase_ms.get(phase).copied().map(u128::from))
+            .filter_map(|bundle| bundle.ffi_phase_ms.get(phase).copied().map(u128::from))
             .collect()
     }
 
@@ -592,7 +592,7 @@ impl ProgressCollector {
             .values()
             .map(|bundle| {
                 bundle
-                    .native_phase_ms
+                    .ffi_phase_ms
                     .iter()
                     .filter(|(phase, _)| phase.starts_with(prefix))
                     .map(|(_, elapsed_ms)| u128::from(*elapsed_ms))
@@ -607,7 +607,7 @@ impl ProgressCollector {
             .filter_map(|bundle| {
                 let export_ms = bundle.export_ms?;
                 let worker_wait_ms = bundle
-                    .native_phase_ms
+                    .ffi_phase_ms
                     .get("worker_pool.wait")
                     .copied()
                     .map(u128::from)
@@ -617,19 +617,19 @@ impl ProgressCollector {
             .collect()
     }
 
-    fn native_call_values(&self) -> Vec<u128> {
+    fn ffi_call_values(&self) -> Vec<u128> {
         self.bundles
             .values()
             .filter_map(|bundle| {
                 let export_ms = bundle.export_ms?;
                 let worker_wait_ms = bundle
-                    .native_phase_ms
+                    .ffi_phase_ms
                     .get("worker_pool.wait")
                     .copied()
                     .map(u128::from)
                     .unwrap_or_default();
                 let post_process_ms: u128 = bundle
-                    .native_phase_ms
+                    .ffi_phase_ms
                     .iter()
                     .filter(|(phase, _)| phase.starts_with("post_process."))
                     .map(|(_, elapsed_ms)| u128::from(*elapsed_ms))
@@ -652,7 +652,7 @@ impl ProgressCollector {
     }
 }
 
-fn is_native_batch_count_diagnostic(phase: &str) -> bool {
+fn is_ffi_batch_count_diagnostic(phase: &str) -> bool {
     phase.starts_with("read_batch.asset_type_count.")
         || phase.starts_with("read_batch.payload_kind_count.")
         || phase.starts_with("read_batch.payload_bytes_by_kind.")
@@ -721,20 +721,20 @@ async fn collect_progress(
             ExecutionProgressUpdate::BundleExported { bundle, elapsed_ms } => {
                 collector.bundle_mut(bundle).export_ms = Some(elapsed_ms);
             }
-            ExecutionProgressUpdate::BundleNativeExportPhases { bundle, phase_ms } => {
-                collector.bundle_mut(bundle).native_phase_ms = phase_ms.into_iter().collect();
+            ExecutionProgressUpdate::BundleFfiExportPhases { bundle, phase_ms } => {
+                collector.bundle_mut(bundle).ffi_phase_ms = phase_ms.into_iter().collect();
             }
-            ExecutionProgressUpdate::BundleNativeSkippedObjectReads { bundle, count } => {
-                collector.bundle_mut(bundle).native_skipped_object_reads += count;
+            ExecutionProgressUpdate::BundleFfiSkippedObjectReads { bundle, count } => {
+                collector.bundle_mut(bundle).ffi_skipped_object_reads += count;
             }
-            ExecutionProgressUpdate::BundleNativeObjectReadPlan { bundle, plan } => {
-                collector.bundle_mut(bundle).native_object_read_plan = plan;
+            ExecutionProgressUpdate::BundleFfiObjectReadPlan { bundle, plan } => {
+                collector.bundle_mut(bundle).ffi_object_read_plan = plan;
             }
             ExecutionProgressUpdate::SchedulerTelemetry { bundle, phase_ms } => {
                 if let Some(bundle) = bundle {
                     let timing = collector.bundle_mut(bundle);
                     for (phase, value) in phase_ms {
-                        let entry = timing.native_phase_ms.entry(phase).or_default();
+                        let entry = timing.ffi_phase_ms.entry(phase).or_default();
                         *entry = (*entry).max(value);
                     }
                 }
@@ -782,10 +782,7 @@ async fn collect_progress(
     collector
 }
 
-fn add_native_object_read_plan(
-    acc: &mut NativeObjectReadPlanStats,
-    plan: &NativeObjectReadPlanStats,
-) {
+fn add_ffi_object_read_plan(acc: &mut NativeObjectReadPlanStats, plan: &NativeObjectReadPlanStats) {
     acc.inspected_objects += plan.inspected_objects;
     acc.planned_objects += plan.planned_objects;
     acc.readable_objects += plan.readable_objects;

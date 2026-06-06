@@ -474,38 +474,38 @@ async fn progress_consumer(
                         format!("exported bundle `{bundle}` in {elapsed_ms} ms"),
                     );
                 }
-                ExecutionProgressUpdate::BundleNativeExportPhases { bundle, phase_ms } => {
+                ExecutionProgressUpdate::BundleFfiExportPhases { bundle, phase_ms } => {
                     tracing::debug!(
                         job_id = %id,
                         region = %job.region,
                         bundle = %bundle,
-                        phases = %format_native_export_phases(&phase_ms),
-                        "native export phases"
+                        phases = %format_ffi_export_phases(&phase_ms),
+                        "ffi export phases"
                     );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
                         format!(
-                            "native export phases for `{bundle}`: {}",
-                            format_native_export_phases(&phase_ms)
+                            "ffi export phases for `{bundle}`: {}",
+                            format_ffi_export_phases(&phase_ms)
                         ),
                     );
                 }
-                ExecutionProgressUpdate::BundleNativeSkippedObjectReads { bundle, count } => {
+                ExecutionProgressUpdate::BundleFfiSkippedObjectReads { bundle, count } => {
                     tracing::debug!(
                         job_id = %id,
                         region = %job.region,
                         bundle = %bundle,
                         count,
-                        "native skipped object reads"
+                        "ffi skipped object reads"
                     );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
-                        format!("native skipped {count} object read(s) for `{bundle}`"),
+                        format!("ffi skipped {count} object read(s) for `{bundle}`"),
                     );
                 }
-                ExecutionProgressUpdate::BundleNativeObjectReadPlan { bundle, plan } => {
+                ExecutionProgressUpdate::BundleFfiObjectReadPlan { bundle, plan } => {
                     tracing::debug!(
                         job_id = %id,
                         region = %job.region,
@@ -515,13 +515,13 @@ async fn progress_consumer(
                         skipped = plan.skipped_reads,
                         batches = plan.batch_count,
                         payload_bytes = plan.payload_bundle_bytes,
-                        "native object read plan"
+                        "ffi object read plan"
                     );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
                         format!(
-                            "native object reads for `{bundle}`: planned={}, read={}, skipped={}, batches={}, payload={} bytes",
+                            "ffi object reads for `{bundle}`: planned={}, read={}, skipped={}, batches={}, payload={} bytes",
                             plan.planned_objects,
                             plan.successful_reads,
                             plan.skipped_reads,
@@ -604,7 +604,7 @@ async fn progress_consumer(
     }
 }
 
-fn format_native_export_phases(phase_ms: &HashMap<String, u64>) -> String {
+fn format_ffi_export_phases(phase_ms: &HashMap<String, u64>) -> String {
     let mut phases: Vec<_> = phase_ms.iter().collect();
     phases.sort_by_key(|(phase, _)| *phase);
     phases

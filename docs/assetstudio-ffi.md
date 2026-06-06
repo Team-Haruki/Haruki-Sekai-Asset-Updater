@@ -7,7 +7,7 @@ Unity bundle parsing and object payload extraction behind the FFI boundary.
 
 ## Call Modes
 
-The native backend has three call modes:
+The FFI backend has three call modes:
 
 - `direct`: load the NativeAOT library in the current Rust process. This is the
   lowest-latency path for single calls and is what `AssetStudioFfiClient`
@@ -287,16 +287,16 @@ Measured on macOS arm64 with the Rust release test binary and the real
 `extract_unity_asset_bundle` path. Each row is one warmup run plus five measured
 runs; the table reports the measured mean.
 
-| Sample | CLI mean | Native mean | Result |
+| Sample | CLI mean | FFI mean | Result |
 | --- | ---: | ---: | --- |
-| `unityasset_long` | `0.738s` | `0.480s` | native used about `65%` of CLI time |
-| `jacket_s_712` | `0.628s` | `0.332s` | native used about `53%` of CLI time |
+| `unityasset_long` | `0.738s` | `0.480s` | FFI used about `65%` of CLI time |
+| `jacket_s_712` | `0.628s` | `0.332s` | FFI used about `53%` of CLI time |
 
-The native backend helps most on small bundles where CLI process startup is a
+The FFI backend helps most on small bundles where CLI process startup is a
 large part of total latency. Larger exports still benefit, but Rust-side
 post-processing reduces the visible backend delta.
 
-You can repeat a local native-backend run with the Rust benchmark helper. The
+You can repeat a local FFI-backend run with the Rust benchmark helper. The
 helper defaults to the production NativeAOT FFI backend.
 
 ```bash
@@ -309,15 +309,15 @@ cargo run --release --bin assetstudio_bench -- \
 ```
 
 The helper prints JSON with per-backend mean, median, min, max, exported file
-counts, native phase timings, skipped object-read details, and object-read plan
-diagnostics. It also queries typed capabilities before native
+counts, FFI phase timings, skipped object-read details, and object-read plan
+diagnostics. It also queries typed capabilities before FFI
 benchmarking so ABI loading failures are separated from export failures.
 
 For full region-rule benchmarks, use `asset_region_bench`. Keep the production
 default `backends.asset_studio.process_concurrency=0` for shared hosts, but
-`music/short` has recently benchmarked best with `native_process=16` and
-`media_encode=12`; `native_process=20` showed over-concurrency on the same
-machine. The benchmark summary reports effective native process concurrency,
+`music/short` has recently benchmarked best with `ffi_process=16` and
+`media_encode=12`; `ffi_process=20` showed over-concurrency on the same
+machine. The benchmark summary reports effective FFI process concurrency,
 CPU budget, and CPU throttle target percent.
 
 ```bash

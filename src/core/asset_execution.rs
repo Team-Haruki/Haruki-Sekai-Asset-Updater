@@ -165,15 +165,15 @@ pub enum ExecutionProgressUpdate {
         bundle: String,
         elapsed_ms: u128,
     },
-    BundleNativeExportPhases {
+    BundleFfiExportPhases {
         bundle: String,
         phase_ms: HashMap<String, u64>,
     },
-    BundleNativeSkippedObjectReads {
+    BundleFfiSkippedObjectReads {
         bundle: String,
         count: usize,
     },
-    BundleNativeObjectReadPlan {
+    BundleFfiObjectReadPlan {
         bundle: String,
         plan: NativeObjectReadPlanStats,
     },
@@ -851,7 +851,7 @@ impl AssetExecutionContext {
         )
         .await?;
 
-        let mut phase_ms = job.payload_export.native_export_phase_ms;
+        let mut phase_ms = job.payload_export.ffi_export_phase_ms;
         phase_ms.extend(post_process_summary.post_process_phase_ms);
         phase_ms.insert(
             "post_process.queue_wait".to_string(),
@@ -871,27 +871,27 @@ impl AssetExecutionContext {
         if !phase_ms.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleNativeExportPhases {
+                ExecutionProgressUpdate::BundleFfiExportPhases {
                     bundle: job.bundle_path.clone(),
                     phase_ms,
                 },
             );
         }
-        if !job.payload_export.native_skipped_object_reads.is_empty() {
+        if !job.payload_export.ffi_skipped_object_reads.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleNativeSkippedObjectReads {
+                ExecutionProgressUpdate::BundleFfiSkippedObjectReads {
                     bundle: job.bundle_path.clone(),
-                    count: job.payload_export.native_skipped_object_reads.len(),
+                    count: job.payload_export.ffi_skipped_object_reads.len(),
                 },
             );
         }
-        if !job.payload_export.native_object_read_plan.is_empty() {
+        if !job.payload_export.ffi_object_read_plan.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleNativeObjectReadPlan {
+                ExecutionProgressUpdate::BundleFfiObjectReadPlan {
                     bundle: job.bundle_path.clone(),
-                    plan: job.payload_export.native_object_read_plan,
+                    plan: job.payload_export.ffi_object_read_plan,
                 },
             );
         }

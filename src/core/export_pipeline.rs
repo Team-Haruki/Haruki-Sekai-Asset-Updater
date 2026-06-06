@@ -405,10 +405,10 @@ pub struct PostProcessSummary {
     pub export_root: PathBuf,
     pub generated_files: Vec<PathBuf>,
     pub uploaded_files: Vec<PathBuf>,
-    pub native_export_phase_ms: HashMap<String, u64>,
+    pub ffi_export_phase_ms: HashMap<String, u64>,
     pub post_process_phase_ms: HashMap<String, u64>,
-    pub native_skipped_object_reads: Vec<NativeSkippedObjectRead>,
-    pub native_object_read_plan: NativeObjectReadPlanStats,
+    pub ffi_skipped_object_reads: Vec<NativeSkippedObjectRead>,
+    pub ffi_object_read_plan: NativeObjectReadPlanStats,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -418,9 +418,9 @@ pub struct UnityAssetBundlePayloadExport {
     pub native_scoped_post_process: bool,
     pub native_written_files: Vec<PathBuf>,
     pub native_acb_sources: Vec<NativeInMemoryMediaSource>,
-    pub native_export_phase_ms: HashMap<String, u64>,
-    pub native_skipped_object_reads: Vec<NativeSkippedObjectRead>,
-    pub native_object_read_plan: NativeObjectReadPlanStats,
+    pub ffi_export_phase_ms: HashMap<String, u64>,
+    pub ffi_skipped_object_reads: Vec<NativeSkippedObjectRead>,
+    pub ffi_object_read_plan: NativeObjectReadPlanStats,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -586,9 +586,9 @@ pub async fn extract_unity_asset_bundle(
         payload_export.native_acb_sources,
     )
     .await?;
-    summary.native_export_phase_ms = payload_export.native_export_phase_ms;
-    summary.native_skipped_object_reads = payload_export.native_skipped_object_reads;
-    summary.native_object_read_plan = payload_export.native_object_read_plan;
+    summary.ffi_export_phase_ms = payload_export.ffi_export_phase_ms;
+    summary.ffi_skipped_object_reads = payload_export.ffi_skipped_object_reads;
+    summary.ffi_object_read_plan = payload_export.ffi_object_read_plan;
     Ok(summary)
 }
 
@@ -645,9 +645,9 @@ pub async fn export_unity_asset_bundle_payloads(
         native_scoped_post_process: true,
         native_written_files: native_object_summary.written_files,
         native_acb_sources: native_object_summary.acb_sources,
-        native_export_phase_ms: native_object_summary.phase_ms,
-        native_skipped_object_reads: native_object_summary.skipped_object_reads,
-        native_object_read_plan: native_object_summary.object_read_plan,
+        ffi_export_phase_ms: native_object_summary.phase_ms,
+        ffi_skipped_object_reads: native_object_summary.skipped_object_reads,
+        ffi_object_read_plan: native_object_summary.object_read_plan,
     })
 }
 

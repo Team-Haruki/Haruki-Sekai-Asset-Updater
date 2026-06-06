@@ -105,18 +105,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut elapsed_ms = Vec::new();
     let mut exported_files = Vec::new();
-    let mut native_skipped_object_reads = Vec::new();
-    let mut native_skipped_object_read_details = Vec::new();
-    let mut native_object_read_plan = Vec::new();
-    let mut native_phase_ms = Vec::new();
+    let mut ffi_skipped_object_reads = Vec::new();
+    let mut ffi_skipped_object_read_details = Vec::new();
+    let mut ffi_object_read_plan = Vec::new();
+    let mut ffi_phase_ms = Vec::new();
     for _ in 0..args.iterations {
         let result = run_once(&args).await?;
         elapsed_ms.push(result.elapsed_ms);
         exported_files.push(result.exported_files);
-        native_skipped_object_reads.push(result.native_skipped_object_reads);
-        native_skipped_object_read_details.push(result.native_skipped_object_read_details);
-        native_object_read_plan.push(result.native_object_read_plan);
-        native_phase_ms.push(result.native_phase_ms);
+        ffi_skipped_object_reads.push(result.ffi_skipped_object_reads);
+        ffi_skipped_object_read_details.push(result.ffi_skipped_object_read_details);
+        ffi_object_read_plan.push(result.ffi_object_read_plan);
+        ffi_phase_ms.push(result.ffi_phase_ms);
     }
     elapsed_ms.sort_unstable();
     let mean_ms = elapsed_ms.iter().sum::<u128>() as f64 / elapsed_ms.len() as f64;
@@ -135,10 +135,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "min_ms": elapsed_ms[0],
             "max_ms": elapsed_ms[elapsed_ms.len() - 1],
             "exported_files": exported_files,
-            "native_skipped_object_reads": native_skipped_object_reads,
-            "native_skipped_object_read_details": native_skipped_object_read_details,
-            "native_object_read_plan": native_object_read_plan,
-            "native_phase_ms": native_phase_ms,
+            "ffi_skipped_object_reads": ffi_skipped_object_reads,
+            "ffi_skipped_object_read_details": ffi_skipped_object_read_details,
+            "ffi_object_read_plan": ffi_object_read_plan,
+            "ffi_phase_ms": ffi_phase_ms,
         }))?
     );
     Ok(())
@@ -160,10 +160,10 @@ fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 struct RunResult {
     elapsed_ms: u128,
     exported_files: usize,
-    native_skipped_object_reads: usize,
-    native_skipped_object_read_details: sonic_rs::Value,
-    native_object_read_plan: sonic_rs::Value,
-    native_phase_ms: sonic_rs::Value,
+    ffi_skipped_object_reads: usize,
+    ffi_skipped_object_read_details: sonic_rs::Value,
+    ffi_object_read_plan: sonic_rs::Value,
+    ffi_phase_ms: sonic_rs::Value,
 }
 
 async fn run_once(args: &Args) -> Result<RunResult, Box<dyn std::error::Error>> {
@@ -217,18 +217,16 @@ async fn run_once(args: &Args) -> Result<RunResult, Box<dyn std::error::Error>> 
         }
     }
 
-    let mut native_phase_ms = summary.native_export_phase_ms;
-    native_phase_ms.extend(summary.post_process_phase_ms);
+    let mut ffi_phase_ms = summary.ffi_export_phase_ms;
+    ffi_phase_ms.extend(summary.post_process_phase_ms);
 
     Ok(RunResult {
         elapsed_ms,
         exported_files: walk_files(&summary.export_root).len(),
-        native_skipped_object_reads: summary.native_skipped_object_reads.len(),
-        native_skipped_object_read_details: sonic_rs::to_value(
-            &summary.native_skipped_object_reads,
-        )?,
-        native_object_read_plan: sonic_rs::to_value(&summary.native_object_read_plan)?,
-        native_phase_ms: sonic_rs::to_value(&native_phase_ms)?,
+        ffi_skipped_object_reads: summary.ffi_skipped_object_reads.len(),
+        ffi_skipped_object_read_details: sonic_rs::to_value(&summary.ffi_skipped_object_reads)?,
+        ffi_object_read_plan: sonic_rs::to_value(&summary.ffi_object_read_plan)?,
+        ffi_phase_ms: sonic_rs::to_value(&ffi_phase_ms)?,
     })
 }
 

@@ -57,13 +57,13 @@ The bundle cache was prewarmed before backend comparisons.
 | Backend | Concurrency | Project total | Failed |
 | --- | ---: | ---: | ---: |
 | AssetStudio CLI + ffmpeg CLI | CLI baseline | 247.937s | 0 |
-| NativeAOT FFI + media FFI | native_process=32 | 115.564s | 0 |
-| NativeAOT FFI + media FFI | native_process=56 | 97.181s | 0 |
-| NativeAOT FFI + media FFI | native_process=64 | 95.393s | 0 |
-| NativeAOT FFI + media FFI | native_process=80 | 95.310s | 0 |
-| NativeAOT FFI + media FFI | native_process=96 | 95.340s | 0 |
+| NativeAOT FFI + media FFI | ffi_process=32 | 115.564s | 0 |
+| NativeAOT FFI + media FFI | ffi_process=56 | 97.181s | 0 |
+| NativeAOT FFI + media FFI | ffi_process=64 | 95.393s | 0 |
+| NativeAOT FFI + media FFI | ffi_process=80 | 95.310s | 0 |
+| NativeAOT FFI + media FFI | ffi_process=96 | 95.340s | 0 |
 
-Observed sweet spot: `native_process=56` to `64`. Higher concurrency saturated
+Observed sweet spot: `ffi_process=56` to `64`. Higher concurrency saturated
 CPU but did not improve total time.
 
 The fastest remote broad-rule result was about 2.60x faster than the dual CLI
@@ -85,7 +85,7 @@ The benchmark used the same broad CN rule set and the same prewarmed cache.
 | Backend | Settings | Project total | Outer real time | Failed | Cache |
 | --- | --- | ---: | ---: | ---: | --- |
 | Prefetch only | download=32 | 115.334s | 116.37s | 0 | miss |
-| NativeAOT FFI + media FFI | native_process=8, media_encode=8, CLI parity | 328.619s | 337.05s | 0 | hit |
+| NativeAOT FFI + media FFI | ffi_process=8, media_encode=8, CLI parity | 328.619s | 337.05s | 0 | hit |
 | AssetStudio CLI + ffmpeg CLI | media_encode=8 | 1112.113s | 1116.66s | 0 | hit |
 
 Local Docker speedup: about 3.38x by project total.
@@ -141,7 +141,7 @@ the dominant speedup. Media FFI still helped, but it was not the main bottleneck
   aligned.
 - `--ffi-cli-parity` is useful when comparing output shape with CLI, but it
   is not the recommended production output mode.
-- On high-core servers, increasing `native_process` too far can raise CPU usage
+- On high-core servers, increasing `ffi_process` too far can raise CPU usage
   without lowering wall time.
 - On constrained Docker allocations, smaller values such as
-  `native_process=8` and `media_encode=8` can be more representative.
+  `ffi_process=8` and `media_encode=8` can be more representative.

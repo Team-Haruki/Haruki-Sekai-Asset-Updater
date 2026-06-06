@@ -172,9 +172,9 @@ Useful signs in benchmark JSONL:
 
 - `bundle_fetch_sources`: confirms cache hit or miss
 - `bundle_worker_wait_ms`: worker pool pressure
-- `bundle_native_call_ms`: NativeAOT call cost
-- `native_object_read_plan`: object count, batch count, payload bytes, failures
-- `native_batch_diagnostics`: payload kinds, asset type counts, payload bytes
+- `bundle_ffi_call_ms`: NativeAOT call cost
+- `ffi_object_read_plan`: object count, batch count, payload bytes, failures
+- `ffi_batch_diagnostics`: payload kinds, asset type counts, payload bytes
 - `post_process_phase_ms`: media and image post-process cost
 
 ## Cleanup
