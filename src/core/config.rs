@@ -29,7 +29,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub logging: LoggingConfig,
     pub execution: ExecutionConfig,
-    pub tools: ToolsConfig,
+    pub backends: BackendsConfig,
+    pub resources: ResourcesConfig,
     pub concurrency: ConcurrencyConfig,
     pub storage: StorageConfig,
     pub git_sync: GitSyncConfig,
@@ -43,7 +44,8 @@ impl Default for AppConfig {
             server: ServerConfig::default(),
             logging: LoggingConfig::default(),
             execution: ExecutionConfig::default(),
-            tools: ToolsConfig::default(),
+            backends: BackendsConfig::default(),
+            resources: ResourcesConfig::default(),
             concurrency: ConcurrencyConfig::default(),
             storage: StorageConfig::default(),
             git_sync: GitSyncConfig::default(),
@@ -125,7 +127,7 @@ impl AppConfig {
                 path: path.clone(),
                 source,
             })?;
-        config.resolve_legacy_env_overrides()?;
+        config.resolve_env_overrides()?;
         config.validate()?;
         Ok(config)
     }
@@ -140,18 +142,18 @@ impl AppConfig {
                 return Err(ConfigError::InvalidRegionName(region_name.clone()));
             }
         }
-        if !(0.0..=1.0).contains(&self.concurrency.cpu_budget_ratio)
-            || self.concurrency.cpu_budget_ratio == 0.0
+        if !(0.0..=1.0).contains(&self.resources.cpu.budget_ratio)
+            || self.resources.cpu.budget_ratio == 0.0
         {
             return Err(ConfigError::InvalidValue {
-                field: "concurrency.cpu_budget_ratio".to_string(),
-                value: self.concurrency.cpu_budget_ratio.to_string(),
+                field: "resources.cpu.budget_ratio".to_string(),
+                value: self.resources.cpu.budget_ratio.to_string(),
                 expected: "a number greater than 0 and less than or equal to 1".to_string(),
             });
         }
-        if self.tools.asset_studio_ffi_read_batch_size == 0 {
+        if self.backends.asset_studio.read_batch_size == 0 {
             return Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_ffi_read_batch_size".to_string(),
+                field: "backends.asset_studio.read_batch_size".to_string(),
                 value: "0".to_string(),
                 expected: "a positive integer".to_string(),
             });
@@ -163,21 +165,28 @@ impl AppConfig {
                 expected: "a positive integer".to_string(),
             });
         }
-        if let Some(image_format) = &self.tools.asset_studio_ffi_image_format {
+        if let Some(image_format) = &self.backends.asset_studio.image_format {
             validate_asset_studio_ffi_image_format(image_format)?;
         }
-        validate_asset_studio_ffi_read_kinds(&self.tools.asset_studio_ffi_read_kinds)?;
-        warn_legacy_backend_options(&self.tools);
+        validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
+        warn_legacy_backend_options(&self.backends.media);
 
         Ok(())
     }
 
     pub fn effective_concurrency(&self) -> ConcurrencyConfig {
-        self.concurrency.effective()
+        self.effective_concurrency_for_cpus(available_cpu_count())
+    }
+
+    pub fn effective_concurrency_for_cpus(&self, cpus: usize) -> ConcurrencyConfig {
+        self.concurrency.effective_for_cpus_with_budget(
+            cpus,
+            self.resources.cpu.effective_budget_for_cpus(cpus),
+        )
     }
 
     pub fn effective_cpu_budget(&self) -> usize {
-        self.concurrency.effective_cpu_budget()
+        self.resources.cpu.effective_budget()
     }
 
     pub fn effective_asset_studio_ffi_process_concurrency(&self) -> usize {
@@ -185,13 +194,13 @@ impl AppConfig {
     }
 
     pub fn effective_asset_studio_ffi_process_concurrency_for_cpus(&self, cpus: usize) -> usize {
-        let configured = self.tools.asset_studio_ffi_process_concurrency;
+        let configured = self.backends.asset_studio.process_concurrency;
         if configured > 0 {
             return configured;
         }
         let cpus = cpus.max(1);
-        let cpu_budget = self.concurrency.effective_cpu_budget_for_cpus(cpus);
-        if self.concurrency.cpu_throttle_enabled {
+        let cpu_budget = self.resources.cpu.effective_budget_for_cpus(cpus);
+        if self.resources.cpu.throttle.enabled {
             return cpus
                 .min(cpu_budget.saturating_mul(2).max(cpu_budget))
                 .max(1);
@@ -206,62 +215,38 @@ impl AppConfig {
             .collect()
     }
 
-    fn resolve_legacy_env_overrides(&mut self) -> Result<(), ConfigError> {
+    fn resolve_env_overrides(&mut self) -> Result<(), ConfigError> {
         if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
-            self.tools.media_backend = value.parse()?;
+            self.backends.media.backend = value.parse()?;
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
-            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
-        ) {
-            self.tools.asset_studio_ffi_library_path = non_empty_option(value);
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH") {
+            self.backends.asset_studio.library_path = non_empty_option(value);
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_CALL_MODE",
-            "HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE",
-        ) {
-            self.tools.asset_studio_ffi_call_mode = value.parse()?;
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE") {
+            self.backends.asset_studio.call_mode = value.parse()?;
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
-            "HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH",
-        ) {
-            self.tools.asset_studio_ffi_worker_path = non_empty_option(value);
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH") {
+            self.backends.asset_studio.worker_path = non_empty_option(value);
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY",
-            "HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY",
-        ) {
-            self.tools.asset_studio_ffi_process_concurrency =
-                parse_usize_env("tools.asset_studio_ffi_process_concurrency", &value)?;
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY") {
+            self.backends.asset_studio.process_concurrency =
+                parse_usize_env("backends.asset_studio.process_concurrency", &value)?;
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS",
-            "HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS",
-        ) {
-            self.tools.asset_studio_ffi_worker_max_calls =
-                parse_usize_env("tools.asset_studio_ffi_worker_max_calls", &value)?;
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS") {
+            self.backends.asset_studio.worker_max_calls =
+                parse_usize_env("backends.asset_studio.worker_max_calls", &value)?;
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE",
-            "HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE",
-        ) {
-            self.tools.asset_studio_ffi_read_batch_size =
-                parse_positive_usize("tools.asset_studio_ffi_read_batch_size", &value)?;
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE") {
+            self.backends.asset_studio.read_batch_size =
+                parse_positive_usize("backends.asset_studio.read_batch_size", &value)?;
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT",
-            "HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT",
-        ) {
-            self.tools.asset_studio_ffi_image_format =
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT") {
+            self.backends.asset_studio.image_format =
                 non_empty_option(normalize_asset_studio_ffi_image_format(&value)?);
         }
-        if let Some(value) = env_var_with_legacy(
-            "HARUKI_ASSET_STUDIO_FFI_CLI_PARITY_MODE",
-            "HARUKI_ASSET_STUDIO_NATIVE_CLI_PARITY_MODE",
-        ) {
-            self.tools.asset_studio_ffi_cli_parity_mode =
-                parse_bool_env("tools.asset_studio_ffi_cli_parity_mode", &value)?;
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_CLI_PARITY_MODE") {
+            self.backends.asset_studio.cli_parity_mode =
+                parse_bool_env("backends.asset_studio.cli_parity_mode", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
             self.concurrency.media_encode =
@@ -271,27 +256,26 @@ impl AppConfig {
             self.concurrency.auto_tune = parse_bool_env("concurrency.auto_tune", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_CPU_BUDGET_AUTO") {
-            self.concurrency.cpu_budget_auto =
-                parse_bool_env("concurrency.cpu_budget_auto", &value)?;
+            self.resources.cpu.budget_auto = parse_bool_env("resources.cpu.budget_auto", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_CPU_BUDGET_RATIO") {
-            self.concurrency.cpu_budget_ratio =
-                parse_cpu_ratio_env("concurrency.cpu_budget_ratio", &value)?;
+            self.resources.cpu.budget_ratio =
+                parse_cpu_ratio_env("resources.cpu.budget_ratio", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_CPU_RESERVED") {
-            self.concurrency.cpu_reserved = parse_usize_env("concurrency.cpu_reserved", &value)?;
+            self.resources.cpu.reserved = parse_usize_env("resources.cpu.reserved", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_ENABLED") {
-            self.concurrency.cpu_throttle_enabled =
-                parse_bool_env("concurrency.cpu_throttle_enabled", &value)?;
+            self.resources.cpu.throttle.enabled =
+                parse_bool_env("resources.cpu.throttle.enabled", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS") {
-            self.concurrency.cpu_throttle_sample_ms =
-                parse_positive_usize("concurrency.cpu_throttle_sample_ms", &value)? as u64;
+            self.resources.cpu.throttle.sample_ms =
+                parse_positive_usize("resources.cpu.throttle.sample_ms", &value)? as u64;
         }
         if let Ok(value) = env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES") {
-            self.execution.max_in_flight_bundle_bytes =
-                parse_usize_env("execution.max_in_flight_bundle_bytes", &value)?;
+            self.resources.memory.max_in_flight_bundle_bytes =
+                parse_usize_env("resources.memory.max_in_flight_bundle_bytes", &value)?;
         }
         resolve_secret_env(
             "git_sync.chart_hashes.password",
@@ -647,10 +631,6 @@ fn non_empty_option(value: String) -> Option<String> {
     }
 }
 
-fn env_var_with_legacy(current: &str, legacy: &str) -> Option<String> {
-    env::var(current).ok().or_else(|| env::var(legacy).ok())
-}
-
 fn parse_positive_usize(field: &str, value: &str) -> Result<usize, ConfigError> {
     let trimmed = value.trim();
     let parsed = trimmed
@@ -703,7 +683,7 @@ fn validate_asset_studio_ffi_image_format(value: &str) -> Result<(), ConfigError
     match value.trim().to_lowercase().as_str() {
         "raw_rgba" => Ok(()),
         other => Err(ConfigError::InvalidValue {
-            field: "tools.asset_studio_ffi_image_format".to_string(),
+            field: "backends.asset_studio.image_format".to_string(),
             value: other.to_string(),
             expected: "raw_rgba".to_string(),
         }),
@@ -716,27 +696,27 @@ fn validate_asset_studio_ffi_read_kinds(
     for (asset_type, kind) in read_kinds {
         if asset_type.trim().is_empty() {
             return Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_ffi_read_kinds".to_string(),
+                field: "backends.asset_studio.read_kinds".to_string(),
                 value: asset_type.clone(),
                 expected: "non-empty AssetStudio type selector".to_string(),
             });
         }
         validate_asset_studio_ffi_read_kind(
-            &format!("tools.asset_studio_ffi_read_kinds.{asset_type}"),
+            &format!("backends.asset_studio.read_kinds.{asset_type}"),
             kind,
         )?;
     }
     Ok(())
 }
 
-fn warn_legacy_backend_options(tools: &ToolsConfig) {
-    match tools.media_backend {
+fn warn_legacy_backend_options(media: &MediaBackendConfig) {
+    match media.backend {
         MediaBackend::Ffi => {}
         MediaBackend::Cli => {
-            tracing::warn!("tools.media_backend=cli is legacy; production should use ffi")
+            tracing::warn!("backends.media.backend=cli is legacy; production should use ffi")
         }
         MediaBackend::Auto => tracing::warn!(
-            "tools.media_backend=auto is legacy fallback mode; production should use ffi"
+            "backends.media.backend=auto is legacy fallback mode; production should use ffi"
         ),
     }
 }
@@ -863,29 +843,32 @@ impl Default for AccessLogConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct BackendsConfig {
+    pub asset_studio: AssetStudioBackendConfig,
+    pub media: MediaBackendConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ToolsConfig {
+pub struct AssetStudioBackendConfig {
+    pub library_path: Option<String>,
+    pub call_mode: AssetStudioFfiCallMode,
+    pub worker_path: Option<String>,
+    pub process_concurrency: usize,
+    pub worker_max_calls: usize,
+    pub read_batch_size: usize,
+    pub image_format: Option<String>,
+    pub read_kinds: BTreeMap<String, String>,
+    pub cli_parity_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MediaBackendConfig {
+    pub backend: MediaBackend,
     pub ffmpeg_path: String,
-    pub media_backend: MediaBackend,
-    #[serde(alias = "asset_studio_native_library_path")]
-    pub asset_studio_ffi_library_path: Option<String>,
-    #[serde(alias = "asset_studio_native_call_mode")]
-    pub asset_studio_ffi_call_mode: AssetStudioFfiCallMode,
-    #[serde(alias = "asset_studio_native_worker_path")]
-    pub asset_studio_ffi_worker_path: Option<String>,
-    #[serde(alias = "asset_studio_native_process_concurrency")]
-    pub asset_studio_ffi_process_concurrency: usize,
-    #[serde(alias = "asset_studio_native_worker_max_calls")]
-    pub asset_studio_ffi_worker_max_calls: usize,
-    #[serde(alias = "asset_studio_native_read_batch_size")]
-    pub asset_studio_ffi_read_batch_size: usize,
-    #[serde(alias = "asset_studio_native_image_format")]
-    pub asset_studio_ffi_image_format: Option<String>,
-    #[serde(alias = "asset_studio_native_read_kinds")]
-    pub asset_studio_ffi_read_kinds: BTreeMap<String, String>,
-    #[serde(alias = "asset_studio_native_cli_parity_mode")]
-    pub asset_studio_ffi_cli_parity_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -906,7 +889,7 @@ impl FromStr for MediaBackend {
             "ffi" => Ok(Self::Ffi),
             "cli" => Ok(Self::Cli),
             other => Err(ConfigError::InvalidValue {
-                field: "tools.media_backend".to_string(),
+                field: "backends.media.backend".to_string(),
                 value: other.to_string(),
                 expected: "auto, ffi, or cli".to_string(),
             }),
@@ -932,7 +915,7 @@ impl FromStr for AssetStudioFfiCallMode {
             "process" => Ok(Self::Process),
             "pool" => Ok(Self::Pool),
             other => Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_ffi_call_mode".to_string(),
+                field: "backends.asset_studio.call_mode".to_string(),
                 value: other.to_string(),
                 expected: "direct, process, or pool".to_string(),
             }),
@@ -988,20 +971,27 @@ impl Default for RetryConfig {
     }
 }
 
-impl Default for ToolsConfig {
+impl Default for AssetStudioBackendConfig {
     fn default() -> Self {
         Self {
+            library_path: None,
+            call_mode: AssetStudioFfiCallMode::Pool,
+            worker_path: None,
+            process_concurrency: 0,
+            worker_max_calls: 256,
+            read_batch_size: 32,
+            image_format: None,
+            read_kinds: BTreeMap::new(),
+            cli_parity_mode: false,
+        }
+    }
+}
+
+impl Default for MediaBackendConfig {
+    fn default() -> Self {
+        Self {
+            backend: MediaBackend::Ffi,
             ffmpeg_path: "ffmpeg".to_string(),
-            media_backend: MediaBackend::Ffi,
-            asset_studio_ffi_library_path: None,
-            asset_studio_ffi_call_mode: AssetStudioFfiCallMode::Pool,
-            asset_studio_ffi_worker_path: None,
-            asset_studio_ffi_process_concurrency: 0,
-            asset_studio_ffi_worker_max_calls: 256,
-            asset_studio_ffi_read_batch_size: 32,
-            asset_studio_ffi_image_format: None,
-            asset_studio_ffi_read_kinds: BTreeMap::new(),
-            asset_studio_ffi_cli_parity_mode: false,
         }
     }
 }
@@ -1010,11 +1000,6 @@ impl Default for ToolsConfig {
 #[serde(default)]
 pub struct ConcurrencyConfig {
     pub auto_tune: bool,
-    pub cpu_budget_auto: bool,
-    pub cpu_budget_ratio: f64,
-    pub cpu_reserved: usize,
-    pub cpu_throttle_enabled: bool,
-    pub cpu_throttle_sample_ms: u64,
     pub download: usize,
     pub upload: usize,
     pub acb: usize,
@@ -1028,11 +1013,6 @@ impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
             auto_tune: false,
-            cpu_budget_auto: true,
-            cpu_budget_ratio: 0.75,
-            cpu_reserved: 1,
-            cpu_throttle_enabled: false,
-            cpu_throttle_sample_ms: 250,
             download: 4,
             upload: 4,
             acb: 8,
@@ -1053,18 +1033,20 @@ impl ConcurrencyConfig {
     }
 
     pub fn effective_for_cpus(&self, cpus: usize) -> Self {
+        let cpu_budget = ResourcesConfig::default()
+            .cpu
+            .effective_budget_for_cpus(cpus.max(1));
+        self.effective_for_cpus_with_budget(cpus, cpu_budget)
+    }
+
+    pub fn effective_for_cpus_with_budget(&self, cpus: usize, cpu_budget: usize) -> Self {
         if !self.auto_tune {
             return self.clone();
         }
         let cpus = cpus.max(1);
-        let cpu_budget = self.effective_cpu_budget_for_cpus(cpus);
+        let cpu_budget = cpu_budget.max(1);
         Self {
             auto_tune: true,
-            cpu_budget_auto: self.cpu_budget_auto,
-            cpu_budget_ratio: self.cpu_budget_ratio,
-            cpu_reserved: self.cpu_reserved,
-            cpu_throttle_enabled: self.cpu_throttle_enabled,
-            cpu_throttle_sample_ms: self.cpu_throttle_sample_ms,
             download: self.download.min(cpus.saturating_mul(2).max(2)).max(1),
             upload: self.upload.min(cpus.max(2)).max(1),
             acb: self.acb.min(cpus.max(2)).min(cpu_budget).max(1),
@@ -1082,20 +1064,71 @@ impl ConcurrencyConfig {
             images: self.images.min(cpus.max(2)).min(cpu_budget).max(1),
         }
     }
+}
 
-    pub fn effective_cpu_budget(&self) -> usize {
-        self.effective_cpu_budget_for_cpus(available_cpu_count())
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ResourcesConfig {
+    pub cpu: CpuResourceConfig,
+    pub memory: MemoryResourceConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CpuResourceConfig {
+    pub budget_auto: bool,
+    pub budget_ratio: f64,
+    pub reserved: usize,
+    pub throttle: CpuThrottleConfig,
+}
+
+impl Default for CpuResourceConfig {
+    fn default() -> Self {
+        Self {
+            budget_auto: true,
+            budget_ratio: 0.75,
+            reserved: 1,
+            throttle: CpuThrottleConfig::default(),
+        }
+    }
+}
+
+impl CpuResourceConfig {
+    pub fn effective_budget(&self) -> usize {
+        self.effective_budget_for_cpus(available_cpu_count())
     }
 
-    pub fn effective_cpu_budget_for_cpus(&self, cpus: usize) -> usize {
+    pub fn effective_budget_for_cpus(&self, cpus: usize) -> usize {
         let cpus = cpus.max(1);
-        if !self.cpu_budget_auto {
+        if !self.budget_auto {
             return cpus;
         }
-        ((cpus as f64 * self.cpu_budget_ratio).floor() as usize)
-            .saturating_sub(self.cpu_reserved)
+        ((cpus as f64 * self.budget_ratio).floor() as usize)
+            .saturating_sub(self.reserved)
             .max(1)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CpuThrottleConfig {
+    pub enabled: bool,
+    pub sample_ms: u64,
+}
+
+impl Default for CpuThrottleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sample_ms: 250,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MemoryResourceConfig {
+    pub max_in_flight_bundle_bytes: usize,
 }
 
 fn available_cpu_count() -> usize {
@@ -1513,125 +1546,72 @@ regions:
 
     #[test]
     fn asset_studio_and_media_default_to_ffi() {
-        let tools = AppConfig::default().tools;
+        let config = AppConfig::default();
+        let asset_studio = &config.backends.asset_studio;
         assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
         assert_eq!(
             AssetStudioFfiCallMode::default(),
             AssetStudioFfiCallMode::Pool
         );
-        assert_eq!(tools.media_backend, MediaBackend::Ffi);
-        assert_eq!(
-            tools.asset_studio_ffi_call_mode,
-            AssetStudioFfiCallMode::Pool
-        );
-        assert_eq!(tools.asset_studio_ffi_process_concurrency, 0);
-        assert_eq!(tools.asset_studio_ffi_worker_max_calls, 256);
-        assert_eq!(tools.asset_studio_ffi_read_batch_size, 32);
-        assert_eq!(tools.asset_studio_ffi_image_format, None);
-        assert!(tools.asset_studio_ffi_read_kinds.is_empty());
-        assert_eq!(AppConfig::default().concurrency.images, 4);
-        assert_eq!(AppConfig::default().concurrency.media_encode, 12);
-        assert!(!AppConfig::default().concurrency.auto_tune);
-        assert!(AppConfig::default().concurrency.cpu_budget_auto);
-        assert_eq!(AppConfig::default().concurrency.cpu_budget_ratio, 0.75);
-        assert_eq!(AppConfig::default().concurrency.cpu_reserved, 1);
-        assert!(!AppConfig::default().concurrency.cpu_throttle_enabled);
-        assert_eq!(AppConfig::default().concurrency.cpu_throttle_sample_ms, 250);
+        assert_eq!(config.backends.media.backend, MediaBackend::Ffi);
+        assert_eq!(asset_studio.call_mode, AssetStudioFfiCallMode::Pool);
+        assert_eq!(asset_studio.process_concurrency, 0);
+        assert_eq!(asset_studio.worker_max_calls, 256);
+        assert_eq!(asset_studio.read_batch_size, 32);
+        assert_eq!(asset_studio.image_format, None);
+        assert!(asset_studio.read_kinds.is_empty());
+        assert_eq!(config.concurrency.images, 4);
+        assert_eq!(config.concurrency.media_encode, 12);
+        assert!(!config.concurrency.auto_tune);
+        assert!(config.resources.cpu.budget_auto);
+        assert_eq!(config.resources.cpu.budget_ratio, 0.75);
+        assert_eq!(config.resources.cpu.reserved, 1);
+        assert!(!config.resources.cpu.throttle.enabled);
+        assert_eq!(config.resources.cpu.throttle.sample_ms, 250);
     }
 
     #[test]
     fn parses_asset_studio_ffi_options() {
         let yaml = r#"
-media_backend: ffi
-asset_studio_ffi_library_path: /tmp/libHarukiAssetStudioFFI.so
-asset_studio_ffi_call_mode: process
-asset_studio_ffi_worker_path: /tmp/assetstudio-ffi-worker
-asset_studio_ffi_process_concurrency: 6
-asset_studio_ffi_worker_max_calls: 128
-asset_studio_ffi_read_batch_size: 16
-asset_studio_ffi_image_format: raw_rgba
-asset_studio_ffi_read_kinds:
-  Sprite: image
-  Animator: fbx
-  all: typetree_json
+media:
+  backend: ffi
+  ffmpeg_path: ffmpeg
+asset_studio:
+  library_path: /tmp/libHarukiAssetStudioFFI.so
+  call_mode: process
+  worker_path: /tmp/assetstudio-ffi-worker
+  process_concurrency: 6
+  worker_max_calls: 128
+  read_batch_size: 16
+  image_format: raw_rgba
+  read_kinds:
+    Sprite: image
+    Animator: fbx
+    all: typetree_json
 "#;
-        let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
-        assert_eq!(tools.media_backend, MediaBackend::Ffi);
+        let backends: BackendsConfig = yaml_serde::from_str(yaml).unwrap();
+        let asset_studio = &backends.asset_studio;
+        assert_eq!(backends.media.backend, MediaBackend::Ffi);
         assert_eq!(
-            tools.asset_studio_ffi_library_path.as_deref(),
+            asset_studio.library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
         );
+        assert_eq!(asset_studio.call_mode, AssetStudioFfiCallMode::Process);
         assert_eq!(
-            tools.asset_studio_ffi_call_mode,
-            AssetStudioFfiCallMode::Process
-        );
-        assert_eq!(
-            tools.asset_studio_ffi_worker_path.as_deref(),
+            asset_studio.worker_path.as_deref(),
             Some("/tmp/assetstudio-ffi-worker")
         );
-        assert_eq!(tools.asset_studio_ffi_process_concurrency, 6);
-        assert_eq!(tools.asset_studio_ffi_worker_max_calls, 128);
-        assert_eq!(tools.asset_studio_ffi_read_batch_size, 16);
+        assert_eq!(asset_studio.process_concurrency, 6);
+        assert_eq!(asset_studio.worker_max_calls, 128);
+        assert_eq!(asset_studio.read_batch_size, 16);
+        assert_eq!(asset_studio.image_format.as_deref(), Some("raw_rgba"));
         assert_eq!(
-            tools.asset_studio_ffi_image_format.as_deref(),
-            Some("raw_rgba")
-        );
-        assert_eq!(
-            tools
-                .asset_studio_ffi_read_kinds
-                .get("Animator")
-                .map(String::as_str),
+            asset_studio.read_kinds.get("Animator").map(String::as_str),
             Some("fbx")
         );
         assert_eq!(
-            tools
-                .asset_studio_ffi_read_kinds
-                .get("all")
-                .map(String::as_str),
+            asset_studio.read_kinds.get("all").map(String::as_str),
             Some("typetree_json")
-        );
-    }
-
-    #[test]
-    fn parses_legacy_asset_studio_native_option_aliases() {
-        let yaml = r#"
-asset_studio_native_library_path: /tmp/libHarukiAssetStudioFFI.so
-asset_studio_native_call_mode: direct
-asset_studio_native_worker_path: /tmp/assetstudio-native-worker
-asset_studio_native_process_concurrency: 3
-asset_studio_native_worker_max_calls: 32
-asset_studio_native_read_batch_size: 8
-asset_studio_native_image_format: raw_rgba
-asset_studio_native_read_kinds:
-  Sprite: image
-"#;
-        let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
-
-        assert_eq!(
-            tools.asset_studio_ffi_library_path.as_deref(),
-            Some("/tmp/libHarukiAssetStudioFFI.so")
-        );
-        assert_eq!(
-            tools.asset_studio_ffi_call_mode,
-            AssetStudioFfiCallMode::Direct
-        );
-        assert_eq!(
-            tools.asset_studio_ffi_worker_path.as_deref(),
-            Some("/tmp/assetstudio-native-worker")
-        );
-        assert_eq!(tools.asset_studio_ffi_process_concurrency, 3);
-        assert_eq!(tools.asset_studio_ffi_worker_max_calls, 32);
-        assert_eq!(tools.asset_studio_ffi_read_batch_size, 8);
-        assert_eq!(
-            tools.asset_studio_ffi_image_format.as_deref(),
-            Some("raw_rgba")
-        );
-        assert_eq!(
-            tools
-                .asset_studio_ffi_read_kinds
-                .get("Sprite")
-                .map(String::as_str),
-            Some("image")
         );
     }
 
@@ -1643,7 +1623,7 @@ asset_studio_native_read_kinds:
         assert!(matches!(
             err,
             ConfigError::InvalidValue { field, value, .. }
-                if field == "tools.media_backend" && value == "sidecar"
+                if field == "backends.media.backend" && value == "sidecar"
         ));
     }
 
@@ -1653,14 +1633,14 @@ asset_studio_native_read_kinds:
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_ffi_call_mode" && value == "threaded"
+                if field == "backends.asset_studio.call_mode" && value == "threaded"
         ));
     }
 
     #[test]
     fn accepts_zero_asset_studio_ffi_process_concurrency_as_auto() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_ffi_process_concurrency = 0;
+        config.backends.asset_studio.process_concurrency = 0;
         config.validate().unwrap();
         assert!(config.effective_asset_studio_ffi_process_concurrency() >= 1);
     }
@@ -1668,12 +1648,12 @@ asset_studio_native_read_kinds:
     #[test]
     fn rejects_zero_asset_studio_ffi_read_batch_size() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_ffi_read_batch_size = 0;
+        config.backends.asset_studio.read_batch_size = 0;
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_ffi_read_batch_size" && value == "0"
+                if field == "backends.asset_studio.read_batch_size" && value == "0"
         ));
     }
 
@@ -1692,19 +1672,19 @@ asset_studio_native_read_kinds:
     #[test]
     fn rejects_invalid_asset_studio_ffi_image_format() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_ffi_image_format = Some("gif".to_string());
+        config.backends.asset_studio.image_format = Some("gif".to_string());
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_ffi_image_format" && value == "gif"
+                if field == "backends.asset_studio.image_format" && value == "gif"
         ));
     }
 
     #[test]
     fn accepts_raw_rgba_asset_studio_ffi_image_format() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_ffi_image_format = Some("raw_rgba".to_string());
+        config.backends.asset_studio.image_format = Some("raw_rgba".to_string());
         config.validate().unwrap();
     }
 
@@ -1712,14 +1692,15 @@ asset_studio_native_read_kinds:
     fn rejects_invalid_asset_studio_ffi_read_kind() {
         let mut config = AppConfig::default();
         config
-            .tools
-            .asset_studio_ffi_read_kinds
+            .backends
+            .asset_studio
+            .read_kinds
             .insert("Sprite".to_string(), "thumbnail".to_string());
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_ffi_read_kinds.Sprite" && value == "thumbnail"
+                if field == "backends.asset_studio.read_kinds.Sprite" && value == "thumbnail"
         ));
     }
 
@@ -1773,9 +1754,10 @@ server:
 logging:
   access:
     format: "[${{time}}] ${{status}}"
-tools:
-  asset_studio_ffi_library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH}}"
-  asset_studio_ffi_worker_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH}}"
+backends:
+  asset_studio:
+    library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH}}"
+    worker_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH}}"
 regions:
   jp:
     enabled: true
@@ -1807,11 +1789,11 @@ regions:
             Some("0102030405060708090a0b0c0d0e0f10")
         );
         assert_eq!(
-            config.tools.asset_studio_ffi_library_path.as_deref(),
+            config.backends.asset_studio.library_path.as_deref(),
             Some("/tmp/libassetstudio-native.so")
         );
         assert_eq!(
-            config.tools.asset_studio_ffi_worker_path.as_deref(),
+            config.backends.asset_studio.worker_path.as_deref(),
             Some("/tmp/assetstudio-ffi-worker")
         );
         assert_eq!(config.logging.access.format, "[${time}] ${status}");
@@ -1872,47 +1854,51 @@ regions:
             file,
             r#"
 config_version: 2
-tools:
-  asset_studio_ffi_library_path: /tmp/config-native.so
-  asset_studio_ffi_call_mode: direct
-  asset_studio_ffi_worker_path: /tmp/config-native-worker
-  asset_studio_ffi_process_concurrency: 2
-  asset_studio_ffi_worker_max_calls: 128
-  asset_studio_ffi_read_batch_size: 16
-  asset_studio_ffi_image_format: raw_rgba
+backends:
+  asset_studio:
+    library_path: /tmp/config-native.so
+    call_mode: direct
+    worker_path: /tmp/config-native-worker
+    process_concurrency: 2
+    worker_max_calls: 128
+    read_batch_size: 16
+    image_format: raw_rgba
 "#
         )
         .unwrap();
 
         let config = AppConfig::load_from_path(file.path()).unwrap();
-        assert_eq!(config.tools.media_backend, MediaBackend::Cli);
+        assert_eq!(config.backends.media.backend, MediaBackend::Cli);
         assert_eq!(
-            config.tools.asset_studio_ffi_library_path.as_deref(),
+            config.backends.asset_studio.library_path.as_deref(),
             Some("/tmp/override-native.so")
         );
         assert_eq!(
-            config.tools.asset_studio_ffi_call_mode,
+            config.backends.asset_studio.call_mode,
             AssetStudioFfiCallMode::Process
         );
         assert_eq!(
-            config.tools.asset_studio_ffi_worker_path.as_deref(),
+            config.backends.asset_studio.worker_path.as_deref(),
             Some("/tmp/override-native-worker")
         );
-        assert_eq!(config.tools.asset_studio_ffi_process_concurrency, 7);
-        assert_eq!(config.tools.asset_studio_ffi_worker_max_calls, 64);
-        assert_eq!(config.tools.asset_studio_ffi_read_batch_size, 48);
+        assert_eq!(config.backends.asset_studio.process_concurrency, 7);
+        assert_eq!(config.backends.asset_studio.worker_max_calls, 64);
+        assert_eq!(config.backends.asset_studio.read_batch_size, 48);
         assert_eq!(
-            config.tools.asset_studio_ffi_image_format.as_deref(),
+            config.backends.asset_studio.image_format.as_deref(),
             Some("raw_rgba")
         );
         assert_eq!(config.concurrency.media_encode, 9);
         assert!(config.concurrency.auto_tune);
-        assert!(config.concurrency.cpu_budget_auto);
-        assert_eq!(config.concurrency.cpu_budget_ratio, 0.5);
-        assert_eq!(config.concurrency.cpu_reserved, 2);
-        assert!(config.concurrency.cpu_throttle_enabled);
-        assert_eq!(config.concurrency.cpu_throttle_sample_ms, 500);
-        assert_eq!(config.execution.max_in_flight_bundle_bytes, 1_048_576);
+        assert!(config.resources.cpu.budget_auto);
+        assert_eq!(config.resources.cpu.budget_ratio, 0.5);
+        assert_eq!(config.resources.cpu.reserved, 2);
+        assert!(config.resources.cpu.throttle.enabled);
+        assert_eq!(config.resources.cpu.throttle.sample_ms, 500);
+        assert_eq!(
+            config.resources.memory.max_in_flight_bundle_bytes,
+            1_048_576
+        );
 
         match old_media_backend {
             Some(value) => std::env::set_var("HARUKI_MEDIA_BACKEND", value),
@@ -1981,7 +1967,7 @@ tools:
     }
 
     #[test]
-    fn load_from_path_accepts_legacy_asset_studio_native_env_overrides() {
+    fn load_from_path_ignores_legacy_asset_studio_native_env_overrides() {
         let _env_lock = env_lock();
         let old_current_library = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH").ok();
         let old_current_mode = std::env::var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE").ok();
@@ -2001,21 +1987,22 @@ tools:
             file,
             r#"
 config_version: 2
-tools:
-  asset_studio_ffi_library_path: /tmp/config-ffi.so
-  asset_studio_ffi_call_mode: direct
+backends:
+  asset_studio:
+    library_path: /tmp/config-ffi.so
+    call_mode: direct
 "#
         )
         .unwrap();
 
         let config = AppConfig::load_from_path(file.path()).unwrap();
         assert_eq!(
-            config.tools.asset_studio_ffi_library_path.as_deref(),
-            Some("/tmp/legacy-native.so")
+            config.backends.asset_studio.library_path.as_deref(),
+            Some("/tmp/config-ffi.so")
         );
         assert_eq!(
-            config.tools.asset_studio_ffi_call_mode,
-            AssetStudioFfiCallMode::Process
+            config.backends.asset_studio.call_mode,
+            AssetStudioFfiCallMode::Direct
         );
 
         match old_current_library {
@@ -2140,11 +2127,6 @@ regions:
     fn effective_concurrency_auto_tune_respects_configured_caps() {
         let config = ConcurrencyConfig {
             auto_tune: true,
-            cpu_budget_auto: true,
-            cpu_budget_ratio: 0.75,
-            cpu_reserved: 1,
-            cpu_throttle_enabled: false,
-            cpu_throttle_sample_ms: 250,
             download: 999,
             upload: 999,
             acb: 999,
@@ -2171,22 +2153,22 @@ regions:
     #[test]
     fn effective_cpu_budget_and_native_auto_scale_by_cpu_count() {
         let config = AppConfig::default();
-        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(4), 2);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(4), 2);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(4),
             2
         );
-        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(8), 5);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(8), 5);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(8),
             5
         );
-        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(10), 6);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(10), 6);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(10),
             6
         );
-        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(64), 47);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(64), 47);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(64),
             47
@@ -2196,7 +2178,7 @@ regions:
     #[test]
     fn explicit_native_concurrency_overrides_auto() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_ffi_process_concurrency = 56;
+        config.backends.asset_studio.process_concurrency = 56;
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(8),
             56
@@ -2206,14 +2188,14 @@ regions:
     #[test]
     fn native_auto_oversubscribes_when_cpu_throttle_is_enabled() {
         let mut config = AppConfig::default();
-        config.concurrency.cpu_throttle_enabled = true;
+        config.resources.cpu.throttle.enabled = true;
 
-        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(10), 6);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(10), 6);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(10),
             10
         );
-        assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(64), 47);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(64), 47);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(64),
             64
@@ -2224,12 +2206,12 @@ regions:
     fn rejects_invalid_cpu_budget_ratio() {
         for ratio in [0.0, -0.5, 1.5] {
             let mut config = AppConfig::default();
-            config.concurrency.cpu_budget_ratio = ratio;
+            config.resources.cpu.budget_ratio = ratio;
             let err = config.validate().unwrap_err();
             assert!(matches!(
                 err,
                 ConfigError::InvalidValue { ref field, .. }
-                    if field == "concurrency.cpu_budget_ratio"
+                    if field == "resources.cpu.budget_ratio"
             ));
         }
     }

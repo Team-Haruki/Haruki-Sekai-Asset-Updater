@@ -17,7 +17,7 @@
 - Includes `usmexport`, `usmmeta`, `assetinfo_dump`, and `s3ls` helper CLIs
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and `git2-rs` chart sync
 - Uses a pure Rust WebP encoder for PNG to WebP conversion
-- Uses the double-FFI production path by default: AssetStudio NativeAOT worker
+- Uses the double-FFI production path by default: AssetStudio FFI worker
   pool plus FFmpeg/rsmpeg FFI. FFmpeg CLI remains available as a media
   fallback/test path.
 
@@ -35,10 +35,13 @@
 ## Secret Config
 
 - Sensitive config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
+- The main service only accepts the current v2 config shape. Migrate older
+  config files explicitly with:
+  `cargo run --bin config_migrate -- --input old.yaml --output haruki-asset-configs.yaml --check`.
 - The loader resolves this syntax for:
   `server.auth.bearer_token`,
-  `tools.asset_studio_ffi_library_path`,
-  `tools.asset_studio_ffi_worker_path`,
+  `backends.asset_studio.library_path`,
+  `backends.asset_studio.worker_path`,
   `storage.providers[].access_key`,
   `storage.providers[].secret_key`,
   `git_sync.chart_hashes.password`,
@@ -120,13 +123,13 @@ cargo run --bin usmmeta -- --input ./tests/files/0703.usm
 
 ## Runtime Tuning
 
-- `execution.max_in_flight_bundle_bytes` is a soft memory guard. The default
+- `resources.memory.max_in_flight_bundle_bytes` is a soft memory guard. The default
   `0` disables it. On small Linux hosts, set it to the amount of bundle work the
   process may keep in memory, for example
   `HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES=4294967296`.
-- `concurrency.cpu_budget_auto` and `concurrency.cpu_budget_ratio` size the
+- `resources.cpu.budget_auto` and `resources.cpu.budget_ratio` size the
   CPU-heavy worker pools when auto tuning is enabled.
-- `concurrency.cpu_throttle_enabled` is optional and defaults to `false`. Enable
+- `resources.cpu.throttle.enabled` is optional and defaults to `false`. Enable
   it only when the process should actively wait based on sampled process-tree
   CPU usage; leave it disabled for full-throughput export runs.
 - Normal progress logging emits bundle-level start/completion/failure lines.

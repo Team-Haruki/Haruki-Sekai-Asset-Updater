@@ -8,10 +8,12 @@ pipeline.
 Recommended production settings:
 
 ```yaml
-tools:
-  asset_studio_ffi_call_mode: "pool"
-  asset_studio_ffi_read_batch_size: 32
-  media_backend: "ffi"
+backends:
+  media:
+    backend: "ffi"
+  asset_studio:
+    call_mode: "pool"
+    read_batch_size: 32
 ```
 
 The Rust service must be built with:
@@ -58,16 +60,16 @@ export HARUKI_CPU_RESERVED=1
 
 General guidance:
 
-- Keep `asset_studio_ffi_read_batch_size=32` as the default.
+- Keep `backends.asset_studio.read_batch_size=32` as the default.
 - Try `64` for image-heavy rules such as `character/member`.
-- Use `asset_studio_ffi_process_concurrency=0` for the shared-host default.
+- Use `backends.asset_studio.process_concurrency=0` for the shared-host default.
   Without CPU throttle it auto-scales to the CPU budget. With CPU throttle
   enabled it can oversubscribe workers up to the CPU count while the throttle
-  controls actual process CPU. `cpu_budget_ratio` and `cpu_reserved` remain the
-  single CPU budget control.
-- Enable `concurrency.cpu_throttle_enabled` when the process tree itself should
+  controls actual process CPU. `resources.cpu.budget_ratio` and
+  `resources.cpu.reserved` remain the single CPU budget control.
+- Enable `resources.cpu.throttle.enabled` when the process tree itself should
   stay near the same CPU budget. This throttle samples the updater and its
-  native workers, then delays new CPU-heavy permits while usage is above
+  ffi workers, then delays new CPU-heavy permits while usage is above
   `effective_cpu_budget * 100%`.
   Explicit values are still useful for benchmark-only runs; high-core servers
   have tested well around `56` to `64` for broad CN workloads.
@@ -158,7 +160,7 @@ export RUST_BACKTRACE=1
 export RUST_LOG=info
 ```
 
-NativeAOT worker and C# adapter:
+AssetStudio FFI worker and C# adapter:
 
 ```bash
 export HARUKI_ASSET_STUDIO_FFI_TRACE=1

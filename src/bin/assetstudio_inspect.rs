@@ -7,9 +7,9 @@ use haruki_sekai_asset_updater::core::assetstudio_ffi::{
 
 #[derive(Debug, Parser)]
 #[command(name = "assetstudio_inspect")]
-#[command(about = "Inspect Unity assets through the AssetStudio NativeAOT FFI adapter")]
+#[command(about = "Inspect Unity assets through the AssetStudio FFI adapter")]
 struct Args {
-    #[arg(long = "ffi-library", alias = "native-library")]
+    #[arg(long = "ffi-library")]
     ffi_library: Option<String>,
     #[arg(long)]
     bundle: PathBuf,
@@ -43,7 +43,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ffi_library
         .or_else(|| {
             std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH")
-                .or_else(|_| std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"))
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
@@ -54,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !args.skip_version_check {
         let version = client.version()?;
         eprintln!(
-            "native adapter: adapter_version={:?} assetstudio_cli_version={:?}",
+            "ffi adapter: adapter_version={:?} assetstudio_cli_version={:?}",
             version.adapter_version, version.assetstudio_cli_version
         );
     }

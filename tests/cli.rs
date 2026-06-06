@@ -118,3 +118,47 @@ fn usmexport_extracts_sample_and_converts_with_fake_ffmpeg_if_present() {
     assert!(stdout.contains("extracted "));
     assert!(stdout.contains("converted "));
 }
+
+#[test]
+fn config_migrate_rewrites_legacy_config_shape() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("old.yaml");
+    let output_path = dir.path().join("new.yaml");
+    fs::write(
+        &input,
+        r#"
+config_version: 2
+tools:
+  media_backend: ffi
+  ffmpeg_path: ffmpeg
+  asset_studio_native_library_path: /tmp/libHarukiAssetStudioFFI.dylib
+  asset_studio_native_call_mode: pool
+concurrency:
+  download: 4
+  cpu_budget_ratio: 0.5
+execution:
+  max_in_flight_bundle_bytes: 1048576
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_config_migrate"))
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--check")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let migrated = fs::read_to_string(output_path).unwrap();
+    assert!(migrated.contains("backends:"));
+    assert!(migrated.contains("asset_studio:"));
+    assert!(migrated.contains("library_path: /tmp/libHarukiAssetStudioFFI.dylib"));
+    assert!(migrated.contains("resources:"));
+    assert!(migrated.contains("budget_ratio: 0.5"));
+    assert!(migrated.contains("download: 4"));
+    assert!(!migrated.contains("tools:"));
+    assert!(!migrated.contains("asset_studio_native_"));
+}

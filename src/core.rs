@@ -3,6 +3,7 @@ pub mod assetstudio_ffi;
 pub mod cleanup;
 pub mod codec;
 pub mod config;
+pub mod config_migration;
 pub mod download_records;
 pub mod errors;
 pub mod export_pipeline;

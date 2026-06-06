@@ -1,12 +1,12 @@
 # Double FFI Change Log
 
 This document records the main design and implementation changes made while
-moving the updater production path to AssetStudio NativeAOT FFI plus media FFI.
+moving the updater production path to AssetStudio FFI plus media FFI.
 
 ## Direction
 
 The updater now treats Rust as the control plane and keeps Unity object reading
-inside AssetStudio NativeAOT workers.
+inside AssetStudio FFI workers.
 
 Rust owns:
 
@@ -19,7 +19,7 @@ Rust owns:
 - upload and downloaded record state
 - benchmark telemetry and adaptive scheduling
 
-AssetStudio NativeAOT owns:
+AssetStudio FFI owns:
 
 - opening Unity bundles
 - listing parsed objects
@@ -75,7 +75,7 @@ This gives the pipeline:
 - process isolation from AssetStudio static state
 - lower overhead than spawning one worker per call
 - bounded concurrency
-- worker recycling via `asset_studio_ffi_worker_max_calls`
+- worker recycling via `backends.asset_studio.worker_max_calls`
 - per-worker telemetry for call counts, restarts, wait time, and protocol
   errors
 
@@ -84,7 +84,7 @@ but it is not the production default because unrestricted direct concurrency
 previously caused native crashes.
 
 Recent Rust changes also make the server-mode worker reuse a loaded
-`LoadedAssetStudioNativeLibrary` instead of loading the shared library for every
+`LoadedAssetStudioFfiLibrary` instead of loading the shared library for every
 request.
 
 ## Object Output
@@ -105,7 +105,7 @@ Default read kinds are type aware:
 - `Animator`: `fbx`
 
 Rust can override read behavior with
-`tools.asset_studio_ffi_read_kinds`.
+`backends.asset_studio.read_kinds`.
 
 Output path behavior:
 
@@ -149,7 +149,7 @@ run time. Ubuntu 26.04 provides matching packages such as `libavcodec62`,
 - `--prefetch-only`
 - `--bundle-cache-dir`
 - `--ffi-cli-parity`
-- native worker pool controls
+- ffi worker pool controls
 - media/backend controls
 - JSONL output with detailed phase and bundle telemetry
 

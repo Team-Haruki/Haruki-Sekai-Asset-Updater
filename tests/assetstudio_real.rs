@@ -186,10 +186,15 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
     region.export.hca.decode = true;
 
     let config = AppConfig {
-        tools: haruki_sekai_asset_updater::core::config::ToolsConfig {
-            ffmpeg_path: "ffmpeg".to_string(),
-            asset_studio_ffi_library_path: Some(asset_studio_ffi_library_path),
-            ..haruki_sekai_asset_updater::core::config::ToolsConfig::default()
+        backends: haruki_sekai_asset_updater::core::config::BackendsConfig {
+            media: haruki_sekai_asset_updater::core::config::MediaBackendConfig {
+                ffmpeg_path: "ffmpeg".to_string(),
+                ..haruki_sekai_asset_updater::core::config::MediaBackendConfig::default()
+            },
+            asset_studio: haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig {
+                library_path: Some(asset_studio_ffi_library_path),
+                ..haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default()
+            },
         },
         storage: StorageConfig {
             providers: Vec::new(),

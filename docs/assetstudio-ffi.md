@@ -1,4 +1,4 @@
-# AssetStudio NativeAOT FFI
+# AssetStudio FFI
 
 This branch adds a NativeAOT backend for AssetStudio. The production pipeline
 now defaults to the AssetStudioFFI object flow plus media FFI. Rust controls
@@ -24,28 +24,28 @@ The native backend has three call modes:
 
 Image reads use the raw RGBA IR by default. Rust encodes the final PNG/WebP
 outputs, which avoids the NativeAOT + ImageSharp PNG encoder path and keeps
-alpha handling consistent. `tools.asset_studio_ffi_image_format` is retained
+alpha handling consistent. `backends.asset_studio.image_format` is retained
 only as an override surface and currently accepts `raw_rgba`.
 
-Configure it with `tools.asset_studio_ffi_call_mode` or
+Configure it with `backends.asset_studio.call_mode` or
 `HARUKI_ASSET_STUDIO_FFI_CALL_MODE`. Set
-`tools.asset_studio_ffi_worker_path` or
+`backends.asset_studio.worker_path` or
 `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` only when the worker binary is not next
 to the current executable. Process and pool mode are limited by
-`tools.asset_studio_ffi_process_concurrency` or
+`backends.asset_studio.process_concurrency` or
 `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`; the default call mode is
 `pool`, and the default process concurrency is `0`, meaning auto. Without CPU
 throttle, auto uses the shared CPU budget as a hard worker cap. With CPU
 throttle enabled, auto intentionally oversubscribes workers up to the CPU count
 so the throttle can keep actual process CPU near the same budget. This keeps
-NativeAOT workers isolated while avoiding the SIGSEGVs seen with unrestricted
+AssetStudio FFI workers isolated while avoiding the SIGSEGVs seen with unrestricted
 in-process parallel exports.
 
 The CPU performance control is intentionally centered on the shared CPU budget:
-`concurrency.cpu_budget_ratio` and `concurrency.cpu_reserved` determine the
+`resources.cpu.budget_ratio` and `resources.cpu.reserved` determine the
 effective budget. For shared machines that need this program itself to stay near
-the budget, enable `concurrency.cpu_throttle_enabled`; the throttle samples this
-process tree, including native workers, and delays new CPU-heavy work when
+the budget, enable `resources.cpu.throttle.enabled`; the throttle samples this
+process tree, including ffi workers, and delays new CPU-heavy work when
 sampled usage is above `effective_cpu_budget * 100%`.
 
 The AssetStudioFFI boundary uses typed C structs. Rust loads and validates the
@@ -69,18 +69,20 @@ struct size or version mismatch is treated as a load-time failure.
 The production path now prefers the double-FFI object flow:
 
 ```yaml
-tools:
-  asset_studio_ffi_call_mode: "pool"
-  asset_studio_ffi_read_batch_size: 32
-  asset_studio_ffi_read_kinds:
-    Texture2D: image
-    Sprite: image
-    TextAsset: text_bytes
-    MonoBehaviour: typetree_json
-    AudioClip: audio
-    Animator: fbx
-    all: typetree_json
-  media_backend: "ffi"
+backends:
+  media:
+    backend: "ffi"
+  asset_studio:
+    call_mode: "pool"
+    read_batch_size: 32
+    read_kinds:
+      Texture2D: image
+      Sprite: image
+      TextAsset: text_bytes
+      MonoBehaviour: typetree_json
+      AudioClip: audio
+      Animator: fbx
+      all: typetree_json
 ```
 
 NativeAOT export-mode entry points have been removed in favor of object-level
@@ -145,7 +147,7 @@ cargo run --bin assetstudio_inspect -- \
 
 The command prints pretty JSON using `sonic-rs`.
 
-Library callers can use the same native adapter through the Rust client API:
+Library callers can use the same ffi adapter through the Rust client API:
 
 ```rust
 use haruki_sekai_asset_updater::{
@@ -210,14 +212,14 @@ player resource files. `context_read_object` accepts:
 - `kind`: `auto`, `raw`, `typetree_json`, `image`, `image_archive`,
   `audio`, `video`, `font`, `shader`, `text`, `text_bytes`, `mesh`, `obj`,
   `animator`, or `fbx`. Rust chooses defaults by AssetStudio type and can
-  override them with `tools.asset_studio_ffi_read_kinds`.
+  override them with `backends.asset_studio.read_kinds`.
 - `image_format`: currently `raw_rgba`; Rust encodes final image files.
 
 The typed response contains object metadata, payload kind, payload length,
 warnings, timing, and errors. Object bytes are returned through typed payload
 buffers and must be released with `haruki_assetstudio_result_free`. In
 worker-pool mode the Rust worker returns a JSON operation/result frame and a
-binary payload frame over its private process IPC. `tools.asset_studio_ffi_read_batch_size` or
+binary payload frame over its private process IPC. `backends.asset_studio.read_batch_size` or
 `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE` controls how many object reads Rust
 packs into one `context_read_objects` request; the default is `32`.
 Batch responses include diagnostics used by Rust benchmarks:
@@ -312,7 +314,7 @@ diagnostics. It also queries typed capabilities before native
 benchmarking so ABI loading failures are separated from export failures.
 
 For full region-rule benchmarks, use `asset_region_bench`. Keep the production
-default `tools.asset_studio_ffi_process_concurrency=0` for shared hosts, but
+default `backends.asset_studio.process_concurrency=0` for shared hosts, but
 `music/short` has recently benchmarked best with `native_process=16` and
 `media_encode=12`; `native_process=20` showed over-concurrency on the same
 machine. The benchmark summary reports effective native process concurrency,
@@ -332,7 +334,7 @@ cargo run --release --features media-ffi --bin asset_region_bench -- \
 ```
 
 When reading benchmark output, separate bundle active time from queueing:
-`worker_pool.wait` is time spent waiting for a NativeAOT worker,
+`worker_pool.wait` is time spent waiting for a AssetStudio FFI worker,
 `post_process.queue_wait` is time spent waiting for the bundle post-process
 slot, `post_process.hca.media_pool_wait` is time spent waiting for media encode
 capacity, and `post_process.acb.hca_tracks_wall` is the wall time for the

@@ -26,39 +26,46 @@ execution:
   timeout_seconds: 300
   allow_cancel: true
   asset_bundle_cache_dir: "" # optional benchmark/debug raw bundle cache
-  max_in_flight_bundle_bytes: 0 # 0 disables the soft memory guard; try 4294967296 on small Linux hosts
   batch_save_size: 50
   retry:
     attempts: 4
     initial_backoff_ms: 1000
     max_backoff_ms: 4000
 
-tools:
-  ffmpeg_path: "ffmpeg"
-  media_backend: "ffi" # ffi preferred; auto | cli are fallback/test paths
-  asset_studio_ffi_library_path: ""
-  asset_studio_ffi_call_mode: "pool" # direct | process | pool
-  asset_studio_ffi_worker_path: ""
-  asset_studio_ffi_process_concurrency: 0 # 0 = auto: CPU budget, or CPU-count oversubscription when CPU throttle is enabled
-  asset_studio_ffi_worker_max_calls: 256 # 0 disables recycling
-  asset_studio_ffi_read_batch_size: 32 # context_read_objects chunk size
-  asset_studio_ffi_image_format: "" # default raw_rgba; AssetStudioFFI image reads only support raw_rgba
-  asset_studio_ffi_read_kinds: # optional per AssetStudio type selector
-    Texture2D: image
-    Sprite: image
-    TextAsset: text_bytes
-    MonoBehaviour: typetree_json
-    AudioClip: audio
-    Animator: fbx
-    all: typetree_json
+backends:
+  media:
+    backend: "ffi" # ffi preferred; auto | cli are fallback/test paths
+    ffmpeg_path: "ffmpeg"
+  asset_studio:
+    library_path: ""
+    call_mode: "pool" # direct | process | pool
+    worker_path: ""
+    process_concurrency: 0 # 0 = auto: CPU budget, or CPU-count oversubscription when CPU throttle is enabled
+    worker_max_calls: 256 # 0 disables recycling
+    read_batch_size: 32 # context_read_objects chunk size
+    image_format: "" # default raw_rgba; AssetStudioFFI image reads only support raw_rgba
+    read_kinds: # optional per AssetStudio type selector
+      Texture2D: image
+      Sprite: image
+      TextAsset: text_bytes
+      MonoBehaviour: typetree_json
+      AudioClip: audio
+      Animator: fbx
+      all: typetree_json
+
+resources:
+  cpu:
+    budget_auto: true
+    budget_ratio: 0.75
+    reserved: 1
+    throttle:
+      enabled: false # when true, gate CPU-heavy work by this process tree's sampled CPU budget
+      sample_ms: 250
+  memory:
+    max_in_flight_bundle_bytes: 0 # 0 disables the soft memory guard; try 4294967296 on small Linux hosts
 
 concurrency:
   auto_tune: false # when true, values below are treated as caps and scaled to CPU count
-  cpu_budget_auto: true
-  cpu_budget_ratio: 0.75
-  cpu_reserved: 1
-  cpu_throttle_enabled: false # when true, gate CPU-heavy work by this process tree's sampled CPU budget
-  cpu_throttle_sample_ms: 250
   download: 4
   upload: 4
   acb: 8

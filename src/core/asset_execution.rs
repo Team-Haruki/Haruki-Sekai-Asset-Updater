@@ -1397,7 +1397,7 @@ impl BundleMemoryLimiter {
     const UNIT_BYTES: usize = 1024 * 1024;
 
     fn from_config(app_config: &AppConfig) -> Self {
-        let limit_bytes = app_config.execution.max_in_flight_bundle_bytes;
+        let limit_bytes = app_config.resources.memory.max_in_flight_bundle_bytes;
         if limit_bytes == 0 {
             return Self {
                 semaphore: None,
@@ -1830,9 +1830,12 @@ mod tests {
         regions.insert("jp".to_string(), region.clone());
         let config = AppConfig {
             regions,
-            tools: crate::core::config::ToolsConfig {
-                ffmpeg_path: "ffmpeg".to_string(),
-                ..crate::core::config::ToolsConfig::default()
+            backends: crate::core::config::BackendsConfig {
+                media: crate::core::config::MediaBackendConfig {
+                    ffmpeg_path: "ffmpeg".to_string(),
+                    ..crate::core::config::MediaBackendConfig::default()
+                },
+                ..crate::core::config::BackendsConfig::default()
             },
             git_sync: GitSyncConfig {
                 chart_hashes: ChartHashConfig::default(),
@@ -1983,9 +1986,12 @@ mod tests {
         regions.insert("cn".to_string(), region.clone());
         let config = AppConfig {
             regions,
-            tools: crate::core::config::ToolsConfig {
-                ffmpeg_path: "ffmpeg".to_string(),
-                ..crate::core::config::ToolsConfig::default()
+            backends: crate::core::config::BackendsConfig {
+                media: crate::core::config::MediaBackendConfig {
+                    ffmpeg_path: "ffmpeg".to_string(),
+                    ..crate::core::config::MediaBackendConfig::default()
+                },
+                ..crate::core::config::BackendsConfig::default()
             },
             git_sync: GitSyncConfig {
                 chart_hashes: ChartHashConfig::default(),
@@ -2129,7 +2135,6 @@ mod tests {
                 },
                 ..crate::core::config::ExecutionConfig::default()
             },
-            tools: crate::core::config::ToolsConfig::default(),
             ..AppConfig::default()
         };
         let request = AssetUpdateRequest {

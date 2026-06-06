@@ -7,10 +7,10 @@ The Rust v2 service keeps YAML but reorganizes the file around responsibilities 
 | v1 key | v2 key | Notes |
 | --- | --- | --- |
 | `proxy` | `server.proxy` | Moves under server/network concerns. |
-| `concurrents` | `concurrency` | Field names become shorter and consistent. |
+| `concurrents` | `concurrency` + `resources.cpu` | Worker counts stay under `concurrency`; CPU budget/throttle lives under `resources.cpu`. |
 | `sekai_music_chart_hash_collection` | `git_sync.chart_hashes` | Grouped with Git-related behavior. |
 | `backend` | `server` + `logging` | Network binding and logging split apart. |
-| `tool` | `tools` | Pure rename to pluralized section. |
+| `tool` | `backends` | External backend settings now live under media and AssetStudio FFI backend groups. |
 | `profiles` | `regions.<name>.provider.profile_hashes` | Provider-specific hashes live with the region that uses them. |
 | `servers` | `regions` | Region definitions become the main config body. |
 | `remote_storages` | `storage.providers` | Storage grouped as a dedicated section. |
@@ -32,12 +32,22 @@ The Rust v2 service keeps YAML but reorganizes the file around responsibilities 
 | `backend.access_log` | `logging.access.format` | Pure move. |
 | `backend.access_log_path` | `logging.access.file` | Pure move. |
 
-## Tools, storage, and Git sync
+## Backends, storage, and Git sync
 
 | v1 key | v2 key | Notes |
 | --- | --- | --- |
-| `tool.ffmpeg_path` | `tools.ffmpeg_path` | Pure move. |
-| `tool.asset_studio_cli_path` | `tools.asset_studio_cli_path` | Pure move. |
+| `tool.ffmpeg_path` | `backends.media.ffmpeg_path` | Pure move. |
+| `tool.media_backend` | `backends.media.backend` | `ffi` is the default; `cli`/`auto` remain available for platform fallback and tests. |
+| `tool.asset_studio_cli_path` | removed | Rust production export uses AssetStudio FFI, not the old CLI path. |
+| `tools.asset_studio_ffi_library_path` | `backends.asset_studio.library_path` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_call_mode` | `backends.asset_studio.call_mode` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_worker_path` | `backends.asset_studio.worker_path` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_process_concurrency` | `backends.asset_studio.process_concurrency` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_worker_max_calls` | `backends.asset_studio.worker_max_calls` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_read_batch_size` | `backends.asset_studio.read_batch_size` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_image_format` | `backends.asset_studio.image_format` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_read_kinds` | `backends.asset_studio.read_kinds` | Supported by `config_migrate`; not accepted by the main service loader. |
+| `tools.asset_studio_ffi_cli_parity_mode` | `backends.asset_studio.cli_parity_mode` | Supported by `config_migrate`; not accepted by the main service loader. |
 | `remote_storages[].type` | `storage.providers[].kind` | Rename to match Rust enum naming. |
 | `remote_storages[].endpoint` | `storage.providers[].endpoint` | Same behavior. |
 | `remote_storages[].ssl` | `storage.providers[].tls` | Renamed for clarity. |
@@ -62,6 +72,12 @@ The Rust v2 service keeps YAML but reorganizes the file around responsibilities 
 | `concurrents.concurrent_acb` | `concurrency.acb` |
 | `concurrents.concurrent_usm` | `concurrency.usm` |
 | `concurrents.concurrent_hca` | `concurrency.hca` |
+| `concurrency.cpu_budget_auto` | `resources.cpu.budget_auto` |
+| `concurrency.cpu_budget_ratio` | `resources.cpu.budget_ratio` |
+| `concurrency.cpu_reserved` | `resources.cpu.reserved` |
+| `concurrency.cpu_throttle_enabled` | `resources.cpu.throttle.enabled` |
+| `concurrency.cpu_throttle_sample_ms` | `resources.cpu.throttle.sample_ms` |
+| `execution.max_in_flight_bundle_bytes` | `resources.memory.max_in_flight_bundle_bytes` |
 
 ## Region layout
 
@@ -134,6 +150,22 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 - `concurrency.acb` defaults to `8`.
 - `concurrency.usm` defaults to `4`.
 - `concurrency.hca` defaults to `16`.
+- `backends.media.backend` defaults to `ffi`.
+- `backends.asset_studio.call_mode` defaults to `pool`.
+- `resources.cpu.budget_auto` defaults to `true`.
+- `resources.cpu.budget_ratio` defaults to `0.75`.
+- `resources.cpu.throttle.enabled` defaults to `false`.
+
+## Migrating existing Rust v2 draft configs
+
+The main service loader only accepts the current v2 schema. Run the standalone
+migration CLI for older Rust draft configs that still use `tools.*`,
+`asset_studio_native_*`, `asset_studio_ffi_*`, or CPU fields embedded under
+`concurrency`:
+
+```bash
+cargo run --bin config_migrate -- --input old.yaml --output haruki-asset-configs.yaml --check
+```
 
 ## Removed or intentionally deferred in v2
 

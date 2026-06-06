@@ -345,9 +345,12 @@ async fn submit_update_dry_run_reports_progress_shape() {
         git_sync: GitSyncConfig {
             chart_hashes: ChartHashConfig::default(),
         },
-        tools: haruki_sekai_asset_updater::core::config::ToolsConfig {
-            ffmpeg_path: "ffmpeg".to_string(),
-            ..haruki_sekai_asset_updater::core::config::ToolsConfig::default()
+        backends: haruki_sekai_asset_updater::core::config::BackendsConfig {
+            media: haruki_sekai_asset_updater::core::config::MediaBackendConfig {
+                ffmpeg_path: "ffmpeg".to_string(),
+                ..haruki_sekai_asset_updater::core::config::MediaBackendConfig::default()
+            },
+            ..haruki_sekai_asset_updater::core::config::BackendsConfig::default()
         },
         ..AppConfig::default()
     };

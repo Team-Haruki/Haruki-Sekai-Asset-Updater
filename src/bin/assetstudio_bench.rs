@@ -3,9 +3,10 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioFfiCallMode, ChartHashConfig, ExecutionConfig, GitSyncConfig,
-    ImageExportConfig, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
-    RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig, ToolsConfig,
+    AppConfig, AssetStudioBackendConfig, AssetStudioFfiCallMode, BackendsConfig, ChartHashConfig,
+    ExecutionConfig, GitSyncConfig, ImageExportConfig, MediaBackendConfig, RegionConfig,
+    RegionExportConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
+    RegionUploadConfig, RetryConfig, StorageConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::{
     extract_unity_asset_bundle, query_assetstudio_ffi_version, query_assetstudio_ffi_version_worker,
@@ -31,7 +32,7 @@ impl From<BenchFfiCallMode> for AssetStudioFfiCallMode {
 
 #[derive(Debug, Parser)]
 #[command(name = "assetstudio_bench")]
-#[command(about = "Benchmark AssetStudio NativeAOT FFI exports through the Rust pipeline")]
+#[command(about = "Benchmark AssetStudio FFI exports through the Rust pipeline")]
 struct Args {
     #[arg(long)]
     bundle: PathBuf,
@@ -45,20 +46,15 @@ struct Args {
     expected_file: Option<PathBuf>,
     #[arg(long = "output-dir")]
     output_dir: Option<PathBuf>,
-    #[arg(long = "ffi-library", alias = "native-library")]
+    #[arg(long = "ffi-library")]
     ffi_library: Option<String>,
-    #[arg(
-        long = "ffi-call-mode",
-        alias = "native-call-mode",
-        value_enum,
-        default_value = "pool"
-    )]
+    #[arg(long = "ffi-call-mode", value_enum, default_value = "pool")]
     ffi_call_mode: BenchFfiCallMode,
-    #[arg(long = "ffi-worker-path", alias = "native-worker-path")]
+    #[arg(long = "ffi-worker-path")]
     ffi_worker_path: Option<String>,
-    #[arg(long = "ffi-process-concurrency", alias = "native-process-concurrency")]
+    #[arg(long = "ffi-process-concurrency")]
     ffi_process_concurrency: Option<usize>,
-    #[arg(long = "ffi-read-batch-size", alias = "native-read-batch-size")]
+    #[arg(long = "ffi-read-batch-size")]
     ffi_read_batch_size: Option<usize>,
     #[arg(long = "image-concurrency")]
     image_concurrency: Option<usize>,
@@ -96,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         eprintln!(
-            "native adapter: adapter_version={:?} assetstudio_cli_version={:?}",
+            "ffi adapter: adapter_version={:?} assetstudio_cli_version={:?}",
             version.adapter_version, version.assetstudio_cli_version
         );
     }
@@ -237,26 +233,30 @@ async fn run_once(args: &Args) -> Result<RunResult, Box<dyn std::error::Error>> 
 }
 
 fn benchmark_config(args: &Args) -> AppConfig {
+    let default_asset_studio = AssetStudioBackendConfig::default();
     AppConfig {
-        tools: ToolsConfig {
-            ffmpeg_path: "ffmpeg".to_string(),
-            media_backend: ToolsConfig::default().media_backend,
-            asset_studio_ffi_library_path: args.ffi_library.clone(),
-            asset_studio_ffi_call_mode: args.ffi_call_mode.into(),
-            asset_studio_ffi_worker_path: args.ffi_worker_path.clone(),
-            asset_studio_ffi_process_concurrency: args
-                .ffi_process_concurrency
-                .map(|value| value.max(1))
-                .unwrap_or_else(|| ToolsConfig::default().asset_studio_ffi_process_concurrency),
-            asset_studio_ffi_worker_max_calls: ToolsConfig::default()
-                .asset_studio_ffi_worker_max_calls,
-            asset_studio_ffi_read_batch_size: args
-                .ffi_read_batch_size
-                .unwrap_or_else(|| ToolsConfig::default().asset_studio_ffi_read_batch_size)
-                .max(1),
-            asset_studio_ffi_image_format: ToolsConfig::default().asset_studio_ffi_image_format,
-            asset_studio_ffi_read_kinds: ToolsConfig::default().asset_studio_ffi_read_kinds,
-            asset_studio_ffi_cli_parity_mode: false,
+        backends: BackendsConfig {
+            media: MediaBackendConfig {
+                ffmpeg_path: "ffmpeg".to_string(),
+                ..MediaBackendConfig::default()
+            },
+            asset_studio: AssetStudioBackendConfig {
+                library_path: args.ffi_library.clone(),
+                call_mode: args.ffi_call_mode.into(),
+                worker_path: args.ffi_worker_path.clone(),
+                process_concurrency: args
+                    .ffi_process_concurrency
+                    .map(|value| value.max(1))
+                    .unwrap_or(default_asset_studio.process_concurrency),
+                worker_max_calls: default_asset_studio.worker_max_calls,
+                read_batch_size: args
+                    .ffi_read_batch_size
+                    .unwrap_or(default_asset_studio.read_batch_size)
+                    .max(1),
+                image_format: default_asset_studio.image_format,
+                read_kinds: default_asset_studio.read_kinds,
+                cli_parity_mode: false,
+            },
         },
         storage: StorageConfig {
             providers: Vec::new(),

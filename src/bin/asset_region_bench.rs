@@ -73,26 +73,21 @@ struct Args {
     start_app_rule: Vec<String>,
     #[arg(long = "on-demand-rule")]
     on_demand_rule: Vec<String>,
-    #[arg(long = "ffi-library", alias = "native-library")]
+    #[arg(long = "ffi-library")]
     ffi_library: Option<String>,
-    #[arg(
-        long = "ffi-call-mode",
-        alias = "native-call-mode",
-        value_enum,
-        default_value = "pool"
-    )]
+    #[arg(long = "ffi-call-mode", value_enum, default_value = "pool")]
     ffi_call_mode: BenchFfiCallMode,
-    #[arg(long = "ffi-worker-path", alias = "native-worker-path")]
+    #[arg(long = "ffi-worker-path")]
     ffi_worker_path: Option<String>,
-    #[arg(long = "ffi-process-concurrency", alias = "native-process-concurrency")]
+    #[arg(long = "ffi-process-concurrency")]
     ffi_process_concurrency: Option<usize>,
-    #[arg(long = "ffi-worker-max-calls", alias = "native-worker-max-calls")]
+    #[arg(long = "ffi-worker-max-calls")]
     ffi_worker_max_calls: Option<usize>,
-    #[arg(long = "ffi-read-batch-size", alias = "native-read-batch-size")]
+    #[arg(long = "ffi-read-batch-size")]
     ffi_read_batch_size: Option<usize>,
-    #[arg(long = "ffi-image-format", alias = "native-image-format")]
+    #[arg(long = "ffi-image-format")]
     ffi_image_format: Option<String>,
-    #[arg(long = "ffi-cli-parity", alias = "native-cli-parity")]
+    #[arg(long = "ffi-cli-parity")]
     ffi_cli_parity: bool,
     #[arg(long = "media-backend", value_enum)]
     media_backend: Option<BenchMediaBackend>,
@@ -237,7 +232,7 @@ async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::E
     validate_inputs(args)?;
 
     let temp_dir = tempfile::Builder::new()
-        .prefix("haruki-region-bench-native-")
+        .prefix("haruki-region-bench-ffi-")
         .tempdir()?;
     let (config, region_name, temp_asset_save_dir, temp_record_file) =
         benchmark_config(args, &temp_dir)?;
@@ -282,7 +277,7 @@ async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::E
         project_total_ms,
         effective_ffi_process_concurrency: config.effective_asset_studio_ffi_process_concurrency(),
         effective_cpu_budget: config.effective_cpu_budget(),
-        effective_cpu_throttle_enabled: config.concurrency.cpu_throttle_enabled,
+        effective_cpu_throttle_enabled: config.resources.cpu.throttle.enabled,
         effective_cpu_throttle_target_percent: config.effective_cpu_budget() * 100,
         summary,
         phase_ms: progress.phase_ms(project_total_ms),
@@ -344,46 +339,50 @@ fn benchmark_config(
 ) -> Result<(AppConfig, String, PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let mut config = AppConfig::load_from_path(&args.config)?;
     if let Some(ffi_library) = &args.ffi_library {
-        config.tools.asset_studio_ffi_library_path = Some(ffi_library.clone());
+        config.backends.asset_studio.library_path = Some(ffi_library.clone());
     }
-    config.tools.asset_studio_ffi_call_mode = args.ffi_call_mode.into();
+    config.backends.asset_studio.call_mode = args.ffi_call_mode.into();
     if let Some(ffi_worker_path) = &args.ffi_worker_path {
-        config.tools.asset_studio_ffi_worker_path = Some(ffi_worker_path.clone());
+        config.backends.asset_studio.worker_path = Some(ffi_worker_path.clone());
     }
     if let Some(ffi_process_concurrency) = args.ffi_process_concurrency {
-        config.tools.asset_studio_ffi_process_concurrency = ffi_process_concurrency.max(1);
+        config.backends.asset_studio.process_concurrency = ffi_process_concurrency.max(1);
     }
     if let Some(ffi_worker_max_calls) = args.ffi_worker_max_calls {
-        config.tools.asset_studio_ffi_worker_max_calls = ffi_worker_max_calls;
+        config.backends.asset_studio.worker_max_calls = ffi_worker_max_calls;
     }
     if let Some(ffi_read_batch_size) = args.ffi_read_batch_size {
-        config.tools.asset_studio_ffi_read_batch_size = ffi_read_batch_size.max(1);
+        config.backends.asset_studio.read_batch_size = ffi_read_batch_size.max(1);
     }
     if let Some(ffi_image_format) = &args.ffi_image_format {
-        config.tools.asset_studio_ffi_image_format = Some(ffi_image_format.clone());
+        config.backends.asset_studio.image_format = Some(ffi_image_format.clone());
     }
     if args.ffi_cli_parity {
-        config.tools.asset_studio_ffi_cli_parity_mode = true;
-        config.tools.asset_studio_ffi_image_format = Some("raw_rgba".to_string());
+        config.backends.asset_studio.cli_parity_mode = true;
+        config.backends.asset_studio.image_format = Some("raw_rgba".to_string());
         config
-            .tools
-            .asset_studio_ffi_read_kinds
+            .backends
+            .asset_studio
+            .read_kinds
             .insert("Texture2D".to_string(), "image".to_string());
         config
-            .tools
-            .asset_studio_ffi_read_kinds
+            .backends
+            .asset_studio
+            .read_kinds
             .insert("Sprite".to_string(), "image".to_string());
         config
-            .tools
-            .asset_studio_ffi_read_kinds
+            .backends
+            .asset_studio
+            .read_kinds
             .insert("TextAsset".to_string(), "text_bytes".to_string());
         config
-            .tools
-            .asset_studio_ffi_read_kinds
+            .backends
+            .asset_studio
+            .read_kinds
             .insert("MonoBehaviour".to_string(), "typetree_json".to_string());
     }
     if let Some(media_backend) = args.media_backend {
-        config.tools.media_backend = media_backend.into();
+        config.backends.media.backend = media_backend.into();
     }
     config.storage.providers.clear();
     config.git_sync.chart_hashes.enabled = false;

@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::export_pipeline::{
-    call_assetstudio_ffi_typed_request, AssetStudioNativeOperation, AssetStudioNativeRequest,
-    AssetStudioNativeResponse, LoadedAssetStudioNativeLibrary,
+    call_assetstudio_ffi_typed_request, AssetStudioFfiOperation, AssetStudioFfiRequest,
+    AssetStudioFfiResponse, LoadedAssetStudioFfiLibrary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -39,7 +39,7 @@ enum WorkerOperation {
     ContextReadObjects,
 }
 
-impl From<WorkerOperation> for AssetStudioNativeOperation {
+impl From<WorkerOperation> for AssetStudioFfiOperation {
     fn from(value: WorkerOperation) -> Self {
         match value {
             WorkerOperation::Version => Self::Version,
@@ -55,9 +55,9 @@ impl From<WorkerOperation> for AssetStudioNativeOperation {
 
 #[derive(Debug, Parser)]
 #[command(name = "assetstudio_ffi_worker")]
-#[command(about = "Invoke the AssetStudio NativeAOT FFI adapter in an isolated process")]
+#[command(about = "Invoke the AssetStudio FFI adapter in an isolated process")]
 struct Args {
-    #[arg(long = "ffi-library", alias = "native-library")]
+    #[arg(long = "ffi-library")]
     ffi_library: String,
     #[arg(long, value_enum, required_unless_present = "server")]
     operation: Option<WorkerOperation>,
@@ -75,7 +75,7 @@ fn main() -> ExitCode {
         return run_server_on_large_stack(args.ffi_library);
     }
 
-    let operation = AssetStudioNativeOperation::from(
+    let operation = AssetStudioFfiOperation::from(
         args.operation
             .expect("--operation is required unless --server is used"),
     );
@@ -135,13 +135,13 @@ fn run_server_on_large_stack(ffi_library: String) -> ExitCode {
             Ok(code) => code,
             Err(panic) => {
                 write_process_trace("server_thread_panic", &format!("{panic:?}"));
-                eprintln!("assetstudio native worker server thread panicked: {panic:?}");
+                eprintln!("assetstudio ffi worker server thread panicked: {panic:?}");
                 ExitCode::from(101)
             }
         },
         Err(error) => {
             write_process_trace("server_thread_spawn_error", &error.to_string());
-            eprintln!("failed to spawn assetstudio native worker server thread: {error}");
+            eprintln!("failed to spawn assetstudio ffi worker server thread: {error}");
             ExitCode::from(101)
         }
     }
@@ -150,14 +150,14 @@ fn run_server_on_large_stack(ffi_library: String) -> ExitCode {
 #[derive(Debug, Serialize, Deserialize)]
 struct ServerRequest {
     id: u64,
-    request: AssetStudioNativeRequest,
+    request: AssetStudioFfiRequest,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ServerResponse {
     id: u64,
     status: Option<i32>,
-    response: Option<AssetStudioNativeResponse>,
+    response: Option<AssetStudioFfiResponse>,
     #[serde(default)]
     payload_len: usize,
     payload_file: Option<String>,
@@ -166,7 +166,7 @@ struct ServerResponse {
 
 fn run_server(ffi_library: &str) -> ExitCode {
     write_process_trace("server_start", ffi_library);
-    let library = match LoadedAssetStudioNativeLibrary::load(ffi_library) {
+    let library = match LoadedAssetStudioFfiLibrary::load(ffi_library) {
         Ok(library) => library,
         Err(error) => {
             write_process_trace("server_library_load_error", &error.to_string());
@@ -292,7 +292,7 @@ impl ServerResponse {
 fn server_response_with_payload(
     id: u64,
     status: i32,
-    response: AssetStudioNativeResponse,
+    response: AssetStudioFfiResponse,
     payload: Vec<u8>,
 ) -> io::Result<ServerResponseWithPayload> {
     let payload_len = payload.len();
@@ -332,10 +332,10 @@ fn spill_payload_to_temp_file(payload: &[u8]) -> io::Result<PathBuf> {
 }
 
 fn call_native_with_stdout_suppressed(
-    native_library: &LoadedAssetStudioNativeLibrary,
-    request: &AssetStudioNativeRequest,
+    native_library: &LoadedAssetStudioFfiLibrary,
+    request: &AssetStudioFfiRequest,
 ) -> Result<
-    (i32, AssetStudioNativeResponse, Vec<u8>),
+    (i32, AssetStudioFfiResponse, Vec<u8>),
     Box<haruki_sekai_asset_updater::core::errors::ExportPipelineError>,
 > {
     #[cfg(unix)]
@@ -399,7 +399,7 @@ fn read_frame(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     if len > MAX_FRAME_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("native worker frame too large: {len} bytes"),
+            format!("ffi worker frame too large: {len} bytes"),
         ));
     }
     let mut frame = vec![0u8; len as usize];
@@ -414,10 +414,10 @@ fn write_frame(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
 }
 
 fn read_typed_request(
-    operation: AssetStudioNativeOperation,
-) -> Result<AssetStudioNativeRequest, Box<dyn std::error::Error>> {
-    if operation == AssetStudioNativeOperation::Version {
-        return Ok(AssetStudioNativeRequest::Version);
+    operation: AssetStudioFfiOperation,
+) -> Result<AssetStudioFfiRequest, Box<dyn std::error::Error>> {
+    if operation == AssetStudioFfiOperation::Version {
+        return Ok(AssetStudioFfiRequest::Version);
     }
 
     let mut request_text = String::new();
@@ -425,19 +425,18 @@ fn read_typed_request(
     if request_text.trim().is_empty() {
         return Err(format!("native {} request is empty", operation.as_str()).into());
     }
-    let request =
-        sonic_rs::from_str::<AssetStudioNativeRequest>(&request_text).map_err(|error| {
-            format!(
-                "native {} request must be a typed AssetStudioNativeRequest frame: {error}",
-                operation.as_str()
-            )
-        })?;
+    let request = sonic_rs::from_str::<AssetStudioFfiRequest>(&request_text).map_err(|error| {
+        format!(
+            "native {} request must be a typed AssetStudioFfiRequest frame: {error}",
+            operation.as_str()
+        )
+    })?;
     if request.operation() == operation {
         return Ok(request);
     }
 
     Err(format!(
-        "native worker request operation mismatch: cli={} request={}",
+        "ffi worker request operation mismatch: cli={} request={}",
         operation.as_str(),
         request.operation().as_str()
     )
@@ -445,7 +444,7 @@ fn read_typed_request(
 }
 
 fn write_response(
-    response: &AssetStudioNativeResponse,
+    response: &AssetStudioFfiResponse,
     response_file: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response_text = sonic_rs::to_string(response)?;
@@ -457,20 +456,18 @@ fn write_response(
     Ok(())
 }
 
-fn response_operation(response: &AssetStudioNativeResponse) -> AssetStudioNativeOperation {
+fn response_operation(response: &AssetStudioFfiResponse) -> AssetStudioFfiOperation {
     match response {
-        AssetStudioNativeResponse::Version(_) => AssetStudioNativeOperation::Version,
-        AssetStudioNativeResponse::Inspect(_) => AssetStudioNativeOperation::Inspect,
-        AssetStudioNativeResponse::ContextOpen(_) => AssetStudioNativeOperation::ContextOpen,
-        AssetStudioNativeResponse::ContextListObjects(_) => {
-            AssetStudioNativeOperation::ContextListObjects
+        AssetStudioFfiResponse::Version(_) => AssetStudioFfiOperation::Version,
+        AssetStudioFfiResponse::Inspect(_) => AssetStudioFfiOperation::Inspect,
+        AssetStudioFfiResponse::ContextOpen(_) => AssetStudioFfiOperation::ContextOpen,
+        AssetStudioFfiResponse::ContextListObjects(_) => {
+            AssetStudioFfiOperation::ContextListObjects
         }
-        AssetStudioNativeResponse::ContextClose(_) => AssetStudioNativeOperation::ContextClose,
-        AssetStudioNativeResponse::ContextReadObject(_) => {
-            AssetStudioNativeOperation::ContextReadObject
-        }
-        AssetStudioNativeResponse::ContextReadObjects(_) => {
-            AssetStudioNativeOperation::ContextReadObjects
+        AssetStudioFfiResponse::ContextClose(_) => AssetStudioFfiOperation::ContextClose,
+        AssetStudioFfiResponse::ContextReadObject(_) => AssetStudioFfiOperation::ContextReadObject,
+        AssetStudioFfiResponse::ContextReadObjects(_) => {
+            AssetStudioFfiOperation::ContextReadObjects
         }
     }
 }
@@ -484,9 +481,9 @@ fn install_panic_trace_hook() {
 }
 
 fn write_worker_trace(
-    operation: AssetStudioNativeOperation,
+    operation: AssetStudioFfiOperation,
     stage: &str,
-    request: Option<&AssetStudioNativeRequest>,
+    request: Option<&AssetStudioFfiRequest>,
     detail: Option<&str>,
 ) {
     if let Some(request) = request {
@@ -559,7 +556,6 @@ fn write_trace_file(file_name: &str, contents: &str) {
 
 fn trace_dir() -> Option<PathBuf> {
     let dir = std::env::var("HARUKI_ASSET_STUDIO_FFI_LOG_DIR")
-        .or_else(|_| std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LOG_DIR"))
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
@@ -570,11 +566,8 @@ fn trace_dir() -> Option<PathBuf> {
 
 fn trace_enabled() -> bool {
     env_enabled("HARUKI_ASSET_STUDIO_FFI_TRACE")
-        || env_enabled("HARUKI_ASSET_STUDIO_NATIVE_TRACE")
         || env_enabled("HARUKI_ASSET_STUDIO_FFI_DIAGNOSTICS")
-        || env_enabled("HARUKI_ASSET_STUDIO_NATIVE_DIAGNOSTICS")
         || env_enabled("HARUKI_ASSET_STUDIO_FFI_WORKER_TRACE")
-        || env_enabled("HARUKI_ASSET_STUDIO_NATIVE_WORKER_TRACE")
 }
 
 fn env_enabled(name: &str) -> bool {

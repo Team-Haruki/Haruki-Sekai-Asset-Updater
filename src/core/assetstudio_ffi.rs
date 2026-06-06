@@ -6,19 +6,19 @@ use crate::core::errors::ExportPipelineError;
 use crate::core::export_pipeline::{
     call_assetstudio_ffi_typed_request, close_assetstudio_ffi_context,
     inspect_assetstudio_ffi_bundle, list_assetstudio_ffi_context_objects,
-    open_assetstudio_ffi_context, query_assetstudio_ffi_version,
-    AssetStudioNativeContextCloseRequest, AssetStudioNativeContextListObjectsRequest,
-    AssetStudioNativeContextListObjectsResponse, AssetStudioNativeContextReadObjectItemRequest,
-    AssetStudioNativeContextReadObjectRequest, AssetStudioNativeContextReadObjectsRequest,
-    AssetStudioNativeInspectRequest, AssetStudioNativeObjectReadBatchResponse,
-    AssetStudioNativeObjectReadResponse, AssetStudioNativeRequest, AssetStudioNativeResponse,
+    open_assetstudio_ffi_context, query_assetstudio_ffi_version, AssetStudioFfiContextCloseRequest,
+    AssetStudioFfiContextListObjectsRequest, AssetStudioFfiContextListObjectsResponse,
+    AssetStudioFfiContextReadObjectItemRequest, AssetStudioFfiContextReadObjectRequest,
+    AssetStudioFfiContextReadObjectsRequest, AssetStudioFfiInspectRequest,
+    AssetStudioFfiObjectReadBatchResponse, AssetStudioFfiObjectReadResponse, AssetStudioFfiRequest,
+    AssetStudioFfiResponse,
 };
 
 pub use crate::core::export_pipeline::{
-    AssetStudioNativeAssetInfo as AssetStudioAssetInfo,
-    AssetStudioNativeContextCloseResponse as AssetStudioContextCloseResponse,
-    AssetStudioNativeContextOpenResponse as AssetStudioContextOpenResponse,
-    AssetStudioNativeInspectResponse as AssetStudioInspectResponse, AssetStudioNativeVersion,
+    AssetStudioFfiAssetInfo as AssetStudioAssetInfo,
+    AssetStudioFfiContextCloseResponse as AssetStudioContextCloseResponse,
+    AssetStudioFfiContextOpenResponse as AssetStudioContextOpenResponse,
+    AssetStudioFfiInspectResponse as AssetStudioInspectResponse, AssetStudioFfiVersion,
 };
 
 #[derive(Debug, Clone)]
@@ -35,10 +35,9 @@ impl AssetStudioFfiClient {
 
     pub fn from_env() -> Result<Self, ExportPipelineError> {
         let library_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH")
-            .or_else(|_| std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"))
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+            .ok_or_else(|| ExportPipelineError::AssetStudioFfi {
                 message: "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH is not set".to_string(),
             })?;
         Ok(Self::new(library_path))
@@ -48,7 +47,7 @@ impl AssetStudioFfiClient {
         &self.library_path
     }
 
-    pub fn version(&self) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
+    pub fn version(&self) -> Result<AssetStudioFfiVersion, ExportPipelineError> {
         query_assetstudio_ffi_version(&self.library_path_string())
     }
 
@@ -79,9 +78,6 @@ impl AssetStudioFfiClient {
     }
 }
 
-#[deprecated(note = "use AssetStudioFfiClient")]
-pub type AssetStudioNativeClient = AssetStudioFfiClient;
-
 #[derive(Debug)]
 pub struct AssetStudioContext {
     library_path: PathBuf,
@@ -103,10 +99,10 @@ impl AssetStudioContext {
         &self,
         offset: usize,
         limit: usize,
-    ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
+    ) -> Result<AssetStudioFfiContextListObjectsResponse, ExportPipelineError> {
         list_assetstudio_ffi_context_objects(
             &self.library_path_string(),
-            &AssetStudioNativeContextListObjectsRequest {
+            &AssetStudioFfiContextListObjectsRequest {
                 context_id: self.context_id,
                 offset,
                 limit,
@@ -174,7 +170,7 @@ impl AssetStudioContext {
         &self,
         options: &AssetStudioObjectReadOptions,
     ) -> Result<AssetStudioObjectReadOutput, ExportPipelineError> {
-        let request = AssetStudioNativeContextReadObjectRequest {
+        let request = AssetStudioFfiContextReadObjectRequest {
             context_id: self.context_id,
             path_id: options.path_id,
             kind: options.kind.as_abi_str().to_string(),
@@ -182,17 +178,17 @@ impl AssetStudioContext {
         };
         let (status, response, payload) = call_assetstudio_ffi_typed_request(
             &self.library_path_string(),
-            &AssetStudioNativeRequest::ContextReadObject(request),
+            &AssetStudioFfiRequest::ContextReadObject(request),
         )?;
-        let AssetStudioNativeResponse::ContextReadObject(response) = response else {
-            return Err(ExportPipelineError::AssetStudioNative {
+        let AssetStudioFfiResponse::ContextReadObject(response) = response else {
+            return Err(ExportPipelineError::AssetStudioFfi {
                 message: "native context_read_object returned unexpected response".to_string(),
             });
         };
         if status == 0 && response.success {
             Ok(AssetStudioObjectReadOutput { response, payload })
         } else {
-            Err(ExportPipelineError::AssetStudioNative {
+            Err(ExportPipelineError::AssetStudioFfi {
                 message: response.error.clone().unwrap_or_else(|| {
                     format!("native context_read_object failed with status {status}")
                 }),
@@ -204,11 +200,11 @@ impl AssetStudioContext {
         &self,
         options: &[AssetStudioObjectReadOptions],
     ) -> Result<AssetStudioObjectReadBatchOutput, ExportPipelineError> {
-        let request = AssetStudioNativeContextReadObjectsRequest {
+        let request = AssetStudioFfiContextReadObjectsRequest {
             context_id: self.context_id,
             objects: options
                 .iter()
-                .map(|options| AssetStudioNativeContextReadObjectItemRequest {
+                .map(|options| AssetStudioFfiContextReadObjectItemRequest {
                     path_id: options.path_id,
                     kind: options.kind.as_abi_str().to_string(),
                     image_format: options.image_format.clone(),
@@ -217,17 +213,17 @@ impl AssetStudioContext {
         };
         let (status, response, payload) = call_assetstudio_ffi_typed_request(
             &self.library_path_string(),
-            &AssetStudioNativeRequest::ContextReadObjects(request),
+            &AssetStudioFfiRequest::ContextReadObjects(request),
         )?;
-        let AssetStudioNativeResponse::ContextReadObjects(response) = response else {
-            return Err(ExportPipelineError::AssetStudioNative {
+        let AssetStudioFfiResponse::ContextReadObjects(response) = response else {
+            return Err(ExportPipelineError::AssetStudioFfi {
                 message: "native context_read_objects returned unexpected response".to_string(),
             });
         };
         if status == 0 && response.success {
             Ok(AssetStudioObjectReadBatchOutput { response, payload })
         } else {
-            Err(ExportPipelineError::AssetStudioNative {
+            Err(ExportPipelineError::AssetStudioFfi {
                 message: response.error.clone().unwrap_or_else(|| {
                     format!("native context_read_objects failed with status {status}")
                 }),
@@ -298,7 +294,7 @@ impl AssetStudioContext {
             });
         }
 
-        let request = AssetStudioNativeContextCloseRequest {
+        let request = AssetStudioFfiContextCloseRequest {
             context_id: self.context_id,
         };
         let response = close_assetstudio_ffi_context(&self.library_path_string(), &request)?;
@@ -421,13 +417,13 @@ impl AssetStudioObjectReadOptions {
 
 #[derive(Debug, Clone)]
 pub struct AssetStudioObjectReadOutput {
-    pub response: AssetStudioNativeObjectReadResponse,
+    pub response: AssetStudioFfiObjectReadResponse,
     pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AssetStudioObjectReadBatchOutput {
-    pub response: AssetStudioNativeObjectReadBatchResponse,
+    pub response: AssetStudioFfiObjectReadBatchResponse,
     pub payload: Vec<u8>,
 }
 
@@ -508,66 +504,66 @@ impl AssetStudioObjectReadOutput {
 #[derive(Debug, Clone)]
 pub enum AssetStudioObjectPayload {
     Empty {
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     Unsupported {
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     Raw {
         bytes: Vec<u8>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     TypeTreeJson {
         bytes: Vec<u8>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     TextBytes {
         bytes: Vec<u8>,
         extension: Option<String>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     Image {
         bytes: Vec<u8>,
         format: String,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     ImageArrayBundle {
         bytes: Vec<u8>,
         format: String,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     Audio {
         bytes: Vec<u8>,
         extension: Option<String>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     Video {
         bytes: Vec<u8>,
         extension: Option<String>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     Font {
         bytes: Vec<u8>,
         extension: Option<String>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     ShaderText {
         bytes: Vec<u8>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     MeshObj {
         bytes: Vec<u8>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     AnimatorFbxBundle {
         bytes: Vec<u8>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
     Other {
         bytes: Vec<u8>,
         payload_kind: Option<String>,
         suggested_extension: Option<String>,
-        response: AssetStudioNativeObjectReadResponse,
+        response: AssetStudioFfiObjectReadResponse,
     },
 }
 
@@ -652,8 +648,8 @@ impl AssetStudioInspectOptions {
         self
     }
 
-    fn to_native_request(&self) -> AssetStudioNativeInspectRequest {
-        AssetStudioNativeInspectRequest {
+    fn to_native_request(&self) -> AssetStudioFfiInspectRequest {
+        AssetStudioFfiInspectRequest {
             input_path: self.input_path.display().to_string(),
             asset_types: self.asset_types.clone(),
             unity_version: self.unity_version.clone(),
@@ -692,7 +688,7 @@ mod tests {
         AssetStudioObjectReadOptions, AssetStudioObjectReadOutput, AssetStudioReadKind,
     };
     use crate::core::config::DEFAULT_ASSET_STUDIO_EXPORT_TYPES;
-    use crate::core::export_pipeline::AssetStudioNativeObjectReadResponse;
+    use crate::core::export_pipeline::AssetStudioFfiObjectReadResponse;
 
     #[test]
     fn inspect_options_default_to_project_asset_types() {
@@ -804,8 +800,8 @@ mod tests {
     fn object_read_response(
         payload_kind: Option<&str>,
         suggested_extension: Option<&str>,
-    ) -> AssetStudioNativeObjectReadResponse {
-        AssetStudioNativeObjectReadResponse {
+    ) -> AssetStudioFfiObjectReadResponse {
+        AssetStudioFfiObjectReadResponse {
             success: true,
             asset: None,
             payload_kind: payload_kind.map(ToString::to_string),
