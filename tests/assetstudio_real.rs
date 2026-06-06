@@ -33,7 +33,7 @@ fn real_assetstudio_ffi_exports_expected_file_when_configured() {
 
 #[test]
 fn real_assetstudio_ffi_client_reads_object_when_configured() {
-    let Some(native_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
+    let Some(asset_studio_ffi_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
         return;
     };
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
@@ -71,12 +71,12 @@ fn real_assetstudio_ffi_client_reads_object_when_configured() {
     if !filter_by_path_ids.is_empty() {
         options = options.filter_by_path_ids(filter_by_path_ids);
     }
-    let mut context = AssetStudioFfiClient::new(native_library_path)
+    let mut context = AssetStudioFfiClient::new(asset_studio_ffi_library_path)
         .open_context(&options)
         .unwrap();
     assert!(
         !context.open_response().assets.is_empty(),
-        "native client context_open returned no assets"
+        "FFI client context_open returned no assets"
     );
     let path_id = required_env("ASSET_STUDIO_READ_PATH_ID")
         .map(|value| value.parse::<i64>().unwrap())
@@ -87,7 +87,7 @@ fn real_assetstudio_ffi_client_reads_object_when_configured() {
     assert!(read.response.success);
     assert!(
         read.response.payload_len >= 0,
-        "native client object read returned an invalid payload length"
+        "FFI client object read returned an invalid payload length"
     );
     context.close().unwrap();
 }

@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "bundle": args.bundle.display().to_string(),
             "export_path": args.export_path,
             "category": args.category,
-            "backend": "native",
+            "backend": "ffi",
             "iterations": args.iterations,
             "mean_ms": mean_ms,
             "median_ms": median_ms,

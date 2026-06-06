@@ -248,11 +248,7 @@ async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::E
     };
     let executor = AssetExecutionContext::new(&config, &region_name, region, &request)?;
     let (tx, rx) = mpsc::unbounded_channel();
-    let collector = tokio::spawn(collect_progress(
-        rx,
-        "native".to_string(),
-        args.progress_every,
-    ));
+    let collector = tokio::spawn(collect_progress(rx, "ffi".to_string(), args.progress_every));
 
     let start = Instant::now();
     let summary = if args.prefetch_only {
@@ -266,7 +262,7 @@ async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::E
     let progress = collector.await?;
 
     let report = BackendReport {
-        backend: "native".to_string(),
+        backend: "ffi".to_string(),
         mode: if args.prefetch_only {
             "prefetch".to_string()
         } else {

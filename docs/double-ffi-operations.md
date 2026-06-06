@@ -97,7 +97,7 @@ increases contention.
 
 ## Benchmark Workflow
 
-Use a clean cache directory for prefetch, then reuse it for each backend:
+Use a clean cache directory for prefetch, then reuse it for each benchmark run:
 
 ```bash
 asset_region_bench \
@@ -107,14 +107,12 @@ asset_region_bench \
   ...
 
 asset_region_bench \
-  --backend native \
   --media-backend ffi \
   --bundle-cache-dir /tmp/haruki-cache \
   --jsonl-output /tmp/haruki-dual-ffi.jsonl \
   ...
 
 asset_region_bench \
-  --backend cli \
   --media-backend cli \
   --bundle-cache-dir /tmp/haruki-cache \
   --jsonl-output /tmp/haruki-dual-cli.jsonl \
@@ -165,7 +163,7 @@ AssetStudio FFI worker and C# adapter:
 ```bash
 export HARUKI_ASSET_STUDIO_FFI_TRACE=1
 export HARUKI_ASSET_STUDIO_FFI_WORKER_TRACE=1
-export HARUKI_ASSET_STUDIO_FFI_LOG_DIR=/tmp/haruki-native-logs
+export HARUKI_ASSET_STUDIO_FFI_LOG_DIR=/tmp/haruki-ffi-logs
 ```
 
 Useful signs in benchmark JSONL:
@@ -184,7 +182,7 @@ recorded:
 
 ```bash
 rm -rf /tmp/haruki-local-docker-bench
-rm -rf /tmp/haruki-native-logs
+rm -rf /tmp/haruki-ffi-logs
 rm -rf /tmp/haruki-region-bench-*
 rm -rf /tmp/assetstudio-ffi-verify
 ```

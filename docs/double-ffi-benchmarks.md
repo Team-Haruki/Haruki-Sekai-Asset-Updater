@@ -106,7 +106,7 @@ Interpretation:
 - The CLI path pays a large per-bundle process startup and initialization cost.
 - The double-FFI path reduces fixed per-bundle overhead and makes small bundle
   handling much cheaper.
-- The local Docker gap is large but smaller than some macOS native observations.
+- The local Docker gap is large but smaller than some macOS FFI observations.
   The likely reason is that macOS-native .NET CLI startup and single-file
   runtime behavior adds extra overhead that is less visible inside Linux Docker.
 
@@ -137,7 +137,7 @@ the dominant speedup. Media FFI still helped, but it was not the main bottleneck
 ## Notes
 
 - Benchmarks should be compared only when bundle cache status, selected rules,
-  exported types, media backend, native batch size, and concurrency settings are
+  exported types, media backend, FFI batch size, and concurrency settings are
   aligned.
 - `--ffi-cli-parity` is useful when comparing output shape with CLI, but it
   is not the recommended production output mode.

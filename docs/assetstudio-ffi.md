@@ -100,7 +100,7 @@ with:
 ```bash
 export HARUKI_ASSET_STUDIO_FFI_TRACE=1
 export HARUKI_ASSET_STUDIO_FFI_WORKER_TRACE=1
-export HARUKI_ASSET_STUDIO_FFI_LOG_DIR=/tmp/haruki-native-logs
+export HARUKI_ASSET_STUDIO_FFI_LOG_DIR=/tmp/haruki-ffi-logs
 export HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY=3
 ```
 
@@ -325,11 +325,10 @@ cargo run --release --features media-ffi --bin asset_region_bench -- \
   --config haruki-asset-configs.yaml \
   --region cn \
   --start-app-rule '^music/short' \
-  --backend native \
   --media-backend ffi \
   --ffi-process-concurrency 16 \
   --media-encode-concurrency 12 \
-  --jsonl-output /tmp/haruki-music-short-native16-media12.jsonl \
+  --jsonl-output /tmp/haruki-music-short-ffi16-media12.jsonl \
   --progress-every 500
 ```
 
