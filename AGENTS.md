@@ -47,7 +47,8 @@
 当前常用环境变量包括：
 
 - `HARUKI_CONFIG_PATH`
-- `HARUKI_ASSET_STUDIO_CLI_PATH`
+- `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`
+- `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`
 - `HARUKI_SHARED_AES_KEY_HEX`
 - `HARUKI_SHARED_AES_IV_HEX`
 - `HARUKI_EN_AES_KEY_HEX`
@@ -60,7 +61,7 @@
 - YAML 处理统一使用 `yaml_serde`，不要新增 `serde_yaml` 依赖。
 - codec 后端统一依赖 crates.io 上的 `cridecoder`。
 - 图片转换优先保持纯 Rust 路径，不要重新引入外部 WebP 工具链。
-- `AssetStudioModCLI` 与 `ffmpeg` 继续作为外部工具依赖。
+- `AssetStudioFFI` NativeAOT 动态库与 `ffmpeg` 继续作为外部运行依赖。
 
 ## 5. 代码风格约定
 

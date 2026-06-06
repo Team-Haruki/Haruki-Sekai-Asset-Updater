@@ -5553,7 +5553,7 @@ impl NativeWorkerPool {
         let mut command = Command::new(&worker_program);
         command
             .arg("--server")
-            .arg("--native-library")
+            .arg("--ffi-library")
             .arg(&self.native_library_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -5969,7 +5969,7 @@ async fn run_assetstudio_ffi_worker(
     request: &AssetStudioNativeRequest,
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let response_file = tempfile::Builder::new()
-        .prefix("haruki-assetstudio-native-response-")
+        .prefix("haruki-assetstudio-ffi-response-")
         .tempfile()
         .map_err(|source| ExportPipelineError::Io {
             path: std::env::temp_dir(),
@@ -5982,7 +5982,7 @@ async fn run_assetstudio_ffi_worker(
     command
         .arg("--operation")
         .arg(operation.as_str())
-        .arg("--native-library")
+        .arg("--ffi-library")
         .arg(native_library_path)
         .arg("--response-file")
         .arg(&response_path)

@@ -57,8 +57,8 @@ impl From<WorkerOperation> for AssetStudioNativeOperation {
 #[command(name = "assetstudio_ffi_worker")]
 #[command(about = "Invoke the AssetStudio NativeAOT FFI adapter in an isolated process")]
 struct Args {
-    #[arg(long)]
-    native_library: String,
+    #[arg(long = "ffi-library", alias = "native-library")]
+    ffi_library: String,
     #[arg(long, value_enum, required_unless_present = "server")]
     operation: Option<WorkerOperation>,
     #[arg(long)]
@@ -72,7 +72,7 @@ fn main() -> ExitCode {
 
     let args = Args::parse();
     if args.server {
-        return run_server_on_large_stack(args.native_library);
+        return run_server_on_large_stack(args.ffi_library);
     }
 
     let operation = AssetStudioNativeOperation::from(
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
     };
 
     write_worker_trace(operation, "before_ffi", Some(&request), None);
-    match call_assetstudio_ffi_typed_request(&args.native_library, &request) {
+    match call_assetstudio_ffi_typed_request(&args.ffi_library, &request) {
         Ok((status, response, payload)) => {
             write_worker_trace(
                 operation,
@@ -125,11 +125,11 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_server_on_large_stack(native_library: String) -> ExitCode {
+fn run_server_on_large_stack(ffi_library: String) -> ExitCode {
     match std::thread::Builder::new()
         .name("haruki-assetstudio-worker-server".to_string())
         .stack_size(FFI_CALL_STACK_SIZE)
-        .spawn(move || run_server(&native_library))
+        .spawn(move || run_server(&ffi_library))
     {
         Ok(handle) => match handle.join() {
             Ok(code) => code,
@@ -164,9 +164,9 @@ struct ServerResponse {
     error: Option<String>,
 }
 
-fn run_server(native_library: &str) -> ExitCode {
-    write_process_trace("server_start", native_library);
-    let library = match LoadedAssetStudioNativeLibrary::load(native_library) {
+fn run_server(ffi_library: &str) -> ExitCode {
+    write_process_trace("server_start", ffi_library);
+    let library = match LoadedAssetStudioNativeLibrary::load(ffi_library) {
         Ok(library) => library,
         Err(error) => {
             write_process_trace("server_library_load_error", &error.to_string());
@@ -563,7 +563,7 @@ fn trace_dir() -> Option<PathBuf> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("haruki-assetstudio-native"));
+        .unwrap_or_else(|| std::env::temp_dir().join("haruki-assetstudio-ffi"));
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }

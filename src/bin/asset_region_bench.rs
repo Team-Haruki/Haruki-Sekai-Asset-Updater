@@ -16,7 +16,7 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum BenchNativeCallMode {
+enum BenchFfiCallMode {
     Direct,
     Process,
     Pool,
@@ -29,12 +29,12 @@ enum BenchMediaBackend {
     Cli,
 }
 
-impl From<BenchNativeCallMode> for AssetStudioFfiCallMode {
-    fn from(value: BenchNativeCallMode) -> Self {
+impl From<BenchFfiCallMode> for AssetStudioFfiCallMode {
+    fn from(value: BenchFfiCallMode) -> Self {
         match value {
-            BenchNativeCallMode::Direct => Self::Direct,
-            BenchNativeCallMode::Process => Self::Process,
-            BenchNativeCallMode::Pool => Self::Pool,
+            BenchFfiCallMode::Direct => Self::Direct,
+            BenchFfiCallMode::Process => Self::Process,
+            BenchFfiCallMode::Pool => Self::Pool,
         }
     }
 }
@@ -73,22 +73,27 @@ struct Args {
     start_app_rule: Vec<String>,
     #[arg(long = "on-demand-rule")]
     on_demand_rule: Vec<String>,
-    #[arg(long = "native-library")]
-    native_library: Option<String>,
-    #[arg(long = "native-call-mode", value_enum, default_value = "pool")]
-    native_call_mode: BenchNativeCallMode,
-    #[arg(long = "native-worker-path")]
-    native_worker_path: Option<String>,
-    #[arg(long = "native-process-concurrency")]
-    native_process_concurrency: Option<usize>,
-    #[arg(long = "native-worker-max-calls")]
-    native_worker_max_calls: Option<usize>,
-    #[arg(long = "native-read-batch-size")]
-    native_read_batch_size: Option<usize>,
-    #[arg(long = "native-image-format")]
-    native_image_format: Option<String>,
-    #[arg(long = "native-cli-parity")]
-    native_cli_parity: bool,
+    #[arg(long = "ffi-library", alias = "native-library")]
+    ffi_library: Option<String>,
+    #[arg(
+        long = "ffi-call-mode",
+        alias = "native-call-mode",
+        value_enum,
+        default_value = "pool"
+    )]
+    ffi_call_mode: BenchFfiCallMode,
+    #[arg(long = "ffi-worker-path", alias = "native-worker-path")]
+    ffi_worker_path: Option<String>,
+    #[arg(long = "ffi-process-concurrency", alias = "native-process-concurrency")]
+    ffi_process_concurrency: Option<usize>,
+    #[arg(long = "ffi-worker-max-calls", alias = "native-worker-max-calls")]
+    ffi_worker_max_calls: Option<usize>,
+    #[arg(long = "ffi-read-batch-size", alias = "native-read-batch-size")]
+    ffi_read_batch_size: Option<usize>,
+    #[arg(long = "ffi-image-format", alias = "native-image-format")]
+    ffi_image_format: Option<String>,
+    #[arg(long = "ffi-cli-parity", alias = "native-cli-parity")]
+    ffi_cli_parity: bool,
     #[arg(long = "media-backend", value_enum)]
     media_backend: Option<BenchMediaBackend>,
     #[arg(long = "asset-types", value_delimiter = ',')]
@@ -166,7 +171,7 @@ struct BackendReport {
     temp_asset_save_dir: String,
     temp_download_record_file: String,
     project_total_ms: u128,
-    effective_native_process_concurrency: usize,
+    effective_ffi_process_concurrency: usize,
     effective_cpu_budget: usize,
     effective_cpu_throttle_enabled: bool,
     effective_cpu_throttle_target_percent: usize,
@@ -275,8 +280,7 @@ async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::E
         temp_asset_save_dir: temp_asset_save_dir.display().to_string(),
         temp_download_record_file: temp_record_file.display().to_string(),
         project_total_ms,
-        effective_native_process_concurrency: config
-            .effective_asset_studio_ffi_process_concurrency(),
+        effective_ffi_process_concurrency: config.effective_asset_studio_ffi_process_concurrency(),
         effective_cpu_budget: config.effective_cpu_budget(),
         effective_cpu_throttle_enabled: config.concurrency.cpu_throttle_enabled,
         effective_cpu_throttle_target_percent: config.effective_cpu_budget() * 100,
@@ -323,13 +327,13 @@ fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if args
-        .native_library
+        .ffi_library
         .as_deref()
         .unwrap_or_default()
         .trim()
         .is_empty()
     {
-        return Err("--native-library is required".into());
+        return Err("--ffi-library is required".into());
     }
     Ok(())
 }
@@ -339,26 +343,26 @@ fn benchmark_config(
     temp_dir: &TempDir,
 ) -> Result<(AppConfig, String, PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let mut config = AppConfig::load_from_path(&args.config)?;
-    if let Some(native_library) = &args.native_library {
-        config.tools.asset_studio_ffi_library_path = Some(native_library.clone());
+    if let Some(ffi_library) = &args.ffi_library {
+        config.tools.asset_studio_ffi_library_path = Some(ffi_library.clone());
     }
-    config.tools.asset_studio_ffi_call_mode = args.native_call_mode.into();
-    if let Some(native_worker_path) = &args.native_worker_path {
-        config.tools.asset_studio_ffi_worker_path = Some(native_worker_path.clone());
+    config.tools.asset_studio_ffi_call_mode = args.ffi_call_mode.into();
+    if let Some(ffi_worker_path) = &args.ffi_worker_path {
+        config.tools.asset_studio_ffi_worker_path = Some(ffi_worker_path.clone());
     }
-    if let Some(native_process_concurrency) = args.native_process_concurrency {
-        config.tools.asset_studio_ffi_process_concurrency = native_process_concurrency.max(1);
+    if let Some(ffi_process_concurrency) = args.ffi_process_concurrency {
+        config.tools.asset_studio_ffi_process_concurrency = ffi_process_concurrency.max(1);
     }
-    if let Some(native_worker_max_calls) = args.native_worker_max_calls {
-        config.tools.asset_studio_ffi_worker_max_calls = native_worker_max_calls;
+    if let Some(ffi_worker_max_calls) = args.ffi_worker_max_calls {
+        config.tools.asset_studio_ffi_worker_max_calls = ffi_worker_max_calls;
     }
-    if let Some(native_read_batch_size) = args.native_read_batch_size {
-        config.tools.asset_studio_ffi_read_batch_size = native_read_batch_size.max(1);
+    if let Some(ffi_read_batch_size) = args.ffi_read_batch_size {
+        config.tools.asset_studio_ffi_read_batch_size = ffi_read_batch_size.max(1);
     }
-    if let Some(native_image_format) = &args.native_image_format {
-        config.tools.asset_studio_ffi_image_format = Some(native_image_format.clone());
+    if let Some(ffi_image_format) = &args.ffi_image_format {
+        config.tools.asset_studio_ffi_image_format = Some(ffi_image_format.clone());
     }
-    if args.native_cli_parity {
+    if args.ffi_cli_parity {
         config.tools.asset_studio_ffi_cli_parity_mode = true;
         config.tools.asset_studio_ffi_image_format = Some("raw_rgba".to_string());
         config

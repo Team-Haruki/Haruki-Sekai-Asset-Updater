@@ -139,7 +139,7 @@ the dominant speedup. Media FFI still helped, but it was not the main bottleneck
 - Benchmarks should be compared only when bundle cache status, selected rules,
   exported types, media backend, native batch size, and concurrency settings are
   aligned.
-- `--native-cli-parity` is useful when comparing output shape with CLI, but it
+- `--ffi-cli-parity` is useful when comparing output shape with CLI, but it
   is not the recommended production output mode.
 - On high-core servers, increasing `native_process` too far can raise CPU usage
   without lowering wall time.

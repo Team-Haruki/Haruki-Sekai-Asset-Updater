@@ -49,7 +49,7 @@ docker compose up --build
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
   - `asset_execution.rs` -- runs the plan (download, decrypt, export, upload)
-  - `export_pipeline.rs` -- post-processing: AssetStudioModCLI invocation, PNG-to-WebP (pure Rust), media conversion
+  - `export_pipeline.rs` -- AssetStudio FFI export, PNG/WebP encoding, media conversion
   - `codec.rs` -- wraps the `cridecoder` crate for USM/ACB decoding
   - `media.rs` -- ffmpeg-based conversions (USM/M2V to MP4, WAV to FLAC/MP3)
   - `storage.rs` -- S3-compatible upload via `aws-sdk-s3`
@@ -74,7 +74,7 @@ docker compose up --build
 - **YAML:** use `yaml_serde`, never `serde_yaml`
 - **Codec:** use published `cridecoder` crate from crates.io
 - **Image conversion:** pure Rust WebP encoder (`image` crate), no external WebP toolchain
-- **External tool deps:** `AssetStudioModCLI` (.NET) and `ffmpeg` are runtime dependencies
+- **External tool deps:** `AssetStudioFFI` NativeAOT library and `ffmpeg` are runtime dependencies
 - **Config files:** only `haruki-asset-configs.yaml` (active) and `haruki-asset-configs.example.yaml` (template)
 - **Sensitive config** uses `${env:VAR_NAME}` syntax, never hardcoded secrets
 - **Test samples** live in `tests/files/` (`0703.usm`, `se_0126_01.acb`)
@@ -89,7 +89,8 @@ docker compose up --build
 ## Environment Variables
 
 - `HARUKI_CONFIG_PATH` -- override config file path
-- `HARUKI_ASSET_STUDIO_CLI_PATH` -- path to AssetStudioModCLI binary
+- `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` -- path to `HarukiAssetStudioFFI` native library
+- `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` -- optional path to `assetstudio_ffi_worker`
 - `HARUKI_SHARED_AES_KEY_HEX` / `HARUKI_SHARED_AES_IV_HEX` -- shared AES keys (JP/TW/KR/CN)
 - `HARUKI_EN_AES_KEY_HEX` / `HARUKI_EN_AES_IV_HEX` -- EN-specific AES keys
 - `RUST_LOG` -- tracing log level filter

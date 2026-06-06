@@ -122,7 +122,7 @@ asset_region_bench \
 For strict output-shape comparisons:
 
 ```bash
-asset_region_bench --native-cli-parity ...
+asset_region_bench --ffi-cli-parity ...
 ```
 
 For production-path benchmarks, leave CLI parity off unless the question is
@@ -184,5 +184,5 @@ recorded:
 rm -rf /tmp/haruki-local-docker-bench
 rm -rf /tmp/haruki-native-logs
 rm -rf /tmp/haruki-region-bench-*
-rm -rf /tmp/assetstudio-native-verify
+rm -rf /tmp/assetstudio-ffi-verify
 ```

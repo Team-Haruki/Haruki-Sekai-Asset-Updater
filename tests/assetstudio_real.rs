@@ -8,7 +8,7 @@ use haruki_sekai_asset_updater::core::config::{
 };
 use haruki_sekai_asset_updater::core::export_pipeline::extract_unity_asset_bundle;
 use haruki_sekai_asset_updater::{
-    AssetStudioInspectOptions, AssetStudioNativeClient, AssetStudioObjectReadOptions,
+    AssetStudioFfiClient, AssetStudioInspectOptions, AssetStudioObjectReadOptions,
 };
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
@@ -71,7 +71,7 @@ fn real_assetstudio_ffi_client_reads_object_when_configured() {
     if !filter_by_path_ids.is_empty() {
         options = options.filter_by_path_ids(filter_by_path_ids);
     }
-    let mut context = AssetStudioNativeClient::new(native_library_path)
+    let mut context = AssetStudioFfiClient::new(native_library_path)
         .open_context(&options)
         .unwrap();
     assert!(

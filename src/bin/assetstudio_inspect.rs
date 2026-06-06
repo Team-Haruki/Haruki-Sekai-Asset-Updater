@@ -2,15 +2,15 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use haruki_sekai_asset_updater::core::assetstudio_ffi::{
-    AssetStudioInspectOptions, AssetStudioNativeClient,
+    AssetStudioFfiClient, AssetStudioInspectOptions,
 };
 
 #[derive(Debug, Parser)]
 #[command(name = "assetstudio_inspect")]
 #[command(about = "Inspect Unity assets through the AssetStudio NativeAOT FFI adapter")]
 struct Args {
-    #[arg(long = "native-library")]
-    native_library: Option<String>,
+    #[arg(long = "ffi-library", alias = "native-library")]
+    ffi_library: Option<String>,
     #[arg(long)]
     bundle: PathBuf,
     #[arg(long = "unity-version")]
@@ -39,17 +39,17 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let native_library = args
-        .native_library
+    let ffi_library = args
+        .ffi_library
         .or_else(|| {
             std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH")
                 .or_else(|_| std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"))
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .ok_or("--native-library or HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH is required")?;
+        .ok_or("--ffi-library or HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH is required")?;
 
-    let client = AssetStudioNativeClient::new(native_library);
+    let client = AssetStudioFfiClient::new(ffi_library);
 
     if !args.skip_version_check {
         let version = client.version()?;

@@ -22,11 +22,11 @@ pub use crate::core::export_pipeline::{
 };
 
 #[derive(Debug, Clone)]
-pub struct AssetStudioNativeClient {
+pub struct AssetStudioFfiClient {
     library_path: PathBuf,
 }
 
-impl AssetStudioNativeClient {
+impl AssetStudioFfiClient {
     pub fn new(library_path: impl Into<PathBuf>) -> Self {
         Self {
             library_path: library_path.into(),
@@ -78,6 +78,9 @@ impl AssetStudioNativeClient {
         self.library_path.display().to_string()
     }
 }
+
+#[deprecated(note = "use AssetStudioFfiClient")]
+pub type AssetStudioNativeClient = AssetStudioFfiClient;
 
 #[derive(Debug)]
 pub struct AssetStudioContext {
@@ -685,7 +688,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        AssetStudioInspectOptions, AssetStudioNativeClient, AssetStudioObjectPayload,
+        AssetStudioFfiClient, AssetStudioInspectOptions, AssetStudioObjectPayload,
         AssetStudioObjectReadOptions, AssetStudioObjectReadOutput, AssetStudioReadKind,
     };
     use crate::core::config::DEFAULT_ASSET_STUDIO_EXPORT_TYPES;
@@ -727,8 +730,8 @@ mod tests {
     }
 
     #[test]
-    fn native_client_keeps_library_path() {
-        let client = AssetStudioNativeClient::new("/tmp/libHarukiAssetStudioFFI.dylib");
+    fn ffi_client_keeps_library_path() {
+        let client = AssetStudioFfiClient::new("/tmp/libHarukiAssetStudioFFI.dylib");
 
         assert_eq!(
             client.library_path().display().to_string(),

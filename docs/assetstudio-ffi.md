@@ -10,7 +10,7 @@ Unity bundle parsing and object payload extraction behind the FFI boundary.
 The native backend has three call modes:
 
 - `direct`: load the NativeAOT library in the current Rust process. This is the
-  lowest-latency path for single calls and is what `AssetStudioNativeClient`
+  lowest-latency path for single calls and is what `AssetStudioFfiClient`
   uses, but it shares all AssetStudio process state with Rust.
 - `process`: spawn the Rust `assetstudio_ffi_worker` sidecar for each FFI
   call. Each worker loads the same NativeAOT library in an isolated process, so
@@ -136,7 +136,7 @@ Rust has a helper CLI for local inspection:
 
 ```bash
 cargo run --bin assetstudio_inspect -- \
-  --native-library /path/to/HarukiAssetStudioFFI.dylib \
+  --ffi-library /path/to/HarukiAssetStudioFFI.dylib \
   --bundle /path/to/bundle.unityfs \
   --unity-version 2022.3.21f1 \
   --asset-types tex2d,textAsset \
@@ -149,11 +149,11 @@ Library callers can use the same native adapter through the Rust client API:
 
 ```rust
 use haruki_sekai_asset_updater::{
-    AssetStudioInspectOptions, AssetStudioNativeClient, AssetStudioObjectReadOptions,
+    AssetStudioInspectOptions, AssetStudioFfiClient, AssetStudioObjectReadOptions,
     AssetStudioReadKind,
 };
 
-let client = AssetStudioNativeClient::new("/path/to/HarukiAssetStudioFFI.dylib");
+let client = AssetStudioFfiClient::new("/path/to/HarukiAssetStudioFFI.dylib");
 let options = AssetStudioInspectOptions::new("/path/to/bundle.unityfs")
     .asset_types(["tex2d"])
     .unity_version("2022.3.21f1")
@@ -232,7 +232,7 @@ percentiles should not be summed like ordinary elapsed-time counters.
 Keep `32` as the global default. Image-heavy workloads such as
 `character/member` can be re-benchmarked with
 `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE=64` or
-`--native-read-batch-size 64`; audio/text-heavy paths such as `music/short`
+`--ffi-read-batch-size 64`; audio/text-heavy paths such as `music/short`
 have recently favored `32`.
 
 Worker-pool logs include worker spawn, recycle, kill, protocol error, request
@@ -266,7 +266,7 @@ dotnet publish AssetStudioFFI/AssetStudioFFI.csproj \
   /p:TargetFrameworks=net9.0 \
   /p:PublishAot=true \
   /p:InvariantGlobalization=false \
-  -o /app/assetstudio-native
+  -o /app/assetstudio-ffi
 ```
 
 Keep the NativeAOT adapter and the texture decoder native library together:
@@ -300,7 +300,7 @@ helper defaults to the production NativeAOT FFI backend.
 ```bash
 cargo run --release --bin assetstudio_bench -- \
   --bundle /path/to/bundle.unityfs \
-  --native-library /path/to/HarukiAssetStudioFFI.dylib \
+  --ffi-library /path/to/HarukiAssetStudioFFI.dylib \
   --warmup 1 \
   --iterations 5 \
   --expected-file music/jacket/jacket_s_712/jacket_s_712.png
@@ -325,7 +325,7 @@ cargo run --release --features media-ffi --bin asset_region_bench -- \
   --start-app-rule '^music/short' \
   --backend native \
   --media-backend ffi \
-  --native-process-concurrency 16 \
+  --ffi-process-concurrency 16 \
   --media-encode-concurrency 12 \
   --jsonl-output /tmp/haruki-music-short-native16-media12.jsonl \
   --progress-every 500

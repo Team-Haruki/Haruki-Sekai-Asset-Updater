@@ -13,18 +13,18 @@ use haruki_sekai_asset_updater::core::export_pipeline::{
 use tempfile::tempdir;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum BenchNativeCallMode {
+enum BenchFfiCallMode {
     Direct,
     Process,
     Pool,
 }
 
-impl From<BenchNativeCallMode> for AssetStudioFfiCallMode {
-    fn from(value: BenchNativeCallMode) -> Self {
+impl From<BenchFfiCallMode> for AssetStudioFfiCallMode {
+    fn from(value: BenchFfiCallMode) -> Self {
         match value {
-            BenchNativeCallMode::Direct => Self::Direct,
-            BenchNativeCallMode::Process => Self::Process,
-            BenchNativeCallMode::Pool => Self::Pool,
+            BenchFfiCallMode::Direct => Self::Direct,
+            BenchFfiCallMode::Process => Self::Process,
+            BenchFfiCallMode::Pool => Self::Pool,
         }
     }
 }
@@ -45,16 +45,21 @@ struct Args {
     expected_file: Option<PathBuf>,
     #[arg(long = "output-dir")]
     output_dir: Option<PathBuf>,
-    #[arg(long = "native-library")]
-    native_library: Option<String>,
-    #[arg(long = "native-call-mode", value_enum, default_value = "pool")]
-    native_call_mode: BenchNativeCallMode,
-    #[arg(long = "native-worker-path")]
-    native_worker_path: Option<String>,
-    #[arg(long = "native-process-concurrency")]
-    native_process_concurrency: Option<usize>,
-    #[arg(long = "native-read-batch-size")]
-    native_read_batch_size: Option<usize>,
+    #[arg(long = "ffi-library", alias = "native-library")]
+    ffi_library: Option<String>,
+    #[arg(
+        long = "ffi-call-mode",
+        alias = "native-call-mode",
+        value_enum,
+        default_value = "pool"
+    )]
+    ffi_call_mode: BenchFfiCallMode,
+    #[arg(long = "ffi-worker-path", alias = "native-worker-path")]
+    ffi_worker_path: Option<String>,
+    #[arg(long = "ffi-process-concurrency", alias = "native-process-concurrency")]
+    ffi_process_concurrency: Option<usize>,
+    #[arg(long = "ffi-read-batch-size", alias = "native-read-batch-size")]
+    ffi_read_batch_size: Option<usize>,
     #[arg(long = "image-concurrency")]
     image_concurrency: Option<usize>,
     #[arg(long = "acb-concurrency")]
@@ -82,15 +87,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--iterations must be greater than zero".into());
     }
 
-    if let Some(native_library) = args.native_library.as_deref() {
-        let version = match args.native_call_mode {
-            BenchNativeCallMode::Direct => query_assetstudio_ffi_version(native_library)?,
-            BenchNativeCallMode::Process | BenchNativeCallMode::Pool => {
-                query_assetstudio_ffi_version_worker(
-                    native_library,
-                    args.native_worker_path.as_deref(),
-                )
-                .await?
+    if let Some(ffi_library) = args.ffi_library.as_deref() {
+        let version = match args.ffi_call_mode {
+            BenchFfiCallMode::Direct => query_assetstudio_ffi_version(ffi_library)?,
+            BenchFfiCallMode::Process | BenchFfiCallMode::Pool => {
+                query_assetstudio_ffi_version_worker(ffi_library, args.ffi_worker_path.as_deref())
+                    .await?
             }
         };
         eprintln!(
@@ -148,13 +150,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args
-        .native_library
+        .ffi_library
         .as_deref()
         .unwrap_or_default()
         .trim()
         .is_empty()
     {
-        return Err("--native-library is required".into());
+        return Err("--ffi-library is required".into());
     }
     Ok(())
 }
@@ -239,17 +241,17 @@ fn benchmark_config(args: &Args) -> AppConfig {
         tools: ToolsConfig {
             ffmpeg_path: "ffmpeg".to_string(),
             media_backend: ToolsConfig::default().media_backend,
-            asset_studio_ffi_library_path: args.native_library.clone(),
-            asset_studio_ffi_call_mode: args.native_call_mode.into(),
-            asset_studio_ffi_worker_path: args.native_worker_path.clone(),
+            asset_studio_ffi_library_path: args.ffi_library.clone(),
+            asset_studio_ffi_call_mode: args.ffi_call_mode.into(),
+            asset_studio_ffi_worker_path: args.ffi_worker_path.clone(),
             asset_studio_ffi_process_concurrency: args
-                .native_process_concurrency
+                .ffi_process_concurrency
                 .map(|value| value.max(1))
                 .unwrap_or_else(|| ToolsConfig::default().asset_studio_ffi_process_concurrency),
             asset_studio_ffi_worker_max_calls: ToolsConfig::default()
                 .asset_studio_ffi_worker_max_calls,
             asset_studio_ffi_read_batch_size: args
-                .native_read_batch_size
+                .ffi_read_batch_size
                 .unwrap_or_else(|| ToolsConfig::default().asset_studio_ffi_read_batch_size)
                 .max(1),
             asset_studio_ffi_image_format: ToolsConfig::default().asset_studio_ffi_image_format,

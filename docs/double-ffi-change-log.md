@@ -121,7 +121,7 @@ It can be enabled with:
 HARUKI_ASSET_STUDIO_FFI_CLI_PARITY_MODE=true
 ```
 
-or with `asset_region_bench --native-cli-parity`.
+or with `asset_region_bench --ffi-cli-parity`.
 
 ## Media FFI
 
@@ -148,7 +148,7 @@ run time. Ubuntu 26.04 provides matching packages such as `libavcodec62`,
 - repeated `--on-demand-rule`
 - `--prefetch-only`
 - `--bundle-cache-dir`
-- `--native-cli-parity`
+- `--ffi-cli-parity`
 - native worker pool controls
 - media/backend controls
 - JSONL output with detailed phase and bundle telemetry

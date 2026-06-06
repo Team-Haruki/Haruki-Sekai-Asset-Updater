@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth 1 --single-branch --branch codex/native-aot-ffi https://github.com/Team-Haruki/AssetStudio.git
 # Force dependency projects away from their net472 targets during NativeAOT publish.
 RUN cd AssetStudio/AssetStudioFFI && \
-    dotnet publish -c Release -r linux-x64 -f net9.0 --self-contained true -o /app/assetstudio-native \
+    dotnet publish -c Release -r linux-x64 -f net9.0 --self-contained true -o /app/assetstudio-ffi \
     -p:TargetFrameworks=net9.0 \
     -p:PublishAot=true \
     -p:InvariantGlobalization=false
@@ -55,7 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
 COPY --from=builder /app/target/release/assetstudio_ffi_worker /app/assetstudio_ffi_worker
-COPY --from=assetstudio-builder /app/assetstudio-native /app/assetstudio
+COPY --from=assetstudio-builder /app/assetstudio-ffi /app/assetstudio
 COPY --from=ffmpeg-builder /ffmpeg /usr/local/bin/ffmpeg
 RUN mkdir -p logs
 

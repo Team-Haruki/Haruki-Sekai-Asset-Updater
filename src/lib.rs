@@ -4,8 +4,8 @@ pub mod core;
 pub mod service;
 
 pub use core::assetstudio_ffi::{
-    AssetStudioAssetInfo, AssetStudioInspectOptions, AssetStudioInspectResponse,
-    AssetStudioNativeClient, AssetStudioNativeVersion, AssetStudioObjectPayload,
+    AssetStudioAssetInfo, AssetStudioFfiClient, AssetStudioInspectOptions,
+    AssetStudioInspectResponse, AssetStudioNativeVersion, AssetStudioObjectPayload,
     AssetStudioObjectReadBatchOutput, AssetStudioObjectReadOptions, AssetStudioObjectReadOutput,
     AssetStudioReadKind,
 };
