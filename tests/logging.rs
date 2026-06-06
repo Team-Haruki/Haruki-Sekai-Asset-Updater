@@ -101,13 +101,15 @@ async fn binary_writes_main_and_access_logs_to_files() {
 
     let binary = binary_path();
 
-    let mut child = Command::new(binary)
+    let child = Command::new(binary)
         .env("HARUKI_CONFIG_PATH", &config_path)
         .env_remove("RUST_LOG")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    #[cfg(not(unix))]
+    let mut child = child;
 
     wait_for_health(port).await;
 
@@ -140,14 +142,19 @@ async fn binary_writes_main_and_access_logs_to_files() {
     {
         let _ = child.kill().await;
     }
-    let _ = child.wait().await;
+    let output = child.wait_with_output().await.unwrap();
 
     let main_contents = fs::read_to_string(&main_log).unwrap();
     let access_contents = fs::read_to_string(&access_log).unwrap();
+    let stdout_contents = String::from_utf8_lossy(&output.stdout);
 
     assert!(
         main_contents.contains("starting haruki-sekai-asset-updater"),
         "unexpected main log contents: {main_contents}"
+    );
+    assert!(
+        stdout_contents.contains("starting haruki-sekai-asset-updater"),
+        "expected startup log on stdout when main log file is enabled, got: {stdout_contents}"
     );
     assert!(access_contents.contains("/healthz"));
     assert!(access_contents.contains("/v2/assets/update"));

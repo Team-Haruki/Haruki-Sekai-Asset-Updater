@@ -82,8 +82,30 @@ pub fn init_logging(config: &AppConfig) -> io::Result<LoggingGuards> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(env_filter_directive(&config.logging.level)));
 
-    let (writer, ansi_enabled) = main_log_writer(config)?;
-    let layer = match config.logging.format {
+    let mut layers = Vec::new();
+    layers.push(main_log_layer(
+        config.logging.format,
+        BoxMakeWriter::new(io::stdout),
+        true,
+    ));
+    if let Some(writer) = main_log_file_writer(config)? {
+        layers.push(main_log_layer(config.logging.format, writer, false));
+    }
+
+    tracing_subscriber::registry()
+        .with(layers)
+        .with(filter)
+        .init();
+
+    Ok(LoggingGuards { _noop: () })
+}
+
+fn main_log_layer(
+    format: LogFormat,
+    writer: BoxMakeWriter,
+    ansi_enabled: bool,
+) -> Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync + 'static> {
+    match format {
         LogFormat::Json => tsfmt::layer()
             .json()
             .with_writer(writer)
@@ -95,14 +117,7 @@ pub fn init_logging(config: &AppConfig) -> io::Result<LoggingGuards> {
             .with_ansi(ansi_enabled)
             .event_format(ColoredFormatter { ansi: ansi_enabled })
             .boxed(),
-    };
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(layer)
-        .init();
-
-    Ok(LoggingGuards { _noop: () })
+    }
 }
 
 fn env_filter_directive(level: &str) -> String {
@@ -126,7 +141,7 @@ fn env_filter_directive(level: &str) -> String {
     }
 }
 
-fn main_log_writer(config: &AppConfig) -> io::Result<(BoxMakeWriter, bool)> {
+fn main_log_file_writer(config: &AppConfig) -> io::Result<Option<BoxMakeWriter>> {
     let file_path = config
         .logging
         .file
@@ -147,9 +162,9 @@ fn main_log_writer(config: &AppConfig) -> io::Result<(BoxMakeWriter, bool)> {
             .unwrap_or("service.log")
             .to_string();
         let path = parent.join(file_name);
-        Ok((BoxMakeWriter::new(SharedFileMakeWriter::new(&path)?), false))
+        Ok(Some(BoxMakeWriter::new(SharedFileMakeWriter::new(&path)?)))
     } else {
-        Ok((BoxMakeWriter::new(io::stdout), true))
+        Ok(None)
     }
 }
 
