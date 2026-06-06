@@ -450,7 +450,7 @@ pub struct NativeObjectReadPlanStats {
 }
 
 #[derive(Debug, Clone, Default)]
-struct NativeUnityPyUnpackSummary {
+struct NativeObjectExportSummary {
     written_files: Vec<PathBuf>,
     acb_sources: Vec<NativeInMemoryMediaSource>,
     phase_ms: HashMap<String, u64>,
@@ -472,7 +472,7 @@ pub struct NativeInMemoryMediaSource {
 }
 
 #[derive(Clone, Copy)]
-struct NativeUnityPyUnpackOptions<'a> {
+struct NativeObjectExportOptions<'a> {
     output_dir: &'a Path,
     export_path: &'a str,
     strip_path_prefix: &'a str,
@@ -484,9 +484,9 @@ struct NativeUnityPyUnpackOptions<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct NativeUnityPyPoolCallOptions<'a> {
+struct NativeObjectExportPoolCallOptions<'a> {
     inspect_request: &'a AssetStudioNativeInspectRequest,
-    unpack: NativeUnityPyUnpackOptions<'a>,
+    unpack: NativeObjectExportOptions<'a>,
 }
 
 #[derive(Debug, Serialize)]
@@ -629,7 +629,7 @@ pub async fn export_unity_asset_bundle_payloads(
     .ok_or_else(|| ExportPipelineError::AssetStudioNative {
         message: "tools.asset_studio_native_library_path is required".to_string(),
     })?;
-    let native_unitypy_summary = run_assetstudio_native_unitypy_unpack(
+    let native_object_summary = run_assetstudio_native_object_export(
         app_config,
         region,
         asset_bundle_file,
@@ -647,11 +647,11 @@ pub async fn export_unity_asset_bundle_payloads(
         export_path: post_process_export_path,
         export_root: output_dir.to_path_buf(),
         native_scoped_post_process: true,
-        native_written_files: native_unitypy_summary.written_files,
-        native_acb_sources: native_unitypy_summary.acb_sources,
-        native_export_phase_ms: native_unitypy_summary.phase_ms,
-        native_skipped_object_reads: native_unitypy_summary.skipped_object_reads,
-        native_object_read_plan: native_unitypy_summary.object_read_plan,
+        native_written_files: native_object_summary.written_files,
+        native_acb_sources: native_object_summary.acb_sources,
+        native_export_phase_ms: native_object_summary.phase_ms,
+        native_skipped_object_reads: native_object_summary.skipped_object_reads,
+        native_object_read_plan: native_object_summary.object_read_plan,
     })
 }
 
@@ -659,7 +659,7 @@ fn configured_path(path: Option<&str>) -> Option<&str> {
     path.map(str::trim).filter(|value| !value.is_empty())
 }
 
-async fn run_assetstudio_native_unitypy_unpack(
+async fn run_assetstudio_native_object_export(
     app_config: &AppConfig,
     region: &RegionConfig,
     asset_bundle_file: &Path,
@@ -667,7 +667,7 @@ async fn run_assetstudio_native_unitypy_unpack(
     export_path: &str,
     strip_path_prefix: &str,
     native_library_path: &str,
-) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
+) -> Result<NativeObjectExportSummary, ExportPipelineError> {
     if app_config.tools.asset_studio_native_call_mode == AssetStudioNativeCallMode::Direct {
         let inspect_request = AssetStudioNativeInspectRequest {
             input_path: asset_bundle_file.to_string_lossy().to_string(),
@@ -682,7 +682,7 @@ async fn run_assetstudio_native_unitypy_unpack(
             load_all_assets: true,
             include_assets: false,
         };
-        let unpack_options = NativeUnityPyUnpackOptions {
+        let unpack_options = NativeObjectExportOptions {
             output_dir,
             export_path,
             strip_path_prefix,
@@ -697,8 +697,8 @@ async fn run_assetstudio_native_unitypy_unpack(
             cli_parity_mode: app_config.tools.asset_studio_native_cli_parity_mode,
         };
         let mut worker = NativeDirectWorker::load(native_library_path)?;
-        return call_assetstudio_native_unitypy_unpack_with_target(
-            NativeUnityPyCallTarget::Direct(&mut worker),
+        return call_assetstudio_native_object_export_with_target(
+            NativeObjectExportCallTarget::Direct(&mut worker),
             &AtomicU64::new(1),
             &inspect_request,
             &unpack_options,
@@ -709,7 +709,7 @@ async fn run_assetstudio_native_unitypy_unpack(
     if app_config.tools.asset_studio_native_call_mode == AssetStudioNativeCallMode::Process {
         warn!(
             call_mode = ?app_config.tools.asset_studio_native_call_mode,
-            "unitypy-style native unpack uses worker pool for context affinity in process mode"
+            "object-level native unpack uses worker pool for context affinity in process mode"
         );
     }
     let worker_path = configured_assetstudio_native_worker_path(
@@ -735,7 +735,7 @@ async fn run_assetstudio_native_unitypy_unpack(
         load_all_assets: true,
         include_assets: false,
     };
-    let unpack_options = NativeUnityPyUnpackOptions {
+    let unpack_options = NativeObjectExportOptions {
         output_dir,
         export_path,
         strip_path_prefix,
@@ -749,7 +749,7 @@ async fn run_assetstudio_native_unitypy_unpack(
         read_batch_size: app_config.tools.asset_studio_native_read_batch_size,
         cli_parity_mode: app_config.tools.asset_studio_native_cli_parity_mode,
     };
-    let result = pool.unitypy_unpack(&inspect_request, unpack_options).await;
+    let result = pool.object_export(&inspect_request, unpack_options).await;
 
     match result {
         Ok(summary) => Ok(summary),
@@ -757,10 +757,10 @@ async fn run_assetstudio_native_unitypy_unpack(
             warn!(
                 process_concurrency = app_config.effective_asset_studio_native_process_concurrency(),
                 error = %error,
-                "assetstudio native unitypy worker crashed; retrying bundle once with an exclusive fresh worker"
+                "assetstudio native object export worker crashed; retrying bundle once with an exclusive fresh worker"
             );
             let _recovery_guard = native_process_recovery_lock().await;
-            pool.unitypy_unpack_exclusive(&inspect_request, unpack_options)
+            pool.object_export_exclusive(&inspect_request, unpack_options)
                 .await
         }
         Err(error) => Err(error),
@@ -2508,12 +2508,12 @@ fn parse_assetstudio_native_inspect_worker_output(
     }
 }
 
-enum NativeUnityPyCallTarget<'a> {
+enum NativeObjectExportCallTarget<'a> {
     Pooled(&'a mut NativePooledWorker),
     Direct(&'a mut NativeDirectWorker),
 }
 
-impl NativeUnityPyCallTarget<'_> {
+impl NativeObjectExportCallTarget<'_> {
     async fn call(
         &mut self,
         id: u64,
@@ -2526,14 +2526,14 @@ impl NativeUnityPyCallTarget<'_> {
     }
 }
 
-async fn call_assetstudio_native_unitypy_unpack_worker(
+async fn call_assetstudio_native_object_export_worker(
     worker: &mut NativePooledWorker,
     next_id: &AtomicU64,
     inspect_request: &AssetStudioNativeInspectRequest,
-    options: &NativeUnityPyUnpackOptions<'_>,
-) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
-    call_assetstudio_native_unitypy_unpack_with_target(
-        NativeUnityPyCallTarget::Pooled(worker),
+    options: &NativeObjectExportOptions<'_>,
+) -> Result<NativeObjectExportSummary, ExportPipelineError> {
+    call_assetstudio_native_object_export_with_target(
+        NativeObjectExportCallTarget::Pooled(worker),
         next_id,
         inspect_request,
         options,
@@ -2541,19 +2541,19 @@ async fn call_assetstudio_native_unitypy_unpack_worker(
     .await
 }
 
-async fn call_assetstudio_native_unitypy_unpack_with_target(
-    mut target: NativeUnityPyCallTarget<'_>,
+async fn call_assetstudio_native_object_export_with_target(
+    mut target: NativeObjectExportCallTarget<'_>,
     next_id: &AtomicU64,
     inspect_request: &AssetStudioNativeInspectRequest,
-    options: &NativeUnityPyUnpackOptions<'_>,
-) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
+    options: &NativeObjectExportOptions<'_>,
+) -> Result<NativeObjectExportSummary, ExportPipelineError> {
     let open_request = AssetStudioNativeRequest::ContextOpen(inspect_request.clone());
     let open_output = target
         .call(next_id.fetch_add(1, Ordering::Relaxed), &open_request)
         .await?;
     let open_response = parse_assetstudio_native_context_open_worker_output(open_output)?;
     let context_id = open_response.context_id;
-    let mut summary = NativeUnityPyUnpackSummary {
+    let mut summary = NativeObjectExportSummary {
         written_files: Vec::new(),
         acb_sources: Vec::new(),
         phase_ms: open_response.phase_ms.clone(),
@@ -2575,7 +2575,7 @@ async fn call_assetstudio_native_unitypy_unpack_with_target(
         .await?;
         let configured_asset_types = asset_studio_export_type_list(options.region);
         let readable_assets =
-            select_native_unitypy_readable_assets(&assets, &configured_asset_types, &mut summary);
+            select_native_object_readable_assets(&assets, &configured_asset_types, &mut summary);
 
         let read_batch_size =
             native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
@@ -2621,12 +2621,7 @@ async fn call_assetstudio_native_unitypy_unpack_with_target(
                     if is_playable_mono_typetree(asset, &read_output) {
                         playable_outputs.push(((*asset).clone(), (*read_output).clone()));
                     } else {
-                        write_unitypy_object_payload(
-                            options,
-                            &mut path_state,
-                            asset,
-                            &read_output,
-                        )?;
+                        write_native_object_payload(options, &mut path_state, asset, &read_output)?;
                     }
                 }
             }
@@ -2650,18 +2645,18 @@ async fn call_assetstudio_native_unitypy_unpack_with_target(
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Err(unpack_error), Err(close_error)) => {
-            warn!(error = %close_error, "assetstudio native context close failed after unitypy unpack error");
+            warn!(error = %close_error, "assetstudio native context close failed after object export error");
             Err(unpack_error)
         }
     }
 }
 
 async fn list_assetstudio_native_context_objects_worker(
-    target: &mut NativeUnityPyCallTarget<'_>,
+    target: &mut NativeObjectExportCallTarget<'_>,
     next_id: &AtomicU64,
     context_id: i64,
     open_response: &AssetStudioNativeContextOpenResponse,
-    summary: &mut NativeUnityPyUnpackSummary,
+    summary: &mut NativeObjectExportSummary,
 ) -> Result<Vec<AssetStudioNativeAssetInfo>, ExportPipelineError> {
     if !open_response.assets.is_empty() && !open_response.has_more_assets {
         summary.phase_ms.insert(
@@ -2836,10 +2831,10 @@ fn parse_assetstudio_native_object_read_worker_output_recoverable(
     )))
 }
 
-fn select_native_unitypy_readable_assets<'a>(
+fn select_native_object_readable_assets<'a>(
     assets: &'a [AssetStudioNativeAssetInfo],
     configured_asset_types: &[String],
-    summary: &mut NativeUnityPyUnpackSummary,
+    summary: &mut NativeObjectExportSummary,
 ) -> Vec<&'a AssetStudioNativeAssetInfo> {
     let mut readable_assets = Vec::new();
     let texture2d_array_containers = texture2d_array_parent_containers(assets);
@@ -2857,7 +2852,7 @@ fn select_native_unitypy_readable_assets<'a>(
             });
             continue;
         }
-        if !is_unitypy_supported_asset(asset) {
+        if !is_native_object_supported_asset(asset) {
             if let Some(skipped) = native_skipped_unsupported_asset(asset) {
                 warn!(
                     path_id = skipped.path_id,
@@ -2932,7 +2927,7 @@ fn native_image_format_for_asset(_asset: &AssetStudioNativeAssetInfo, _configure
 }
 
 fn record_native_object_read_batch_diagnostics(
-    summary: &mut NativeUnityPyUnpackSummary,
+    summary: &mut NativeObjectExportSummary,
     asset_chunk: &[&AssetStudioNativeAssetInfo],
     read_outputs: &NativeObjectReadBatchParseOutput,
 ) {
@@ -3214,7 +3209,7 @@ fn object_read_batch_payload_data_bytes(
     }
 }
 
-fn is_unitypy_supported_asset(asset: &AssetStudioNativeAssetInfo) -> bool {
+fn is_native_object_supported_asset(asset: &AssetStudioNativeAssetInfo) -> bool {
     asset
         .asset_type
         .as_deref()
@@ -3440,8 +3435,8 @@ fn merge_optional_max_phase_ms(target: &mut HashMap<String, u64>, phase: &str, v
     }
 }
 
-fn write_unitypy_object_payload(
-    options: &NativeUnityPyUnpackOptions<'_>,
+fn write_native_object_payload(
+    options: &NativeObjectExportOptions<'_>,
     path_state: &mut NativeSemanticExportPathState,
     asset: &AssetStudioNativeAssetInfo,
     read_output: &AssetStudioNativeObjectReadOutput,
@@ -3452,7 +3447,7 @@ fn write_unitypy_object_payload(
         return Ok(());
     }
 
-    let target = unitypy_object_output_path(
+    let target = native_object_output_path(
         options.output_dir,
         options.export_path,
         options.strip_path_prefix,
@@ -3511,7 +3506,7 @@ fn write_unitypy_object_payload(
     } else if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
         write_native_image_payload_final_files(&target, &read_output.payload, options.region)?
     } else {
-        write_unitypy_payload_file(&target, &read_output.payload, options.cli_parity_mode)?;
+        write_native_payload_file(&target, &read_output.payload, options.cli_parity_mode)?;
         vec![target.clone()]
     };
     let manifest_target = if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
@@ -3561,7 +3556,7 @@ fn is_playable_mono_typetree(
 }
 
 fn write_assetstudio_playable_payloads(
-    options: &NativeUnityPyUnpackOptions<'_>,
+    options: &NativeObjectExportOptions<'_>,
     path_state: &mut NativeSemanticExportPathState,
     playable_outputs: Vec<(
         AssetStudioNativeAssetInfo,
@@ -3582,7 +3577,7 @@ fn write_assetstudio_playable_payloads(
             .filter(|value| !value.trim().is_empty())
             .map(|value| value.replace('\\', "/"))
         else {
-            write_unitypy_object_payload(options, path_state, &asset, &read_output)?;
+            write_native_object_payload(options, path_state, &asset, &read_output)?;
             continue;
         };
         by_container
@@ -3634,7 +3629,7 @@ fn write_assetstudio_playable_payloads(
                 source,
             })?;
         }
-        write_unitypy_payload_file(&target, &payload, options.cli_parity_mode)?;
+        write_native_payload_file(&target, &payload, options.cli_parity_mode)?;
         path_state.written_files.push(target.clone());
         write_assetstudio_export_manifest_entry(
             options.output_dir,
@@ -3849,7 +3844,7 @@ fn is_text_asset_acb_target(asset: &AssetStudioNativeAssetInfo, target: &Path) -
             .is_some_and(|extension| extension.eq_ignore_ascii_case("acb"))
 }
 
-fn write_unitypy_payload_file(
+fn write_native_payload_file(
     target: &Path,
     payload: &[u8],
     cli_parity_mode: bool,
@@ -4368,7 +4363,7 @@ fn read_bundle_u64(payload: &[u8], cursor: &mut usize) -> Result<u64, ExportPipe
     Ok(value)
 }
 
-fn unitypy_object_output_path(
+fn native_object_output_path(
     output_dir: &Path,
     export_path: &str,
     strip_path_prefix: &str,
@@ -4392,7 +4387,7 @@ fn unitypy_object_output_path(
             .unwrap_or_else(|| PathBuf::from(assetstudio_semantic_file_stem(asset)));
         output_dir.join(export_path).join(file_name)
     };
-    let extension = unitypy_object_output_extension(asset, payload_kind, suggested_extension);
+    let extension = native_object_output_extension(asset, payload_kind, suggested_extension);
     if !extension.is_empty() {
         path.set_extension(extension.trim_start_matches('.'));
     }
@@ -4684,7 +4679,7 @@ fn assetstudio_semantic_file_stem(asset: &AssetStudioNativeAssetInfo) -> String 
         .unwrap_or_else(|| "asset".to_string())
 }
 
-fn unitypy_object_output_extension(
+fn native_object_output_extension(
     asset: &AssetStudioNativeAssetInfo,
     payload_kind: Option<&str>,
     suggested_extension: Option<&str>,
@@ -5437,11 +5432,11 @@ impl NativeWorkerPool {
         }
     }
 
-    async fn unitypy_unpack(
+    async fn object_export(
         &self,
         inspect_request: &AssetStudioNativeInspectRequest,
-        unpack: NativeUnityPyUnpackOptions<'_>,
-    ) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
+        unpack: NativeObjectExportOptions<'_>,
+    ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
         let wait_started = Instant::now();
         let _permit = self
             .semaphore
@@ -5453,11 +5448,11 @@ impl NativeWorkerPool {
             })?;
         let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let cpu_budget_slot = acquire_cpu_budget_permit(self.cpu_budget).await?;
-        let call = NativeUnityPyPoolCallOptions {
+        let call = NativeObjectExportPoolCallOptions {
             inspect_request,
             unpack,
         };
-        self.unitypy_unpack_with_permit(
+        self.object_export_with_permit(
             _permit,
             cpu_budget_slot.permit,
             wait_ms,
@@ -5467,11 +5462,11 @@ impl NativeWorkerPool {
         .await
     }
 
-    async fn unitypy_unpack_exclusive(
+    async fn object_export_exclusive(
         &self,
         inspect_request: &AssetStudioNativeInspectRequest,
-        unpack: NativeUnityPyUnpackOptions<'_>,
-    ) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
+        unpack: NativeObjectExportOptions<'_>,
+    ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
         let wait_started = Instant::now();
         let permits = self
             .semaphore
@@ -5483,11 +5478,11 @@ impl NativeWorkerPool {
             })?;
         let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let cpu_budget_slot = acquire_cpu_budget_permit(self.cpu_budget).await?;
-        let call = NativeUnityPyPoolCallOptions {
+        let call = NativeObjectExportPoolCallOptions {
             inspect_request,
             unpack,
         };
-        self.unitypy_unpack_with_permit(
+        self.object_export_with_permit(
             permits,
             cpu_budget_slot.permit,
             wait_ms,
@@ -5497,20 +5492,20 @@ impl NativeWorkerPool {
         .await
     }
 
-    async fn unitypy_unpack_with_permit(
+    async fn object_export_with_permit(
         &self,
         _permit: OwnedSemaphorePermit,
         _cpu_permit: CpuBudgetPermit,
         wait_ms: u64,
         cpu_budget_wait_ms: u64,
-        call: NativeUnityPyPoolCallOptions<'_>,
-    ) -> Result<NativeUnityPyUnpackSummary, ExportPipelineError> {
+        call: NativeObjectExportPoolCallOptions<'_>,
+    ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
         let mut worker = match self.available.lock().await.pop() {
             Some(worker) => worker,
             None => self.spawn_worker().await?,
         };
 
-        let call_result = call_assetstudio_native_unitypy_unpack_worker(
+        let call_result = call_assetstudio_native_object_export_worker(
             &mut worker,
             &self.next_id,
             call.inspect_request,
@@ -5547,7 +5542,7 @@ impl NativeWorkerPool {
                     completed_calls = worker.completed_calls,
                     wait_ms,
                     error = %error,
-                    "assetstudio native worker pool unitypy unpack failed"
+                    "assetstudio native worker pool object export failed"
                 );
                 worker.kill();
                 Err(error)
@@ -8040,6 +8035,7 @@ mod tests {
         assetstudio_type_selector_matches, close_assetstudio_native_context,
         convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
         handle_png_conversion, inspect_assetstudio_native_bundle, merge_usm_files,
+        native_object_output_extension, native_object_output_path,
         native_read_batch_size_for_assets, native_read_kind_for_asset,
         native_skipped_unsupported_asset, open_assetstudio_native_context,
         parse_assetstudio_native_context_list_objects_worker_output,
@@ -8048,16 +8044,15 @@ mod tests {
         parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
         process_usm_file, query_assetstudio_native_version,
         record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
-        scan_all_files, select_native_unitypy_readable_assets, should_keep_music_long_hca_track,
-        text_asset_public_bytes_target, unitypy_object_output_extension,
-        unitypy_object_output_path, write_assetstudio_export_manifest_entry,
-        write_native_image_payload_final_files, write_unitypy_object_payload,
+        scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
+        text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
+        write_native_image_payload_final_files, write_native_object_payload,
         AssetStudioNativeAssetInfo, AssetStudioNativeContextCloseRequest,
         AssetStudioNativeInspectRequest, AssetStudioNativeObjectReadOutput,
         AssetStudioNativeObjectReadResponse, AssetStudioNativeResponse, AssetStudioNativeVersion,
-        NativeBatchPhaseStats, NativeObjectReadBatchParseOutput, NativeObjectReadParseResult,
-        NativeObjectReadPlanStats, NativeSemanticExportPathState, NativeUnityPyUnpackOptions,
-        NativeUnityPyUnpackSummary, NativeWorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+        NativeBatchPhaseStats, NativeObjectExportOptions, NativeObjectExportSummary,
+        NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
+        NativeSemanticExportPathState, NativeWorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
         NATIVE_AOT_DEFAULT_IMAGE_FORMAT, NATIVE_AOT_FAST_IMAGE_FORMAT,
         NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
     };
@@ -9275,7 +9270,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let (_config, mut region) = processing_config();
         region.export.by_category = true;
         let read_kinds = BTreeMap::new();
-        let options = NativeUnityPyUnpackOptions {
+        let options = NativeObjectExportOptions {
             output_dir: dir.path(),
             export_path: "sound/foo",
             strip_path_prefix: "assets/sekai/assetbundle/resources",
@@ -9315,7 +9310,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             payload: b"acb!".to_vec(),
         };
 
-        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+        write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
         let expected_target = dir.path().join("ondemand/sound/se_0126_01.acb");
         assert!(!expected_target.exists());
@@ -9336,7 +9331,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let (_config, mut region) = processing_config();
         region.export.by_category = true;
         let read_kinds = BTreeMap::new();
-        let options = NativeUnityPyUnpackOptions {
+        let options = NativeObjectExportOptions {
             output_dir: dir.path(),
             export_path: "actionset/group0",
             strip_path_prefix: "assets/sekai/assetbundle/resources",
@@ -9383,7 +9378,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             payload: payload.to_vec(),
         };
 
-        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+        write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
         let expected = dir.path().join("startapp/actionset/group0/_bundle.json");
         assert!(expected.exists());
@@ -9403,7 +9398,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let (_config, mut region) = processing_config();
         region.export.by_category = true;
         let read_kinds = BTreeMap::new();
-        let options = NativeUnityPyUnpackOptions {
+        let options = NativeObjectExportOptions {
             output_dir: dir.path(),
             export_path: "crystal_shop/thumbnail/mysekai_mission_pass5",
             strip_path_prefix: "assets/sekai/assetbundle/resources",
@@ -9454,7 +9449,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             payload: payload.to_vec(),
         };
 
-        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+        write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
         let expected = dir
             .path()
@@ -9475,7 +9470,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let (_config, mut region) = processing_config();
         region.export.by_category = true;
         let read_kinds = BTreeMap::new();
-        let options = NativeUnityPyUnpackOptions {
+        let options = NativeObjectExportOptions {
             output_dir: dir.path(),
             export_path: "actionset/group0",
             strip_path_prefix: "assets/sekai/assetbundle/resources",
@@ -9516,7 +9511,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             payload: payload.to_vec(),
         };
 
-        write_unitypy_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+        write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
         let expected = dir.path().join(
             "startapp/actionset/group0/shoppingmall_staff.assets/monoscript/ActionSetData.json",
@@ -9734,15 +9729,15 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         };
 
         assert_eq!(
-            unitypy_object_output_extension(&asset, Some("typetree_json"), Some(".bytes")),
+            native_object_output_extension(&asset, Some("typetree_json"), Some(".bytes")),
             "json"
         );
         assert_eq!(
-            unitypy_object_output_extension(&asset, Some("raw"), Some(".json")),
+            native_object_output_extension(&asset, Some("raw"), Some(".json")),
             "dat"
         );
         assert_eq!(
-            unitypy_object_output_extension(&asset, Some("animator_bundle_fbx"), Some(".fbx")),
+            native_object_output_extension(&asset, Some("animator_bundle_fbx"), Some(".fbx")),
             ""
         );
     }
@@ -9812,7 +9807,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "character/member/res005_no005",
             "assets/sekai/assetbundle/resources",
@@ -9847,7 +9842,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "music/long/0001_01",
             "assets/sekai/assetbundle/resources",
@@ -9880,7 +9875,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "character/member/res005_no005",
             "assets/sekai/assetbundle/resources",
@@ -9915,7 +9910,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "character/member_cutout/res001_no001",
             "assets/sekai/assetbundle/resources",
@@ -9950,7 +9945,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "character/member_cutout/res001_no001",
             "assets/sekai/assetbundle/resources",
@@ -9982,7 +9977,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "mysekai/foo",
             "assets/sekai/assetbundle/resources",
@@ -10106,7 +10101,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "event/foo",
             "assets/sekai/assetbundle/resources/startapp/",
@@ -10139,7 +10134,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "mysekai/effect/common/fbx",
             "assets/sekai/assetbundle/resources/startapp/",
@@ -10172,7 +10167,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             source_file: None,
         };
 
-        let target = unitypy_object_output_path(
+        let target = native_object_output_path(
             Path::new("/tmp/out"),
             "custom_profile/font",
             "assets/sekai/assetbundle/resources",
@@ -10661,10 +10656,10 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             path_id: 3,
             ..parent.clone()
         };
-        let mut summary = NativeUnityPyUnpackSummary::default();
+        let mut summary = NativeObjectExportSummary::default();
         let assets = vec![parent, child, standalone_child];
         let readable =
-            select_native_unitypy_readable_assets(&assets, &["all".to_string()], &mut summary);
+            select_native_object_readable_assets(&assets, &["all".to_string()], &mut summary);
 
         let path_ids = readable
             .iter()
@@ -10896,7 +10891,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             size: 3,
             source_file: None,
         };
-        let mut summary = NativeUnityPyUnpackSummary {
+        let mut summary = NativeObjectExportSummary {
             written_files: Vec::new(),
             acb_sources: Vec::new(),
             phase_ms: HashMap::from([
