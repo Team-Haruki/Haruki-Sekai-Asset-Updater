@@ -37,8 +37,8 @@
 - Sensitive config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
 - The loader resolves this syntax for:
   `server.auth.bearer_token`,
-  `tools.asset_studio_native_library_path`,
-  `tools.asset_studio_native_worker_path`,
+  `tools.asset_studio_ffi_library_path`,
+  `tools.asset_studio_ffi_worker_path`,
   `storage.providers[].access_key`,
   `storage.providers[].secret_key`,
   `git_sync.chart_hashes.password`,
@@ -46,13 +46,13 @@
   `regions.*.crypto.aes_iv_hex`.
 - Tracked config templates expect values such as:
   `HARUKI_MEDIA_BACKEND`,
-  `HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH`,
-  `HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE`,
-  `HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH`,
-  `HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY`,
-  `HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS`,
-  `HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE`,
-  `HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT`,
+  `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`,
+  `HARUKI_ASSET_STUDIO_FFI_CALL_MODE`,
+  `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`,
+  `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
+  `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`,
+  `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE`,
+  `HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT`,
   `HARUKI_CPU_BUDGET_AUTO`,
   `HARUKI_CPU_BUDGET_RATIO`,
   `HARUKI_CPU_RESERVED`,
@@ -74,9 +74,9 @@ cp haruki-asset-configs.example.yaml haruki-asset-configs.yaml
 ```bash
 cp .env.example .env
 export HARUKI_MEDIA_BACKEND=ffi
-export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
-export HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/path/to/assetstudio_native_worker
-export HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE=pool
+export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
+export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/path/to/assetstudio_ffi_worker
+export HARUKI_ASSET_STUDIO_FFI_CALL_MODE=pool
 export HARUKI_SHARED_AES_KEY_HEX=...
 export HARUKI_SHARED_AES_IV_HEX=...
 export HARUKI_EN_AES_KEY_HEX=...

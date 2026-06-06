@@ -9,8 +9,8 @@ Recommended production settings:
 
 ```yaml
 tools:
-  asset_studio_native_call_mode: "pool"
-  asset_studio_native_read_batch_size: 32
+  asset_studio_ffi_call_mode: "pool"
+  asset_studio_ffi_read_batch_size: 32
   media_backend: "ffi"
 ```
 
@@ -23,8 +23,8 @@ cargo build --release --features media-ffi
 Required paths:
 
 ```bash
-export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so
-export HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/app/assetstudio_native_worker
+export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so
+export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/app/assetstudio_ffi_worker
 ```
 
 ## Backend Modes
@@ -47,10 +47,10 @@ Media backend:
 Useful environment variables:
 
 ```bash
-export HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=0
-export HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS=256
-export HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE=32
-export HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT=raw_rgba
+export HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY=0
+export HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS=256
+export HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE=32
+export HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT=raw_rgba
 export HARUKI_CPU_BUDGET_AUTO=true
 export HARUKI_CPU_BUDGET_RATIO=0.75
 export HARUKI_CPU_RESERVED=1
@@ -58,9 +58,9 @@ export HARUKI_CPU_RESERVED=1
 
 General guidance:
 
-- Keep `asset_studio_native_read_batch_size=32` as the default.
+- Keep `asset_studio_ffi_read_batch_size=32` as the default.
 - Try `64` for image-heavy rules such as `character/member`.
-- Use `asset_studio_native_process_concurrency=0` for the shared-host default.
+- Use `asset_studio_ffi_process_concurrency=0` for the shared-host default.
   Without CPU throttle it auto-scales to the CPU budget. With CPU throttle
   enabled it can oversubscribe workers up to the CPU count while the throttle
   controls actual process CPU. `cpu_budget_ratio` and `cpu_reserved` remain the
@@ -161,9 +161,9 @@ export RUST_LOG=info
 NativeAOT worker and C# adapter:
 
 ```bash
-export HARUKI_ASSET_STUDIO_NATIVE_TRACE=1
-export HARUKI_ASSET_STUDIO_NATIVE_WORKER_TRACE=1
-export HARUKI_ASSET_STUDIO_NATIVE_LOG_DIR=/tmp/haruki-native-logs
+export HARUKI_ASSET_STUDIO_FFI_TRACE=1
+export HARUKI_ASSET_STUDIO_FFI_WORKER_TRACE=1
+export HARUKI_ASSET_STUDIO_FFI_LOG_DIR=/tmp/haruki-native-logs
 ```
 
 Useful signs in benchmark JSONL:

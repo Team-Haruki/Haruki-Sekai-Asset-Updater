@@ -4,9 +4,9 @@ use std::str::FromStr;
 use crate::core::config::DEFAULT_ASSET_STUDIO_EXPORT_TYPES;
 use crate::core::errors::ExportPipelineError;
 use crate::core::export_pipeline::{
-    call_assetstudio_native_typed_request, close_assetstudio_native_context,
-    inspect_assetstudio_native_bundle, list_assetstudio_native_context_objects,
-    open_assetstudio_native_context, query_assetstudio_native_version,
+    call_assetstudio_ffi_typed_request, close_assetstudio_ffi_context,
+    inspect_assetstudio_ffi_bundle, list_assetstudio_ffi_context_objects,
+    open_assetstudio_ffi_context, query_assetstudio_ffi_version,
     AssetStudioNativeContextCloseRequest, AssetStudioNativeContextListObjectsRequest,
     AssetStudioNativeContextListObjectsResponse, AssetStudioNativeContextReadObjectItemRequest,
     AssetStudioNativeContextReadObjectRequest, AssetStudioNativeContextReadObjectsRequest,
@@ -34,11 +34,12 @@ impl AssetStudioNativeClient {
     }
 
     pub fn from_env() -> Result<Self, ExportPipelineError> {
-        let library_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH")
+        let library_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH")
+            .or_else(|_| std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"))
             .ok()
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| ExportPipelineError::AssetStudioNative {
-                message: "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH is not set".to_string(),
+                message: "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH is not set".to_string(),
             })?;
         Ok(Self::new(library_path))
     }
@@ -48,7 +49,7 @@ impl AssetStudioNativeClient {
     }
 
     pub fn version(&self) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
-        query_assetstudio_native_version(&self.library_path_string())
+        query_assetstudio_ffi_version(&self.library_path_string())
     }
 
     pub fn inspect(
@@ -56,7 +57,7 @@ impl AssetStudioNativeClient {
         options: &AssetStudioInspectOptions,
     ) -> Result<AssetStudioInspectResponse, ExportPipelineError> {
         let request = options.to_native_request();
-        inspect_assetstudio_native_bundle(&self.library_path_string(), &request)
+        inspect_assetstudio_ffi_bundle(&self.library_path_string(), &request)
     }
 
     pub fn open_context(
@@ -64,7 +65,7 @@ impl AssetStudioNativeClient {
         options: &AssetStudioInspectOptions,
     ) -> Result<AssetStudioContext, ExportPipelineError> {
         let request = options.to_native_request();
-        let response = open_assetstudio_native_context(&self.library_path_string(), &request)?;
+        let response = open_assetstudio_ffi_context(&self.library_path_string(), &request)?;
         Ok(AssetStudioContext {
             library_path: self.library_path.clone(),
             context_id: response.context_id,
@@ -100,7 +101,7 @@ impl AssetStudioContext {
         offset: usize,
         limit: usize,
     ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
-        list_assetstudio_native_context_objects(
+        list_assetstudio_ffi_context_objects(
             &self.library_path_string(),
             &AssetStudioNativeContextListObjectsRequest {
                 context_id: self.context_id,
@@ -176,7 +177,7 @@ impl AssetStudioContext {
             kind: options.kind.as_abi_str().to_string(),
             image_format: options.image_format.clone(),
         };
-        let (status, response, payload) = call_assetstudio_native_typed_request(
+        let (status, response, payload) = call_assetstudio_ffi_typed_request(
             &self.library_path_string(),
             &AssetStudioNativeRequest::ContextReadObject(request),
         )?;
@@ -211,7 +212,7 @@ impl AssetStudioContext {
                 })
                 .collect(),
         };
-        let (status, response, payload) = call_assetstudio_native_typed_request(
+        let (status, response, payload) = call_assetstudio_ffi_typed_request(
             &self.library_path_string(),
             &AssetStudioNativeRequest::ContextReadObjects(request),
         )?;
@@ -297,7 +298,7 @@ impl AssetStudioContext {
         let request = AssetStudioNativeContextCloseRequest {
             context_id: self.context_id,
         };
-        let response = close_assetstudio_native_context(&self.library_path_string(), &request)?;
+        let response = close_assetstudio_ffi_context(&self.library_path_string(), &request)?;
         self.closed = true;
         Ok(response)
     }

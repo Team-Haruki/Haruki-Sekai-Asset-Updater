@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::export_pipeline::{
-    call_assetstudio_native_typed_request, AssetStudioNativeOperation, AssetStudioNativeRequest,
+    call_assetstudio_ffi_typed_request, AssetStudioNativeOperation, AssetStudioNativeRequest,
     AssetStudioNativeResponse, LoadedAssetStudioNativeLibrary,
 };
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ impl From<WorkerOperation> for AssetStudioNativeOperation {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "assetstudio_native_worker")]
+#[command(name = "assetstudio_ffi_worker")]
 #[command(about = "Invoke the AssetStudio NativeAOT FFI adapter in an isolated process")]
 struct Args {
     #[arg(long)]
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
     };
 
     write_worker_trace(operation, "before_ffi", Some(&request), None);
-    match call_assetstudio_native_typed_request(&args.native_library, &request) {
+    match call_assetstudio_ffi_typed_request(&args.native_library, &request) {
         Ok((status, response, payload)) => {
             write_worker_trace(
                 operation,
@@ -558,7 +558,8 @@ fn write_trace_file(file_name: &str, contents: &str) {
 }
 
 fn trace_dir() -> Option<PathBuf> {
-    let dir = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LOG_DIR")
+    let dir = std::env::var("HARUKI_ASSET_STUDIO_FFI_LOG_DIR")
+        .or_else(|_| std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LOG_DIR"))
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
@@ -568,8 +569,11 @@ fn trace_dir() -> Option<PathBuf> {
 }
 
 fn trace_enabled() -> bool {
-    env_enabled("HARUKI_ASSET_STUDIO_NATIVE_TRACE")
+    env_enabled("HARUKI_ASSET_STUDIO_FFI_TRACE")
+        || env_enabled("HARUKI_ASSET_STUDIO_NATIVE_TRACE")
+        || env_enabled("HARUKI_ASSET_STUDIO_FFI_DIAGNOSTICS")
         || env_enabled("HARUKI_ASSET_STUDIO_NATIVE_DIAGNOSTICS")
+        || env_enabled("HARUKI_ASSET_STUDIO_FFI_WORKER_TRACE")
         || env_enabled("HARUKI_ASSET_STUDIO_NATIVE_WORKER_TRACE")
 }
 

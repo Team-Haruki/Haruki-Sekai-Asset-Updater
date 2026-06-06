@@ -149,9 +149,9 @@ impl AppConfig {
                 expected: "a number greater than 0 and less than or equal to 1".to_string(),
             });
         }
-        if self.tools.asset_studio_native_read_batch_size == 0 {
+        if self.tools.asset_studio_ffi_read_batch_size == 0 {
             return Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_native_read_batch_size".to_string(),
+                field: "tools.asset_studio_ffi_read_batch_size".to_string(),
                 value: "0".to_string(),
                 expected: "a positive integer".to_string(),
             });
@@ -163,10 +163,10 @@ impl AppConfig {
                 expected: "a positive integer".to_string(),
             });
         }
-        if let Some(image_format) = &self.tools.asset_studio_native_image_format {
-            validate_asset_studio_native_image_format(image_format)?;
+        if let Some(image_format) = &self.tools.asset_studio_ffi_image_format {
+            validate_asset_studio_ffi_image_format(image_format)?;
         }
-        validate_asset_studio_native_read_kinds(&self.tools.asset_studio_native_read_kinds)?;
+        validate_asset_studio_ffi_read_kinds(&self.tools.asset_studio_ffi_read_kinds)?;
         warn_legacy_backend_options(&self.tools);
 
         Ok(())
@@ -180,12 +180,12 @@ impl AppConfig {
         self.concurrency.effective_cpu_budget()
     }
 
-    pub fn effective_asset_studio_native_process_concurrency(&self) -> usize {
-        self.effective_asset_studio_native_process_concurrency_for_cpus(available_cpu_count())
+    pub fn effective_asset_studio_ffi_process_concurrency(&self) -> usize {
+        self.effective_asset_studio_ffi_process_concurrency_for_cpus(available_cpu_count())
     }
 
-    pub fn effective_asset_studio_native_process_concurrency_for_cpus(&self, cpus: usize) -> usize {
-        let configured = self.tools.asset_studio_native_process_concurrency;
+    pub fn effective_asset_studio_ffi_process_concurrency_for_cpus(&self, cpus: usize) -> usize {
+        let configured = self.tools.asset_studio_ffi_process_concurrency;
         if configured > 0 {
             return configured;
         }
@@ -210,34 +210,58 @@ impl AppConfig {
         if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
             self.tools.media_backend = value.parse()?;
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH") {
-            self.tools.asset_studio_native_library_path = non_empty_option(value);
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
+            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+        ) {
+            self.tools.asset_studio_ffi_library_path = non_empty_option(value);
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE") {
-            self.tools.asset_studio_native_call_mode = value.parse()?;
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_CALL_MODE",
+            "HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE",
+        ) {
+            self.tools.asset_studio_ffi_call_mode = value.parse()?;
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH") {
-            self.tools.asset_studio_native_worker_path = non_empty_option(value);
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
+            "HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH",
+        ) {
+            self.tools.asset_studio_ffi_worker_path = non_empty_option(value);
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY") {
-            self.tools.asset_studio_native_process_concurrency =
-                parse_usize_env("tools.asset_studio_native_process_concurrency", &value)?;
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY",
+            "HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY",
+        ) {
+            self.tools.asset_studio_ffi_process_concurrency =
+                parse_usize_env("tools.asset_studio_ffi_process_concurrency", &value)?;
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS") {
-            self.tools.asset_studio_native_worker_max_calls =
-                parse_usize_env("tools.asset_studio_native_worker_max_calls", &value)?;
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS",
+            "HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS",
+        ) {
+            self.tools.asset_studio_ffi_worker_max_calls =
+                parse_usize_env("tools.asset_studio_ffi_worker_max_calls", &value)?;
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE") {
-            self.tools.asset_studio_native_read_batch_size =
-                parse_positive_usize("tools.asset_studio_native_read_batch_size", &value)?;
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE",
+            "HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE",
+        ) {
+            self.tools.asset_studio_ffi_read_batch_size =
+                parse_positive_usize("tools.asset_studio_ffi_read_batch_size", &value)?;
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT") {
-            self.tools.asset_studio_native_image_format =
-                non_empty_option(normalize_asset_studio_native_image_format(&value)?);
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT",
+            "HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT",
+        ) {
+            self.tools.asset_studio_ffi_image_format =
+                non_empty_option(normalize_asset_studio_ffi_image_format(&value)?);
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_NATIVE_CLI_PARITY_MODE") {
-            self.tools.asset_studio_native_cli_parity_mode =
-                parse_bool_env("tools.asset_studio_native_cli_parity_mode", &value)?;
+        if let Some(value) = env_var_with_legacy(
+            "HARUKI_ASSET_STUDIO_FFI_CLI_PARITY_MODE",
+            "HARUKI_ASSET_STUDIO_NATIVE_CLI_PARITY_MODE",
+        ) {
+            self.tools.asset_studio_ffi_cli_parity_mode =
+                parse_bool_env("tools.asset_studio_ffi_cli_parity_mode", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
             self.concurrency.media_encode =
@@ -623,6 +647,10 @@ fn non_empty_option(value: String) -> Option<String> {
     }
 }
 
+fn env_var_with_legacy(current: &str, legacy: &str) -> Option<String> {
+    env::var(current).ok().or_else(|| env::var(legacy).ok())
+}
+
 fn parse_positive_usize(field: &str, value: &str) -> Result<usize, ConfigError> {
     let trimmed = value.trim();
     let parsed = trimmed
@@ -665,36 +693,36 @@ fn parse_cpu_ratio_env(field: &str, value: &str) -> Result<f64, ConfigError> {
         })
 }
 
-fn normalize_asset_studio_native_image_format(value: &str) -> Result<String, ConfigError> {
+fn normalize_asset_studio_ffi_image_format(value: &str) -> Result<String, ConfigError> {
     let normalized = value.trim().to_lowercase();
-    validate_asset_studio_native_image_format(&normalized)?;
+    validate_asset_studio_ffi_image_format(&normalized)?;
     Ok(normalized)
 }
 
-fn validate_asset_studio_native_image_format(value: &str) -> Result<(), ConfigError> {
+fn validate_asset_studio_ffi_image_format(value: &str) -> Result<(), ConfigError> {
     match value.trim().to_lowercase().as_str() {
         "raw_rgba" => Ok(()),
         other => Err(ConfigError::InvalidValue {
-            field: "tools.asset_studio_native_image_format".to_string(),
+            field: "tools.asset_studio_ffi_image_format".to_string(),
             value: other.to_string(),
             expected: "raw_rgba".to_string(),
         }),
     }
 }
 
-fn validate_asset_studio_native_read_kinds(
+fn validate_asset_studio_ffi_read_kinds(
     read_kinds: &BTreeMap<String, String>,
 ) -> Result<(), ConfigError> {
     for (asset_type, kind) in read_kinds {
         if asset_type.trim().is_empty() {
             return Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_native_read_kinds".to_string(),
+                field: "tools.asset_studio_ffi_read_kinds".to_string(),
                 value: asset_type.clone(),
                 expected: "non-empty AssetStudio type selector".to_string(),
             });
         }
-        validate_asset_studio_native_read_kind(
-            &format!("tools.asset_studio_native_read_kinds.{asset_type}"),
+        validate_asset_studio_ffi_read_kind(
+            &format!("tools.asset_studio_ffi_read_kinds.{asset_type}"),
             kind,
         )?;
     }
@@ -713,7 +741,7 @@ fn warn_legacy_backend_options(tools: &ToolsConfig) {
     }
 }
 
-fn validate_asset_studio_native_read_kind(field: &str, value: &str) -> Result<(), ConfigError> {
+fn validate_asset_studio_ffi_read_kind(field: &str, value: &str) -> Result<(), ConfigError> {
     match value.trim().to_lowercase().as_str() {
         "auto" | "raw" | "typetree_json" | "image" | "image_archive" | "audio" | "video"
         | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx" => {
@@ -840,15 +868,24 @@ impl Default for AccessLogConfig {
 pub struct ToolsConfig {
     pub ffmpeg_path: String,
     pub media_backend: MediaBackend,
-    pub asset_studio_native_library_path: Option<String>,
-    pub asset_studio_native_call_mode: AssetStudioNativeCallMode,
-    pub asset_studio_native_worker_path: Option<String>,
-    pub asset_studio_native_process_concurrency: usize,
-    pub asset_studio_native_worker_max_calls: usize,
-    pub asset_studio_native_read_batch_size: usize,
-    pub asset_studio_native_image_format: Option<String>,
-    pub asset_studio_native_read_kinds: BTreeMap<String, String>,
-    pub asset_studio_native_cli_parity_mode: bool,
+    #[serde(alias = "asset_studio_native_library_path")]
+    pub asset_studio_ffi_library_path: Option<String>,
+    #[serde(alias = "asset_studio_native_call_mode")]
+    pub asset_studio_ffi_call_mode: AssetStudioFfiCallMode,
+    #[serde(alias = "asset_studio_native_worker_path")]
+    pub asset_studio_ffi_worker_path: Option<String>,
+    #[serde(alias = "asset_studio_native_process_concurrency")]
+    pub asset_studio_ffi_process_concurrency: usize,
+    #[serde(alias = "asset_studio_native_worker_max_calls")]
+    pub asset_studio_ffi_worker_max_calls: usize,
+    #[serde(alias = "asset_studio_native_read_batch_size")]
+    pub asset_studio_ffi_read_batch_size: usize,
+    #[serde(alias = "asset_studio_native_image_format")]
+    pub asset_studio_ffi_image_format: Option<String>,
+    #[serde(alias = "asset_studio_native_read_kinds")]
+    pub asset_studio_ffi_read_kinds: BTreeMap<String, String>,
+    #[serde(alias = "asset_studio_native_cli_parity_mode")]
+    pub asset_studio_ffi_cli_parity_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -879,14 +916,14 @@ impl FromStr for MediaBackend {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum AssetStudioNativeCallMode {
+pub enum AssetStudioFfiCallMode {
     Direct,
     Process,
     #[default]
     Pool,
 }
 
-impl FromStr for AssetStudioNativeCallMode {
+impl FromStr for AssetStudioFfiCallMode {
     type Err = ConfigError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -895,7 +932,7 @@ impl FromStr for AssetStudioNativeCallMode {
             "process" => Ok(Self::Process),
             "pool" => Ok(Self::Pool),
             other => Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_native_call_mode".to_string(),
+                field: "tools.asset_studio_ffi_call_mode".to_string(),
                 value: other.to_string(),
                 expected: "direct, process, or pool".to_string(),
             }),
@@ -956,15 +993,15 @@ impl Default for ToolsConfig {
         Self {
             ffmpeg_path: "ffmpeg".to_string(),
             media_backend: MediaBackend::Ffi,
-            asset_studio_native_library_path: None,
-            asset_studio_native_call_mode: AssetStudioNativeCallMode::Pool,
-            asset_studio_native_worker_path: None,
-            asset_studio_native_process_concurrency: 0,
-            asset_studio_native_worker_max_calls: 256,
-            asset_studio_native_read_batch_size: 32,
-            asset_studio_native_image_format: None,
-            asset_studio_native_read_kinds: BTreeMap::new(),
-            asset_studio_native_cli_parity_mode: false,
+            asset_studio_ffi_library_path: None,
+            asset_studio_ffi_call_mode: AssetStudioFfiCallMode::Pool,
+            asset_studio_ffi_worker_path: None,
+            asset_studio_ffi_process_concurrency: 0,
+            asset_studio_ffi_worker_max_calls: 256,
+            asset_studio_ffi_read_batch_size: 32,
+            asset_studio_ffi_image_format: None,
+            asset_studio_ffi_read_kinds: BTreeMap::new(),
+            asset_studio_ffi_cli_parity_mode: false,
         }
     }
 }
@@ -1479,19 +1516,19 @@ regions:
         let tools = AppConfig::default().tools;
         assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
         assert_eq!(
-            AssetStudioNativeCallMode::default(),
-            AssetStudioNativeCallMode::Pool
+            AssetStudioFfiCallMode::default(),
+            AssetStudioFfiCallMode::Pool
         );
         assert_eq!(tools.media_backend, MediaBackend::Ffi);
         assert_eq!(
-            tools.asset_studio_native_call_mode,
-            AssetStudioNativeCallMode::Pool
+            tools.asset_studio_ffi_call_mode,
+            AssetStudioFfiCallMode::Pool
         );
-        assert_eq!(tools.asset_studio_native_process_concurrency, 0);
-        assert_eq!(tools.asset_studio_native_worker_max_calls, 256);
-        assert_eq!(tools.asset_studio_native_read_batch_size, 32);
-        assert_eq!(tools.asset_studio_native_image_format, None);
-        assert!(tools.asset_studio_native_read_kinds.is_empty());
+        assert_eq!(tools.asset_studio_ffi_process_concurrency, 0);
+        assert_eq!(tools.asset_studio_ffi_worker_max_calls, 256);
+        assert_eq!(tools.asset_studio_ffi_read_batch_size, 32);
+        assert_eq!(tools.asset_studio_ffi_image_format, None);
+        assert!(tools.asset_studio_ffi_read_kinds.is_empty());
         assert_eq!(AppConfig::default().concurrency.images, 4);
         assert_eq!(AppConfig::default().concurrency.media_encode, 12);
         assert!(!AppConfig::default().concurrency.auto_tune);
@@ -1503,17 +1540,17 @@ regions:
     }
 
     #[test]
-    fn parses_asset_studio_native_options() {
+    fn parses_asset_studio_ffi_options() {
         let yaml = r#"
 media_backend: ffi
-asset_studio_native_library_path: /tmp/libHarukiAssetStudioFFI.so
-asset_studio_native_call_mode: process
-asset_studio_native_worker_path: /tmp/assetstudio-native-worker
-asset_studio_native_process_concurrency: 6
-asset_studio_native_worker_max_calls: 128
-asset_studio_native_read_batch_size: 16
-asset_studio_native_image_format: raw_rgba
-asset_studio_native_read_kinds:
+asset_studio_ffi_library_path: /tmp/libHarukiAssetStudioFFI.so
+asset_studio_ffi_call_mode: process
+asset_studio_ffi_worker_path: /tmp/assetstudio-ffi-worker
+asset_studio_ffi_process_concurrency: 6
+asset_studio_ffi_worker_max_calls: 128
+asset_studio_ffi_read_batch_size: 16
+asset_studio_ffi_image_format: raw_rgba
+asset_studio_ffi_read_kinds:
   Sprite: image
   Animator: fbx
   all: typetree_json
@@ -1521,37 +1558,80 @@ asset_studio_native_read_kinds:
         let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
         assert_eq!(tools.media_backend, MediaBackend::Ffi);
         assert_eq!(
-            tools.asset_studio_native_library_path.as_deref(),
+            tools.asset_studio_ffi_library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
         );
         assert_eq!(
-            tools.asset_studio_native_call_mode,
-            AssetStudioNativeCallMode::Process
+            tools.asset_studio_ffi_call_mode,
+            AssetStudioFfiCallMode::Process
         );
         assert_eq!(
-            tools.asset_studio_native_worker_path.as_deref(),
-            Some("/tmp/assetstudio-native-worker")
+            tools.asset_studio_ffi_worker_path.as_deref(),
+            Some("/tmp/assetstudio-ffi-worker")
         );
-        assert_eq!(tools.asset_studio_native_process_concurrency, 6);
-        assert_eq!(tools.asset_studio_native_worker_max_calls, 128);
-        assert_eq!(tools.asset_studio_native_read_batch_size, 16);
+        assert_eq!(tools.asset_studio_ffi_process_concurrency, 6);
+        assert_eq!(tools.asset_studio_ffi_worker_max_calls, 128);
+        assert_eq!(tools.asset_studio_ffi_read_batch_size, 16);
         assert_eq!(
-            tools.asset_studio_native_image_format.as_deref(),
+            tools.asset_studio_ffi_image_format.as_deref(),
             Some("raw_rgba")
         );
         assert_eq!(
             tools
-                .asset_studio_native_read_kinds
+                .asset_studio_ffi_read_kinds
                 .get("Animator")
                 .map(String::as_str),
             Some("fbx")
         );
         assert_eq!(
             tools
-                .asset_studio_native_read_kinds
+                .asset_studio_ffi_read_kinds
                 .get("all")
                 .map(String::as_str),
             Some("typetree_json")
+        );
+    }
+
+    #[test]
+    fn parses_legacy_asset_studio_native_option_aliases() {
+        let yaml = r#"
+asset_studio_native_library_path: /tmp/libHarukiAssetStudioFFI.so
+asset_studio_native_call_mode: direct
+asset_studio_native_worker_path: /tmp/assetstudio-native-worker
+asset_studio_native_process_concurrency: 3
+asset_studio_native_worker_max_calls: 32
+asset_studio_native_read_batch_size: 8
+asset_studio_native_image_format: raw_rgba
+asset_studio_native_read_kinds:
+  Sprite: image
+"#;
+        let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
+
+        assert_eq!(
+            tools.asset_studio_ffi_library_path.as_deref(),
+            Some("/tmp/libHarukiAssetStudioFFI.so")
+        );
+        assert_eq!(
+            tools.asset_studio_ffi_call_mode,
+            AssetStudioFfiCallMode::Direct
+        );
+        assert_eq!(
+            tools.asset_studio_ffi_worker_path.as_deref(),
+            Some("/tmp/assetstudio-native-worker")
+        );
+        assert_eq!(tools.asset_studio_ffi_process_concurrency, 3);
+        assert_eq!(tools.asset_studio_ffi_worker_max_calls, 32);
+        assert_eq!(tools.asset_studio_ffi_read_batch_size, 8);
+        assert_eq!(
+            tools.asset_studio_ffi_image_format.as_deref(),
+            Some("raw_rgba")
+        );
+        assert_eq!(
+            tools
+                .asset_studio_ffi_read_kinds
+                .get("Sprite")
+                .map(String::as_str),
+            Some("image")
         );
     }
 
@@ -1568,32 +1648,32 @@ asset_studio_native_read_kinds:
     }
 
     #[test]
-    fn rejects_invalid_asset_studio_native_call_mode() {
-        let err = "threaded".parse::<AssetStudioNativeCallMode>().unwrap_err();
+    fn rejects_invalid_asset_studio_ffi_call_mode() {
+        let err = "threaded".parse::<AssetStudioFfiCallMode>().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_native_call_mode" && value == "threaded"
+                if field == "tools.asset_studio_ffi_call_mode" && value == "threaded"
         ));
     }
 
     #[test]
-    fn accepts_zero_asset_studio_native_process_concurrency_as_auto() {
+    fn accepts_zero_asset_studio_ffi_process_concurrency_as_auto() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_native_process_concurrency = 0;
+        config.tools.asset_studio_ffi_process_concurrency = 0;
         config.validate().unwrap();
-        assert!(config.effective_asset_studio_native_process_concurrency() >= 1);
+        assert!(config.effective_asset_studio_ffi_process_concurrency() >= 1);
     }
 
     #[test]
-    fn rejects_zero_asset_studio_native_read_batch_size() {
+    fn rejects_zero_asset_studio_ffi_read_batch_size() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_native_read_batch_size = 0;
+        config.tools.asset_studio_ffi_read_batch_size = 0;
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_native_read_batch_size" && value == "0"
+                if field == "tools.asset_studio_ffi_read_batch_size" && value == "0"
         ));
     }
 
@@ -1610,36 +1690,36 @@ asset_studio_native_read_kinds:
     }
 
     #[test]
-    fn rejects_invalid_asset_studio_native_image_format() {
+    fn rejects_invalid_asset_studio_ffi_image_format() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_native_image_format = Some("gif".to_string());
+        config.tools.asset_studio_ffi_image_format = Some("gif".to_string());
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_native_image_format" && value == "gif"
+                if field == "tools.asset_studio_ffi_image_format" && value == "gif"
         ));
     }
 
     #[test]
-    fn accepts_raw_rgba_asset_studio_native_image_format() {
+    fn accepts_raw_rgba_asset_studio_ffi_image_format() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_native_image_format = Some("raw_rgba".to_string());
+        config.tools.asset_studio_ffi_image_format = Some("raw_rgba".to_string());
         config.validate().unwrap();
     }
 
     #[test]
-    fn rejects_invalid_asset_studio_native_read_kind() {
+    fn rejects_invalid_asset_studio_ffi_read_kind() {
         let mut config = AppConfig::default();
         config
             .tools
-            .asset_studio_native_read_kinds
+            .asset_studio_ffi_read_kinds
             .insert("Sprite".to_string(), "thumbnail".to_string());
         let err = config.validate().unwrap_err();
         assert!(matches!(
             err,
             ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_native_read_kinds.Sprite" && value == "thumbnail"
+                if field == "tools.asset_studio_ffi_read_kinds.Sprite" && value == "thumbnail"
         ));
     }
 
@@ -1674,12 +1754,12 @@ asset_studio_types:
         std::env::set_var("HARUKI_TEST_AES_IV_HEX", "0102030405060708090a0b0c0d0e0f10");
         std::env::set_var("HARUKI_TEST_BEARER_TOKEN", "secret-token");
         std::env::set_var(
-            "HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+            "HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH",
             "/tmp/libassetstudio-native.so",
         );
         std::env::set_var(
-            "HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH",
-            "/tmp/assetstudio-native-worker",
+            "HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH",
+            "/tmp/assetstudio-ffi-worker",
         );
 
         let mut file = NamedTempFile::new().unwrap();
@@ -1694,8 +1774,8 @@ logging:
   access:
     format: "[${{time}}] ${{status}}"
 tools:
-  asset_studio_native_library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH}}"
-  asset_studio_native_worker_path: "${{env:HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH}}"
+  asset_studio_ffi_library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH}}"
+  asset_studio_ffi_worker_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH}}"
 regions:
   jp:
     enabled: true
@@ -1727,35 +1807,34 @@ regions:
             Some("0102030405060708090a0b0c0d0e0f10")
         );
         assert_eq!(
-            config.tools.asset_studio_native_library_path.as_deref(),
+            config.tools.asset_studio_ffi_library_path.as_deref(),
             Some("/tmp/libassetstudio-native.so")
         );
         assert_eq!(
-            config.tools.asset_studio_native_worker_path.as_deref(),
-            Some("/tmp/assetstudio-native-worker")
+            config.tools.asset_studio_ffi_worker_path.as_deref(),
+            Some("/tmp/assetstudio-ffi-worker")
         );
         assert_eq!(config.logging.access.format, "[${time}] ${status}");
 
         std::env::remove_var("HARUKI_TEST_AES_KEY_HEX");
         std::env::remove_var("HARUKI_TEST_AES_IV_HEX");
         std::env::remove_var("HARUKI_TEST_BEARER_TOKEN");
-        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH");
-        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH");
+        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH");
+        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH");
     }
 
     #[test]
     fn load_from_path_applies_asset_studio_env_overrides() {
         let _env_lock = env_lock();
         let old_media_backend = std::env::var("HARUKI_MEDIA_BACKEND").ok();
-        let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH").ok();
-        let old_call_mode = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE").ok();
-        let old_worker_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH").ok();
+        let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH").ok();
+        let old_call_mode = std::env::var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE").ok();
+        let old_worker_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH").ok();
         let old_process_concurrency =
-            std::env::var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY").ok();
-        let old_worker_max_calls =
-            std::env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS").ok();
-        let old_read_batch_size = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE").ok();
-        let old_image_format = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT").ok();
+            std::env::var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY").ok();
+        let old_worker_max_calls = std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS").ok();
+        let old_read_batch_size = std::env::var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE").ok();
+        let old_image_format = std::env::var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT").ok();
         let old_media_encode_concurrency = std::env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY").ok();
         let old_concurrency_auto_tune = std::env::var("HARUKI_CONCURRENCY_AUTO_TUNE").ok();
         let old_cpu_budget_auto = std::env::var("HARUKI_CPU_BUDGET_AUTO").ok();
@@ -1767,18 +1846,18 @@ regions:
             std::env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES").ok();
         std::env::set_var("HARUKI_MEDIA_BACKEND", "cli");
         std::env::set_var(
-            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+            "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
             "/tmp/override-native.so",
         );
-        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", "process");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE", "process");
         std::env::set_var(
-            "HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH",
+            "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
             "/tmp/override-native-worker",
         );
-        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY", "7");
-        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS", "64");
-        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE", "48");
-        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT", "raw_rgba");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY", "7");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS", "64");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE", "48");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT", "raw_rgba");
         std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", "9");
         std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", "true");
         std::env::set_var("HARUKI_CPU_BUDGET_AUTO", "true");
@@ -1794,13 +1873,13 @@ regions:
             r#"
 config_version: 2
 tools:
-  asset_studio_native_library_path: /tmp/config-native.so
-  asset_studio_native_call_mode: direct
-  asset_studio_native_worker_path: /tmp/config-native-worker
-  asset_studio_native_process_concurrency: 2
-  asset_studio_native_worker_max_calls: 128
-  asset_studio_native_read_batch_size: 16
-  asset_studio_native_image_format: raw_rgba
+  asset_studio_ffi_library_path: /tmp/config-native.so
+  asset_studio_ffi_call_mode: direct
+  asset_studio_ffi_worker_path: /tmp/config-native-worker
+  asset_studio_ffi_process_concurrency: 2
+  asset_studio_ffi_worker_max_calls: 128
+  asset_studio_ffi_read_batch_size: 16
+  asset_studio_ffi_image_format: raw_rgba
 "#
         )
         .unwrap();
@@ -1808,22 +1887,22 @@ tools:
         let config = AppConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.tools.media_backend, MediaBackend::Cli);
         assert_eq!(
-            config.tools.asset_studio_native_library_path.as_deref(),
+            config.tools.asset_studio_ffi_library_path.as_deref(),
             Some("/tmp/override-native.so")
         );
         assert_eq!(
-            config.tools.asset_studio_native_call_mode,
-            AssetStudioNativeCallMode::Process
+            config.tools.asset_studio_ffi_call_mode,
+            AssetStudioFfiCallMode::Process
         );
         assert_eq!(
-            config.tools.asset_studio_native_worker_path.as_deref(),
+            config.tools.asset_studio_ffi_worker_path.as_deref(),
             Some("/tmp/override-native-worker")
         );
-        assert_eq!(config.tools.asset_studio_native_process_concurrency, 7);
-        assert_eq!(config.tools.asset_studio_native_worker_max_calls, 64);
-        assert_eq!(config.tools.asset_studio_native_read_batch_size, 48);
+        assert_eq!(config.tools.asset_studio_ffi_process_concurrency, 7);
+        assert_eq!(config.tools.asset_studio_ffi_worker_max_calls, 64);
+        assert_eq!(config.tools.asset_studio_ffi_read_batch_size, 48);
         assert_eq!(
-            config.tools.asset_studio_native_image_format.as_deref(),
+            config.tools.asset_studio_ffi_image_format.as_deref(),
             Some("raw_rgba")
         );
         assert_eq!(config.concurrency.media_encode, 9);
@@ -1840,34 +1919,32 @@ tools:
             None => std::env::remove_var("HARUKI_MEDIA_BACKEND"),
         }
         match old_native_path {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"),
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH"),
         }
         match old_call_mode {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE"),
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE"),
         }
         match old_worker_path {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH"),
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH"),
         }
         match old_process_concurrency {
-            Some(value) => {
-                std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY", value)
-            }
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY"),
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY"),
         }
         match old_worker_max_calls {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS"),
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS"),
         }
         match old_read_batch_size {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE"),
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE"),
         }
         match old_image_format {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT"),
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT"),
         }
         match old_media_encode_concurrency {
             Some(value) => std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", value),
@@ -1900,6 +1977,62 @@ tools:
         match old_max_in_flight_bundle_bytes {
             Some(value) => std::env::set_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES", value),
             None => std::env::remove_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES"),
+        }
+    }
+
+    #[test]
+    fn load_from_path_accepts_legacy_asset_studio_native_env_overrides() {
+        let _env_lock = env_lock();
+        let old_current_library = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH").ok();
+        let old_current_mode = std::env::var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE").ok();
+        let old_legacy_library = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH").ok();
+        let old_legacy_mode = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE").ok();
+
+        std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH");
+        std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE");
+        std::env::set_var(
+            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
+            "/tmp/legacy-native.so",
+        );
+        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", "process");
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 2
+tools:
+  asset_studio_ffi_library_path: /tmp/config-ffi.so
+  asset_studio_ffi_call_mode: direct
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(file.path()).unwrap();
+        assert_eq!(
+            config.tools.asset_studio_ffi_library_path.as_deref(),
+            Some("/tmp/legacy-native.so")
+        );
+        assert_eq!(
+            config.tools.asset_studio_ffi_call_mode,
+            AssetStudioFfiCallMode::Process
+        );
+
+        match old_current_library {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH"),
+        }
+        match old_current_mode {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE"),
+        }
+        match old_legacy_library {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"),
+        }
+        match old_legacy_mode {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE"),
         }
     }
 
@@ -2040,22 +2173,22 @@ regions:
         let config = AppConfig::default();
         assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(4), 2);
         assert_eq!(
-            config.effective_asset_studio_native_process_concurrency_for_cpus(4),
+            config.effective_asset_studio_ffi_process_concurrency_for_cpus(4),
             2
         );
         assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(8), 5);
         assert_eq!(
-            config.effective_asset_studio_native_process_concurrency_for_cpus(8),
+            config.effective_asset_studio_ffi_process_concurrency_for_cpus(8),
             5
         );
         assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(10), 6);
         assert_eq!(
-            config.effective_asset_studio_native_process_concurrency_for_cpus(10),
+            config.effective_asset_studio_ffi_process_concurrency_for_cpus(10),
             6
         );
         assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(64), 47);
         assert_eq!(
-            config.effective_asset_studio_native_process_concurrency_for_cpus(64),
+            config.effective_asset_studio_ffi_process_concurrency_for_cpus(64),
             47
         );
     }
@@ -2063,9 +2196,9 @@ regions:
     #[test]
     fn explicit_native_concurrency_overrides_auto() {
         let mut config = AppConfig::default();
-        config.tools.asset_studio_native_process_concurrency = 56;
+        config.tools.asset_studio_ffi_process_concurrency = 56;
         assert_eq!(
-            config.effective_asset_studio_native_process_concurrency_for_cpus(8),
+            config.effective_asset_studio_ffi_process_concurrency_for_cpus(8),
             56
         );
     }
@@ -2077,12 +2210,12 @@ regions:
 
         assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(10), 6);
         assert_eq!(
-            config.effective_asset_studio_native_process_concurrency_for_cpus(10),
+            config.effective_asset_studio_ffi_process_concurrency_for_cpus(10),
             10
         );
         assert_eq!(config.concurrency.effective_cpu_budget_for_cpus(64), 47);
         assert_eq!(
-            config.effective_asset_studio_native_process_concurrency_for_cpus(64),
+            config.effective_asset_studio_ffi_process_concurrency_for_cpus(64),
             64
         );
     }

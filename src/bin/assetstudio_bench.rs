@@ -3,13 +3,12 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioNativeCallMode, ChartHashConfig, ExecutionConfig, GitSyncConfig,
+    AppConfig, AssetStudioFfiCallMode, ChartHashConfig, ExecutionConfig, GitSyncConfig,
     ImageExportConfig, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
     RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig, ToolsConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::{
-    extract_unity_asset_bundle, query_assetstudio_native_version,
-    query_assetstudio_native_version_worker,
+    extract_unity_asset_bundle, query_assetstudio_ffi_version, query_assetstudio_ffi_version_worker,
 };
 use tempfile::tempdir;
 
@@ -20,7 +19,7 @@ enum BenchNativeCallMode {
     Pool,
 }
 
-impl From<BenchNativeCallMode> for AssetStudioNativeCallMode {
+impl From<BenchNativeCallMode> for AssetStudioFfiCallMode {
     fn from(value: BenchNativeCallMode) -> Self {
         match value {
             BenchNativeCallMode::Direct => Self::Direct,
@@ -85,9 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(native_library) = args.native_library.as_deref() {
         let version = match args.native_call_mode {
-            BenchNativeCallMode::Direct => query_assetstudio_native_version(native_library)?,
+            BenchNativeCallMode::Direct => query_assetstudio_ffi_version(native_library)?,
             BenchNativeCallMode::Process | BenchNativeCallMode::Pool => {
-                query_assetstudio_native_version_worker(
+                query_assetstudio_ffi_version_worker(
                     native_library,
                     args.native_worker_path.as_deref(),
                 )
@@ -240,23 +239,22 @@ fn benchmark_config(args: &Args) -> AppConfig {
         tools: ToolsConfig {
             ffmpeg_path: "ffmpeg".to_string(),
             media_backend: ToolsConfig::default().media_backend,
-            asset_studio_native_library_path: args.native_library.clone(),
-            asset_studio_native_call_mode: args.native_call_mode.into(),
-            asset_studio_native_worker_path: args.native_worker_path.clone(),
-            asset_studio_native_process_concurrency: args
+            asset_studio_ffi_library_path: args.native_library.clone(),
+            asset_studio_ffi_call_mode: args.native_call_mode.into(),
+            asset_studio_ffi_worker_path: args.native_worker_path.clone(),
+            asset_studio_ffi_process_concurrency: args
                 .native_process_concurrency
                 .map(|value| value.max(1))
-                .unwrap_or_else(|| ToolsConfig::default().asset_studio_native_process_concurrency),
-            asset_studio_native_worker_max_calls: ToolsConfig::default()
-                .asset_studio_native_worker_max_calls,
-            asset_studio_native_read_batch_size: args
+                .unwrap_or_else(|| ToolsConfig::default().asset_studio_ffi_process_concurrency),
+            asset_studio_ffi_worker_max_calls: ToolsConfig::default()
+                .asset_studio_ffi_worker_max_calls,
+            asset_studio_ffi_read_batch_size: args
                 .native_read_batch_size
-                .unwrap_or_else(|| ToolsConfig::default().asset_studio_native_read_batch_size)
+                .unwrap_or_else(|| ToolsConfig::default().asset_studio_ffi_read_batch_size)
                 .max(1),
-            asset_studio_native_image_format: ToolsConfig::default()
-                .asset_studio_native_image_format,
-            asset_studio_native_read_kinds: ToolsConfig::default().asset_studio_native_read_kinds,
-            asset_studio_native_cli_parity_mode: false,
+            asset_studio_ffi_image_format: ToolsConfig::default().asset_studio_ffi_image_format,
+            asset_studio_ffi_read_kinds: ToolsConfig::default().asset_studio_ffi_read_kinds,
+            asset_studio_ffi_cli_parity_mode: false,
         },
         storage: StorageConfig {
             providers: Vec::new(),

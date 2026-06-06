@@ -8,9 +8,7 @@ use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::asset_execution::{
     AssetExecutionContext, ExecutionProgressUpdate,
 };
-use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioNativeCallMode, MediaBackend,
-};
+use haruki_sekai_asset_updater::core::config::{AppConfig, AssetStudioFfiCallMode, MediaBackend};
 use haruki_sekai_asset_updater::core::export_pipeline::NativeObjectReadPlanStats;
 use haruki_sekai_asset_updater::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
 use serde::Serialize;
@@ -31,7 +29,7 @@ enum BenchMediaBackend {
     Cli,
 }
 
-impl From<BenchNativeCallMode> for AssetStudioNativeCallMode {
+impl From<BenchNativeCallMode> for AssetStudioFfiCallMode {
     fn from(value: BenchNativeCallMode) -> Self {
         match value {
             BenchNativeCallMode::Direct => Self::Direct,
@@ -278,7 +276,7 @@ async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::E
         temp_download_record_file: temp_record_file.display().to_string(),
         project_total_ms,
         effective_native_process_concurrency: config
-            .effective_asset_studio_native_process_concurrency(),
+            .effective_asset_studio_ffi_process_concurrency(),
         effective_cpu_budget: config.effective_cpu_budget(),
         effective_cpu_throttle_enabled: config.concurrency.cpu_throttle_enabled,
         effective_cpu_throttle_target_percent: config.effective_cpu_budget() * 100,
@@ -342,42 +340,42 @@ fn benchmark_config(
 ) -> Result<(AppConfig, String, PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let mut config = AppConfig::load_from_path(&args.config)?;
     if let Some(native_library) = &args.native_library {
-        config.tools.asset_studio_native_library_path = Some(native_library.clone());
+        config.tools.asset_studio_ffi_library_path = Some(native_library.clone());
     }
-    config.tools.asset_studio_native_call_mode = args.native_call_mode.into();
+    config.tools.asset_studio_ffi_call_mode = args.native_call_mode.into();
     if let Some(native_worker_path) = &args.native_worker_path {
-        config.tools.asset_studio_native_worker_path = Some(native_worker_path.clone());
+        config.tools.asset_studio_ffi_worker_path = Some(native_worker_path.clone());
     }
     if let Some(native_process_concurrency) = args.native_process_concurrency {
-        config.tools.asset_studio_native_process_concurrency = native_process_concurrency.max(1);
+        config.tools.asset_studio_ffi_process_concurrency = native_process_concurrency.max(1);
     }
     if let Some(native_worker_max_calls) = args.native_worker_max_calls {
-        config.tools.asset_studio_native_worker_max_calls = native_worker_max_calls;
+        config.tools.asset_studio_ffi_worker_max_calls = native_worker_max_calls;
     }
     if let Some(native_read_batch_size) = args.native_read_batch_size {
-        config.tools.asset_studio_native_read_batch_size = native_read_batch_size.max(1);
+        config.tools.asset_studio_ffi_read_batch_size = native_read_batch_size.max(1);
     }
     if let Some(native_image_format) = &args.native_image_format {
-        config.tools.asset_studio_native_image_format = Some(native_image_format.clone());
+        config.tools.asset_studio_ffi_image_format = Some(native_image_format.clone());
     }
     if args.native_cli_parity {
-        config.tools.asset_studio_native_cli_parity_mode = true;
-        config.tools.asset_studio_native_image_format = Some("raw_rgba".to_string());
+        config.tools.asset_studio_ffi_cli_parity_mode = true;
+        config.tools.asset_studio_ffi_image_format = Some("raw_rgba".to_string());
         config
             .tools
-            .asset_studio_native_read_kinds
+            .asset_studio_ffi_read_kinds
             .insert("Texture2D".to_string(), "image".to_string());
         config
             .tools
-            .asset_studio_native_read_kinds
+            .asset_studio_ffi_read_kinds
             .insert("Sprite".to_string(), "image".to_string());
         config
             .tools
-            .asset_studio_native_read_kinds
+            .asset_studio_ffi_read_kinds
             .insert("TextAsset".to_string(), "text_bytes".to_string());
         config
             .tools
-            .asset_studio_native_read_kinds
+            .asset_studio_ffi_read_kinds
             .insert("MonoBehaviour".to_string(), "typetree_json".to_string());
     }
     if let Some(media_backend) = args.media_backend {

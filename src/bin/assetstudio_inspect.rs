@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use haruki_sekai_asset_updater::core::assetstudio_native::{
+use haruki_sekai_asset_updater::core::assetstudio_ffi::{
     AssetStudioInspectOptions, AssetStudioNativeClient,
 };
 
@@ -42,11 +42,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let native_library = args
         .native_library
         .or_else(|| {
-            std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH")
+            std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH")
+                .or_else(|_| std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"))
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .ok_or("--native-library or HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH is required")?;
+        .ok_or("--native-library or HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH is required")?;
 
     let client = AssetStudioNativeClient::new(native_library);
 

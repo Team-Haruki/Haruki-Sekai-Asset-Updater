@@ -54,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
-COPY --from=builder /app/target/release/assetstudio_native_worker /app/assetstudio_native_worker
+COPY --from=builder /app/target/release/assetstudio_ffi_worker /app/assetstudio_ffi_worker
 COPY --from=assetstudio-builder /app/assetstudio-native /app/assetstudio
 COPY --from=ffmpeg-builder /ffmpeg /usr/local/bin/ffmpeg
 RUN mkdir -p logs
@@ -62,12 +62,12 @@ RUN mkdir -p logs
 ENV TZ=Asia/Shanghai \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false \
     HARUKI_MEDIA_BACKEND=ffi \
-    HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so \
-    HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/app/assetstudio_native_worker \
-    HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE=pool \
-    HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=3 \
-    HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS=256 \
-    HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE=32 \
+    HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so \
+    HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/app/assetstudio_ffi_worker \
+    HARUKI_ASSET_STUDIO_FFI_CALL_MODE=pool \
+    HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY=3 \
+    HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS=256 \
+    HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE=32 \
     HARUKI_CONFIG_PATH=/app/haruki-asset-configs.yaml
 
 EXPOSE 8080

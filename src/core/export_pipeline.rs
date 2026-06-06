@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
 use crate::core::config::{
-    AppConfig, AssetStudioNativeCallMode, ConcurrencyConfig, MediaBackend, RegionConfig,
+    AppConfig, AssetStudioFfiCallMode, ConcurrencyConfig, MediaBackend, RegionConfig,
     DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
 };
 use crate::core::errors::ExportPipelineError;
@@ -624,12 +624,12 @@ pub async fn export_unity_asset_bundle_payloads(
     let mut post_process_export_path = actual_export_path.clone();
 
     let native_library_path = configured_path(
-        app_config.tools.asset_studio_native_library_path.as_deref(),
+        app_config.tools.asset_studio_ffi_library_path.as_deref(),
     )
     .ok_or_else(|| ExportPipelineError::AssetStudioNative {
-        message: "tools.asset_studio_native_library_path is required".to_string(),
+        message: "tools.asset_studio_ffi_library_path is required".to_string(),
     })?;
-    let native_object_summary = run_assetstudio_native_object_export(
+    let native_object_summary = run_assetstudio_ffi_object_export(
         app_config,
         region,
         asset_bundle_file,
@@ -659,7 +659,7 @@ fn configured_path(path: Option<&str>) -> Option<&str> {
     path.map(str::trim).filter(|value| !value.is_empty())
 }
 
-async fn run_assetstudio_native_object_export(
+async fn run_assetstudio_ffi_object_export(
     app_config: &AppConfig,
     region: &RegionConfig,
     asset_bundle_file: &Path,
@@ -668,7 +668,7 @@ async fn run_assetstudio_native_object_export(
     strip_path_prefix: &str,
     native_library_path: &str,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    if app_config.tools.asset_studio_native_call_mode == AssetStudioNativeCallMode::Direct {
+    if app_config.tools.asset_studio_ffi_call_mode == AssetStudioFfiCallMode::Direct {
         let inspect_request = AssetStudioNativeInspectRequest {
             input_path: asset_bundle_file.to_string_lossy().to_string(),
             asset_types: asset_studio_export_type_list(region),
@@ -687,17 +687,17 @@ async fn run_assetstudio_native_object_export(
             export_path,
             strip_path_prefix,
             region,
-            read_kinds: &app_config.tools.asset_studio_native_read_kinds,
+            read_kinds: &app_config.tools.asset_studio_ffi_read_kinds,
             image_format: app_config
                 .tools
-                .asset_studio_native_image_format
+                .asset_studio_ffi_image_format
                 .as_deref()
                 .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
-            read_batch_size: app_config.tools.asset_studio_native_read_batch_size,
-            cli_parity_mode: app_config.tools.asset_studio_native_cli_parity_mode,
+            read_batch_size: app_config.tools.asset_studio_ffi_read_batch_size,
+            cli_parity_mode: app_config.tools.asset_studio_ffi_cli_parity_mode,
         };
         let mut worker = NativeDirectWorker::load(native_library_path)?;
-        return call_assetstudio_native_object_export_with_target(
+        return call_assetstudio_ffi_object_export_with_target(
             NativeObjectExportCallTarget::Direct(&mut worker),
             &AtomicU64::new(1),
             &inspect_request,
@@ -706,20 +706,20 @@ async fn run_assetstudio_native_object_export(
         .await;
     }
 
-    if app_config.tools.asset_studio_native_call_mode == AssetStudioNativeCallMode::Process {
+    if app_config.tools.asset_studio_ffi_call_mode == AssetStudioFfiCallMode::Process {
         warn!(
-            call_mode = ?app_config.tools.asset_studio_native_call_mode,
+            call_mode = ?app_config.tools.asset_studio_ffi_call_mode,
             "object-level native unpack uses worker pool for context affinity in process mode"
         );
     }
-    let worker_path = configured_assetstudio_native_worker_path(
-        app_config.tools.asset_studio_native_worker_path.as_deref(),
+    let worker_path = configured_assetstudio_ffi_worker_path(
+        app_config.tools.asset_studio_ffi_worker_path.as_deref(),
     )?;
     let pool = native_worker_pool(
         &worker_path,
         native_library_path,
-        app_config.effective_asset_studio_native_process_concurrency(),
-        app_config.tools.asset_studio_native_worker_max_calls,
+        app_config.effective_asset_studio_ffi_process_concurrency(),
+        app_config.tools.asset_studio_ffi_worker_max_calls,
         app_config.effective_cpu_budget(),
     );
     let inspect_request = AssetStudioNativeInspectRequest {
@@ -740,14 +740,14 @@ async fn run_assetstudio_native_object_export(
         export_path,
         strip_path_prefix,
         region,
-        read_kinds: &app_config.tools.asset_studio_native_read_kinds,
+        read_kinds: &app_config.tools.asset_studio_ffi_read_kinds,
         image_format: app_config
             .tools
-            .asset_studio_native_image_format
+            .asset_studio_ffi_image_format
             .as_deref()
             .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
-        read_batch_size: app_config.tools.asset_studio_native_read_batch_size,
-        cli_parity_mode: app_config.tools.asset_studio_native_cli_parity_mode,
+        read_batch_size: app_config.tools.asset_studio_ffi_read_batch_size,
+        cli_parity_mode: app_config.tools.asset_studio_ffi_cli_parity_mode,
     };
     let result = pool.object_export(&inspect_request, unpack_options).await;
 
@@ -755,7 +755,7 @@ async fn run_assetstudio_native_object_export(
         Ok(summary) => Ok(summary),
         Err(error) if is_native_worker_signal_failure(&error) => {
             warn!(
-                process_concurrency = app_config.effective_asset_studio_native_process_concurrency(),
+                process_concurrency = app_config.effective_asset_studio_ffi_process_concurrency(),
                 error = %error,
                 "assetstudio native object export worker crashed; retrying bundle once with an exclusive fresh worker"
             );
@@ -1154,7 +1154,7 @@ fn native_call_lock() -> MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
-pub fn query_assetstudio_native_version(
+pub fn query_assetstudio_ffi_version(
     native_library_path: &str,
 ) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
     let _lock = native_call_lock();
@@ -1162,17 +1162,17 @@ pub fn query_assetstudio_native_version(
     library.query_version()
 }
 
-pub async fn query_assetstudio_native_version_worker(
+pub async fn query_assetstudio_ffi_version_worker(
     native_library_path: &str,
     worker_path: Option<&str>,
 ) -> Result<AssetStudioNativeVersion, ExportPipelineError> {
-    let worker_path = configured_assetstudio_native_worker_path(worker_path)?;
+    let worker_path = configured_assetstudio_ffi_worker_path(worker_path)?;
     let request = AssetStudioNativeRequest::Version;
-    let output = run_assetstudio_native_worker(&worker_path, native_library_path, &request).await?;
-    parse_assetstudio_native_version_response(output.status_success, output.response, output.status)
+    let output = run_assetstudio_ffi_worker(&worker_path, native_library_path, &request).await?;
+    parse_assetstudio_ffi_version_response(output.status_success, output.response, output.status)
 }
 
-fn parse_assetstudio_native_version_response(
+fn parse_assetstudio_ffi_version_response(
     status_success: bool,
     response: AssetStudioNativeResponse,
     status: String,
@@ -1189,7 +1189,7 @@ fn parse_assetstudio_native_version_response(
     }
 }
 
-pub fn inspect_assetstudio_native_bundle(
+pub fn inspect_assetstudio_ffi_bundle(
     native_library_path: &str,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
@@ -1217,7 +1217,7 @@ pub fn inspect_assetstudio_native_bundle(
     }
 }
 
-pub fn open_assetstudio_native_context(
+pub fn open_assetstudio_ffi_context(
     native_library_path: &str,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeContextOpenResponse, ExportPipelineError> {
@@ -1245,7 +1245,7 @@ pub fn open_assetstudio_native_context(
     }
 }
 
-pub fn close_assetstudio_native_context(
+pub fn close_assetstudio_ffi_context(
     native_library_path: &str,
     request: &AssetStudioNativeContextCloseRequest,
 ) -> Result<AssetStudioNativeContextCloseResponse, ExportPipelineError> {
@@ -1266,7 +1266,7 @@ pub fn close_assetstudio_native_context(
     }
 }
 
-pub fn list_assetstudio_native_context_objects(
+pub fn list_assetstudio_ffi_context_objects(
     native_library_path: &str,
     request: &AssetStudioNativeContextListObjectsRequest,
 ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
@@ -1288,19 +1288,19 @@ pub fn list_assetstudio_native_context_objects(
 }
 
 #[allow(dead_code)]
-async fn call_assetstudio_native_inspect_by_mode(
-    call_mode: AssetStudioNativeCallMode,
+async fn call_assetstudio_ffi_inspect_by_mode(
+    call_mode: AssetStudioFfiCallMode,
     native_library_path: &str,
     worker_path: Option<&str>,
     process_concurrency: usize,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
     match call_mode {
-        AssetStudioNativeCallMode::Direct => {
+        AssetStudioFfiCallMode::Direct => {
             let native_library_path = native_library_path.to_string();
             let request = request.clone();
             tokio::task::spawn_blocking(move || {
-                inspect_assetstudio_native_bundle(&native_library_path, &request)
+                inspect_assetstudio_ffi_bundle(&native_library_path, &request)
             })
             .await
             .map_err(|source| ExportPipelineError::WorkerPanic {
@@ -1308,8 +1308,8 @@ async fn call_assetstudio_native_inspect_by_mode(
                 message: source.to_string(),
             })?
         }
-        AssetStudioNativeCallMode::Process => {
-            call_assetstudio_native_inspect_process(
+        AssetStudioFfiCallMode::Process => {
+            call_assetstudio_ffi_inspect_process(
                 native_library_path,
                 worker_path,
                 process_concurrency,
@@ -1317,8 +1317,8 @@ async fn call_assetstudio_native_inspect_by_mode(
             )
             .await
         }
-        AssetStudioNativeCallMode::Pool => {
-            call_assetstudio_native_inspect_pool(
+        AssetStudioFfiCallMode::Pool => {
+            call_assetstudio_ffi_inspect_pool(
                 native_library_path,
                 worker_path,
                 process_concurrency,
@@ -1329,7 +1329,7 @@ async fn call_assetstudio_native_inspect_by_mode(
     }
 }
 
-pub fn call_assetstudio_native_typed_request(
+pub fn call_assetstudio_ffi_typed_request(
     native_library_path: &str,
     request: &AssetStudioNativeRequest,
 ) -> Result<(c_int, AssetStudioNativeResponse, Vec<u8>), ExportPipelineError> {
@@ -1394,12 +1394,10 @@ fn check_typed_abi_version(
 impl LoadedAssetStudioNativeLibrary {
     pub fn load(native_library_path: &str) -> Result<Self, ExportPipelineError> {
         unsafe {
-            let env_guard = EnvVarGuard::set(
-                "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
-                native_library_path,
-            );
+            let env_guard =
+                EnvVarGuard::set("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", native_library_path);
             let native_dependency_handles =
-                preload_assetstudio_native_dependencies(native_library_path);
+                preload_assetstudio_ffi_dependencies(native_library_path);
             let library = libloading::Library::new(native_library_path).map_err(|source| {
                 ExportPipelineError::AssetStudioNative {
                     message: format!(
@@ -2405,15 +2403,15 @@ fn write_native_payload_bundle(
 }
 
 #[allow(dead_code)]
-async fn call_assetstudio_native_inspect_process(
+async fn call_assetstudio_ffi_inspect_process(
     native_library_path: &str,
     worker_path: Option<&str>,
     process_concurrency: usize,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
     let request = AssetStudioNativeRequest::Inspect(request.clone());
-    let worker_path = configured_assetstudio_native_worker_path(worker_path)?;
-    let output = match run_assetstudio_native_worker_limited(
+    let worker_path = configured_assetstudio_ffi_worker_path(worker_path)?;
+    let output = match run_assetstudio_ffi_worker_limited(
         &worker_path,
         native_library_path,
         &request,
@@ -2428,7 +2426,7 @@ async fn call_assetstudio_native_inspect_process(
                 error = %error,
                 "assetstudio native inspect worker crashed; retrying once in isolated process mode"
             );
-            run_assetstudio_native_worker_isolated(
+            run_assetstudio_ffi_worker_isolated(
                 &worker_path,
                 native_library_path,
                 &request,
@@ -2438,19 +2436,19 @@ async fn call_assetstudio_native_inspect_process(
         }
         Err(error) => return Err(error),
     };
-    parse_assetstudio_native_inspect_worker_output("worker", output)
+    parse_assetstudio_ffi_inspect_worker_output("worker", output)
 }
 
 #[allow(dead_code)]
-async fn call_assetstudio_native_inspect_pool(
+async fn call_assetstudio_ffi_inspect_pool(
     native_library_path: &str,
     worker_path: Option<&str>,
     process_concurrency: usize,
     request: &AssetStudioNativeInspectRequest,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
     let request = AssetStudioNativeRequest::Inspect(request.clone());
-    let worker_path = configured_assetstudio_native_worker_path(worker_path)?;
-    let output = match run_assetstudio_native_worker_pool(
+    let worker_path = configured_assetstudio_ffi_worker_path(worker_path)?;
+    let output = match run_assetstudio_ffi_worker_pool(
         &worker_path,
         native_library_path,
         &request,
@@ -2465,7 +2463,7 @@ async fn call_assetstudio_native_inspect_pool(
                 error = %error,
                 "assetstudio native inspect worker pool crashed; retrying once in isolated process mode"
             );
-            run_assetstudio_native_worker_isolated(
+            run_assetstudio_ffi_worker_isolated(
                 &worker_path,
                 native_library_path,
                 &request,
@@ -2475,11 +2473,11 @@ async fn call_assetstudio_native_inspect_pool(
         }
         Err(error) => return Err(error),
     };
-    parse_assetstudio_native_inspect_worker_output("worker pool", output)
+    parse_assetstudio_ffi_inspect_worker_output("worker pool", output)
 }
 
 #[allow(dead_code)]
-fn parse_assetstudio_native_inspect_worker_output(
+fn parse_assetstudio_ffi_inspect_worker_output(
     worker_kind: &str,
     output: NativeWorkerOutput,
 ) -> Result<AssetStudioNativeInspectResponse, ExportPipelineError> {
@@ -2526,13 +2524,13 @@ impl NativeObjectExportCallTarget<'_> {
     }
 }
 
-async fn call_assetstudio_native_object_export_worker(
+async fn call_assetstudio_ffi_object_export_worker(
     worker: &mut NativePooledWorker,
     next_id: &AtomicU64,
     inspect_request: &AssetStudioNativeInspectRequest,
     options: &NativeObjectExportOptions<'_>,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    call_assetstudio_native_object_export_with_target(
+    call_assetstudio_ffi_object_export_with_target(
         NativeObjectExportCallTarget::Pooled(worker),
         next_id,
         inspect_request,
@@ -2541,7 +2539,7 @@ async fn call_assetstudio_native_object_export_worker(
     .await
 }
 
-async fn call_assetstudio_native_object_export_with_target(
+async fn call_assetstudio_ffi_object_export_with_target(
     mut target: NativeObjectExportCallTarget<'_>,
     next_id: &AtomicU64,
     inspect_request: &AssetStudioNativeInspectRequest,
@@ -2551,7 +2549,7 @@ async fn call_assetstudio_native_object_export_with_target(
     let open_output = target
         .call(next_id.fetch_add(1, Ordering::Relaxed), &open_request)
         .await?;
-    let open_response = parse_assetstudio_native_context_open_worker_output(open_output)?;
+    let open_response = parse_assetstudio_ffi_context_open_worker_output(open_output)?;
     let context_id = open_response.context_id;
     let mut summary = NativeObjectExportSummary {
         written_files: Vec::new(),
@@ -2565,7 +2563,7 @@ async fn call_assetstudio_native_object_export_with_target(
     };
 
     let unpack_result = async {
-        let assets = list_assetstudio_native_context_objects_worker(
+        let assets = list_assetstudio_ffi_context_objects_worker(
             &mut target,
             next_id,
             context_id,
@@ -2596,7 +2594,7 @@ async fn call_assetstudio_native_object_export_with_target(
                     .call(next_id.fetch_add(1, Ordering::Relaxed), &request)
                     .await?;
                 let read_outputs =
-                    parse_assetstudio_native_object_read_batch_worker_output_recoverable(
+                    parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
                         output,
                         asset_chunk,
                     )?;
@@ -2638,7 +2636,7 @@ async fn call_assetstudio_native_object_export_with_target(
     let close_result = target
         .call(next_id.fetch_add(1, Ordering::Relaxed), &close_request)
         .await
-        .and_then(parse_assetstudio_native_context_close_worker_output);
+        .and_then(parse_assetstudio_ffi_context_close_worker_output);
 
     match (unpack_result, close_result) {
         (Ok(phase_ms), Ok(())) => Ok(phase_ms),
@@ -2651,7 +2649,7 @@ async fn call_assetstudio_native_object_export_with_target(
     }
 }
 
-async fn list_assetstudio_native_context_objects_worker(
+async fn list_assetstudio_ffi_context_objects_worker(
     target: &mut NativeObjectExportCallTarget<'_>,
     next_id: &AtomicU64,
     context_id: i64,
@@ -2679,7 +2677,7 @@ async fn list_assetstudio_native_context_objects_worker(
         let output = target
             .call(next_id.fetch_add(1, Ordering::Relaxed), &request)
             .await?;
-        let response = parse_assetstudio_native_context_list_objects_worker_output(output)?;
+        let response = parse_assetstudio_ffi_context_list_objects_worker_output(output)?;
         merge_optional_max_phase_ms(
             &mut summary.phase_ms,
             "context_list.duration_ms",
@@ -2775,7 +2773,7 @@ fn is_native_aot_non_bmp_image_read(
 }
 
 #[allow(dead_code)]
-fn parse_assetstudio_native_object_read_worker_output_recoverable(
+fn parse_assetstudio_ffi_object_read_worker_output_recoverable(
     output: NativeWorkerOutput,
     asset: &AssetStudioNativeAssetInfo,
 ) -> Result<NativeObjectReadParseResult, ExportPipelineError> {
@@ -3007,7 +3005,7 @@ fn record_native_object_read_batch_diagnostics(
     );
 }
 
-fn parse_assetstudio_native_object_read_batch_worker_output_recoverable(
+fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
     output: NativeWorkerOutput,
     assets: &[&AssetStudioNativeAssetInfo],
 ) -> Result<NativeObjectReadBatchParseOutput, ExportPipelineError> {
@@ -4875,7 +4873,7 @@ fn strip_container_prefix(container: &str, strip_path_prefix: &str) -> PathBuf {
     PathBuf::from(stripped)
 }
 
-fn parse_assetstudio_native_context_open_worker_output(
+fn parse_assetstudio_ffi_context_open_worker_output(
     output: NativeWorkerOutput,
 ) -> Result<AssetStudioNativeContextOpenResponse, ExportPipelineError> {
     let response = output.response.into_context_open()?;
@@ -4904,7 +4902,7 @@ fn parse_assetstudio_native_context_open_worker_output(
     }
 }
 
-fn parse_assetstudio_native_context_list_objects_worker_output(
+fn parse_assetstudio_ffi_context_list_objects_worker_output(
     output: NativeWorkerOutput,
 ) -> Result<AssetStudioNativeContextListObjectsResponse, ExportPipelineError> {
     let response = output.response.into_context_list_objects()?;
@@ -4935,7 +4933,7 @@ fn parse_assetstudio_native_context_list_objects_worker_output(
     }
 }
 
-fn parse_assetstudio_native_context_close_worker_output(
+fn parse_assetstudio_ffi_context_close_worker_output(
     output: NativeWorkerOutput,
 ) -> Result<(), ExportPipelineError> {
     let response = output.response.into_context_close()?;
@@ -4958,7 +4956,7 @@ fn parse_assetstudio_native_context_close_worker_output(
 }
 
 #[allow(dead_code)]
-async fn run_assetstudio_native_worker_limited(
+async fn run_assetstudio_ffi_worker_limited(
     worker_path: &Path,
     native_library_path: &str,
     request: &AssetStudioNativeRequest,
@@ -4966,11 +4964,11 @@ async fn run_assetstudio_native_worker_limited(
 ) -> Result<NativeWorkerOutput, ExportPipelineError> {
     let _permit = acquire_native_process_permit(process_concurrency).await?;
     let _cpu_permit = acquire_cpu_budget_permit(process_concurrency).await?;
-    run_assetstudio_native_worker(worker_path, native_library_path, request).await
+    run_assetstudio_ffi_worker(worker_path, native_library_path, request).await
 }
 
 #[allow(dead_code)]
-async fn run_assetstudio_native_worker_isolated(
+async fn run_assetstudio_ffi_worker_isolated(
     worker_path: &Path,
     native_library_path: &str,
     request: &AssetStudioNativeRequest,
@@ -4979,11 +4977,11 @@ async fn run_assetstudio_native_worker_isolated(
     let _recovery_guard = native_process_recovery_lock().await;
     let _permits = acquire_all_native_process_permits(process_concurrency).await?;
     let _cpu_permit = acquire_cpu_budget_permit(process_concurrency).await?;
-    run_assetstudio_native_worker(worker_path, native_library_path, request).await
+    run_assetstudio_ffi_worker(worker_path, native_library_path, request).await
 }
 
 #[allow(dead_code)]
-async fn run_assetstudio_native_worker_pool(
+async fn run_assetstudio_ffi_worker_pool(
     worker_path: &Path,
     native_library_path: &str,
     request: &AssetStudioNativeRequest,
@@ -5006,7 +5004,7 @@ fn is_native_worker_signal_failure(error: &ExportPipelineError) -> bool {
             program,
             status,
             ..
-        } if program.contains("assetstudio_native_worker")
+        } if program.contains("assetstudio_ffi_worker")
             && (status.contains("signal:") || status.contains("SIGSEGV"))
     )
 }
@@ -5505,7 +5503,7 @@ impl NativeWorkerPool {
             None => self.spawn_worker().await?,
         };
 
-        let call_result = call_assetstudio_native_object_export_worker(
+        let call_result = call_assetstudio_ffi_object_export_worker(
             &mut worker,
             &self.next_id,
             call.inspect_request,
@@ -5965,7 +5963,7 @@ struct NativeWorkerOutput {
 }
 
 #[allow(dead_code)]
-async fn run_assetstudio_native_worker(
+async fn run_assetstudio_ffi_worker(
     worker_path: &Path,
     native_library_path: &str,
     request: &AssetStudioNativeRequest,
@@ -6070,7 +6068,7 @@ fn format_worker_diagnostics(stdout: &str, stderr: &str) -> String {
     }
 }
 
-fn configured_assetstudio_native_worker_path(
+fn configured_assetstudio_ffi_worker_path(
     configured_path: Option<&str>,
 ) -> Result<PathBuf, ExportPipelineError> {
     if let Some(path) = configured_path
@@ -6078,6 +6076,12 @@ fn configured_assetstudio_native_worker_path(
         .filter(|value| !value.is_empty())
     {
         return Ok(PathBuf::from(path));
+    }
+    if let Ok(path) = std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
     }
     if let Ok(path) = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH") {
         let path = path.trim();
@@ -6098,14 +6102,14 @@ fn configured_assetstudio_native_worker_path(
             ),
         });
     };
-    Ok(dir.join(assetstudio_native_worker_executable_name()))
+    Ok(dir.join(assetstudio_ffi_worker_executable_name()))
 }
 
-fn assetstudio_native_worker_executable_name() -> &'static str {
+fn assetstudio_ffi_worker_executable_name() -> &'static str {
     if cfg!(windows) {
-        "assetstudio_native_worker.exe"
+        "assetstudio_ffi_worker.exe"
     } else {
-        "assetstudio_native_worker"
+        "assetstudio_ffi_worker"
     }
 }
 
@@ -6117,12 +6121,12 @@ fn absolute_command_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn preload_assetstudio_native_dependencies(native_library_path: &str) -> Vec<libloading::Library> {
+fn preload_assetstudio_ffi_dependencies(native_library_path: &str) -> Vec<libloading::Library> {
     let Some(native_library_dir) = Path::new(native_library_path).parent() else {
         return Vec::new();
     };
 
-    assetstudio_native_dependency_names()
+    assetstudio_ffi_dependency_names()
         .iter()
         .filter_map(|library_name| {
             let dependency_path = native_library_dir.join(library_name);
@@ -6130,7 +6134,7 @@ fn preload_assetstudio_native_dependencies(native_library_path: &str) -> Vec<lib
                 return None;
             }
 
-            match unsafe { load_assetstudio_native_dependency(&dependency_path) } {
+            match unsafe { load_assetstudio_ffi_dependency(&dependency_path) } {
                 Ok(library) => Some(library),
                 Err(source) => {
                     warn!(
@@ -6146,12 +6150,12 @@ fn preload_assetstudio_native_dependencies(native_library_path: &str) -> Vec<lib
 }
 
 #[cfg(target_os = "linux")]
-fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+fn assetstudio_ffi_dependency_names() -> &'static [&'static str] {
     &["libTexture2DDecoderNative.so", "libAssetStudioFBXNative.so"]
 }
 
 #[cfg(target_os = "macos")]
-fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+fn assetstudio_ffi_dependency_names() -> &'static [&'static str] {
     &[
         "libTexture2DDecoderNative.dylib",
         "libAssetStudioFBXNative.dylib",
@@ -6159,17 +6163,17 @@ fn assetstudio_native_dependency_names() -> &'static [&'static str] {
 }
 
 #[cfg(target_os = "windows")]
-fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+fn assetstudio_ffi_dependency_names() -> &'static [&'static str] {
     &["Texture2DDecoderNative.dll", "AssetStudioFBXNative.dll"]
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn assetstudio_native_dependency_names() -> &'static [&'static str] {
+fn assetstudio_ffi_dependency_names() -> &'static [&'static str] {
     &[]
 }
 
 #[cfg(unix)]
-unsafe fn load_assetstudio_native_dependency(
+unsafe fn load_assetstudio_ffi_dependency(
     dependency_path: &Path,
 ) -> Result<libloading::Library, libloading::Error> {
     use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_NOW};
@@ -6178,7 +6182,7 @@ unsafe fn load_assetstudio_native_dependency(
 }
 
 #[cfg(not(unix))]
-unsafe fn load_assetstudio_native_dependency(
+unsafe fn load_assetstudio_ffi_dependency(
     dependency_path: &Path,
 ) -> Result<libloading::Library, libloading::Error> {
     libloading::Library::new(dependency_path)
@@ -8032,17 +8036,17 @@ mod tests {
     use super::{
         acquire_cpu_budget_permit_blocking, assetstudio_export_type_selector,
         assetstudio_fix_file_name, assetstudio_object_mode_supported_type,
-        assetstudio_type_selector_matches, close_assetstudio_native_context,
+        assetstudio_type_selector_matches, close_assetstudio_ffi_context,
         convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
-        handle_png_conversion, inspect_assetstudio_native_bundle, merge_usm_files,
+        handle_png_conversion, inspect_assetstudio_ffi_bundle, merge_usm_files,
         native_object_output_extension, native_object_output_path,
         native_read_batch_size_for_assets, native_read_kind_for_asset,
-        native_skipped_unsupported_asset, open_assetstudio_native_context,
-        parse_assetstudio_native_context_list_objects_worker_output,
-        parse_assetstudio_native_object_read_batch_worker_output_recoverable,
-        parse_assetstudio_native_object_read_worker_output_recoverable, parse_payload_bundle,
+        native_skipped_unsupported_asset, open_assetstudio_ffi_context,
+        parse_assetstudio_ffi_context_list_objects_worker_output,
+        parse_assetstudio_ffi_object_read_batch_worker_output_recoverable,
+        parse_assetstudio_ffi_object_read_worker_output_recoverable, parse_payload_bundle,
         parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
-        process_usm_file, query_assetstudio_native_version,
+        process_usm_file, query_assetstudio_ffi_version,
         record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
         scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
         text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
@@ -8081,7 +8085,7 @@ mod tests {
     }
 
     fn build_native_shim(dir: &Path) -> PathBuf {
-        let source = dir.join("assetstudio_native_shim.rs");
+        let source = dir.join("assetstudio_ffi_shim.rs");
         fs::write(
             &source,
             r##"
@@ -8636,7 +8640,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
 "##,
         )
         .unwrap();
-        let library = dir.join(dynamic_library_name("assetstudio_native_shim"));
+        let library = dir.join(dynamic_library_name("assetstudio_ffi_shim"));
         let output = std::process::Command::new("rustc")
             .arg("--crate-type")
             .arg("cdylib")
@@ -8830,7 +8834,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let dir = tempdir().unwrap();
         let library = build_native_shim(dir.path());
 
-        let version = query_assetstudio_native_version(&library.to_string_lossy()).unwrap();
+        let version = query_assetstudio_ffi_version(&library.to_string_lossy()).unwrap();
 
         assert!(version.success);
         assert!(version.adapter_version.is_none());
@@ -8857,7 +8861,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         };
 
         let response =
-            inspect_assetstudio_native_bundle(&library.to_string_lossy(), &request).unwrap();
+            inspect_assetstudio_ffi_bundle(&library.to_string_lossy(), &request).unwrap();
 
         assert_eq!(response.assets_file_count, 1);
         assert_eq!(response.exportable_asset_count, 1);
@@ -8888,13 +8892,13 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             include_assets: true,
         };
         let context =
-            open_assetstudio_native_context(&library.to_string_lossy(), &inspect_request).unwrap();
+            open_assetstudio_ffi_context(&library.to_string_lossy(), &inspect_request).unwrap();
         assert_eq!(context.context_id, 7);
         assert!(context.assets.is_empty());
         assert!(context.has_more_assets);
         assert!(context.warnings.is_empty());
 
-        let close_response = close_assetstudio_native_context(
+        let close_response = close_assetstudio_ffi_context(
             &library.to_string_lossy(),
             &AssetStudioNativeContextCloseRequest {
                 context_id: context.context_id,
@@ -8928,7 +8932,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         assert!(matches!(
             err,
             ExportPipelineError::AssetStudioNative { ref message }
-                if message.contains("asset_studio_native_library_path")
+                if message.contains("asset_studio_ffi_library_path")
         ));
     }
 
@@ -10566,7 +10570,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
 
     #[test]
     fn native_version_response_reports_failed_status() {
-        let error = super::parse_assetstudio_native_version_response(
+        let error = super::parse_assetstudio_ffi_version_response(
             false,
             AssetStudioNativeResponse::Version(AssetStudioNativeVersion {
                 success: false,
@@ -10689,7 +10693,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             payload_file: None,
         };
 
-        let parsed = parse_assetstudio_native_context_list_objects_worker_output(output).unwrap();
+        let parsed = parse_assetstudio_ffi_context_list_objects_worker_output(output).unwrap();
 
         assert!(parsed.success);
         assert_eq!(parsed.assets.len(), 1);
@@ -10726,7 +10730,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         };
 
         let parsed =
-            parse_assetstudio_native_object_read_worker_output_recoverable(output, &asset).unwrap();
+            parse_assetstudio_ffi_object_read_worker_output_recoverable(output, &asset).unwrap();
         let NativeObjectReadParseResult::Skipped(skipped) = parsed else {
             panic!("expected skipped object read");
         };
@@ -10761,7 +10765,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         };
 
         let parsed =
-            parse_assetstudio_native_object_read_worker_output_recoverable(output, &asset).unwrap();
+            parse_assetstudio_ffi_object_read_worker_output_recoverable(output, &asset).unwrap();
         let NativeObjectReadParseResult::Read(read) = parsed else {
             panic!("expected successful object read");
         };
@@ -10797,7 +10801,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         };
 
         let parsed =
-            parse_assetstudio_native_object_read_worker_output_recoverable(output, &asset).unwrap();
+            parse_assetstudio_ffi_object_read_worker_output_recoverable(output, &asset).unwrap();
         let NativeObjectReadParseResult::Read(read) = parsed else {
             panic!("expected successful object read");
         };
@@ -10849,7 +10853,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let assets = [&good_asset, &failed_asset];
 
         let parsed =
-            parse_assetstudio_native_object_read_batch_worker_output_recoverable(output, &assets)
+            parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(output, &assets)
                 .unwrap();
 
         assert_eq!(parsed.object_count, 2);

@@ -66,7 +66,7 @@ and retained only as historical context in prior commits.
 
 ## Worker Pool
 
-Production NativeAOT calls use the Rust `assetstudio_native_worker` sidecar in
+Production NativeAOT calls use the Rust `assetstudio_ffi_worker` sidecar in
 `pool` mode. Each worker process loads the NativeAOT shared library once and
 serves length-prefixed requests over stdin/stdout.
 
@@ -75,7 +75,7 @@ This gives the pipeline:
 - process isolation from AssetStudio static state
 - lower overhead than spawning one worker per call
 - bounded concurrency
-- worker recycling via `asset_studio_native_worker_max_calls`
+- worker recycling via `asset_studio_ffi_worker_max_calls`
 - per-worker telemetry for call counts, restarts, wait time, and protocol
   errors
 
@@ -105,7 +105,7 @@ Default read kinds are type aware:
 - `Animator`: `fbx`
 
 Rust can override read behavior with
-`tools.asset_studio_native_read_kinds`.
+`tools.asset_studio_ffi_read_kinds`.
 
 Output path behavior:
 
@@ -118,7 +118,7 @@ CLI parity mode is intended for benchmark rigor, not normal production output.
 It can be enabled with:
 
 ```bash
-HARUKI_ASSET_STUDIO_NATIVE_CLI_PARITY_MODE=true
+HARUKI_ASSET_STUDIO_FFI_CLI_PARITY_MODE=true
 ```
 
 or with `asset_region_bench --native-cli-parity`.

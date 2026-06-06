@@ -12,11 +12,11 @@ The native backend has three call modes:
 - `direct`: load the NativeAOT library in the current Rust process. This is the
   lowest-latency path for single calls and is what `AssetStudioNativeClient`
   uses, but it shares all AssetStudio process state with Rust.
-- `process`: spawn the Rust `assetstudio_native_worker` sidecar for each FFI
+- `process`: spawn the Rust `assetstudio_ffi_worker` sidecar for each FFI
   call. Each worker loads the same NativeAOT library in an isolated process, so
   Rust can run multiple exports concurrently without sharing AssetStudio's
   static process state.
-- `pool`: keep a bounded pool of `assetstudio_native_worker` sidecars alive and
+- `pool`: keep a bounded pool of `assetstudio_ffi_worker` sidecars alive and
   send operation/result frames over a length-prefixed JSON protocol. The worker
   IPC remains JSON, but the worker calls AssetStudioFFI through typed C structs,
   not Native JSON request/response strings. Pool mode is the recommended export
@@ -24,16 +24,16 @@ The native backend has three call modes:
 
 Image reads use the raw RGBA IR by default. Rust encodes the final PNG/WebP
 outputs, which avoids the NativeAOT + ImageSharp PNG encoder path and keeps
-alpha handling consistent. `tools.asset_studio_native_image_format` is retained
+alpha handling consistent. `tools.asset_studio_ffi_image_format` is retained
 only as an override surface and currently accepts `raw_rgba`.
 
-Configure it with `tools.asset_studio_native_call_mode` or
-`HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE`. Set
-`tools.asset_studio_native_worker_path` or
-`HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH` only when the worker binary is not next
+Configure it with `tools.asset_studio_ffi_call_mode` or
+`HARUKI_ASSET_STUDIO_FFI_CALL_MODE`. Set
+`tools.asset_studio_ffi_worker_path` or
+`HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` only when the worker binary is not next
 to the current executable. Process and pool mode are limited by
-`tools.asset_studio_native_process_concurrency` or
-`HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY`; the default call mode is
+`tools.asset_studio_ffi_process_concurrency` or
+`HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`; the default call mode is
 `pool`, and the default process concurrency is `0`, meaning auto. Without CPU
 throttle, auto uses the shared CPU budget as a hard worker cap. With CPU
 throttle enabled, auto intentionally oversubscribes workers up to the CPU count
@@ -70,9 +70,9 @@ The production path now prefers the double-FFI object flow:
 
 ```yaml
 tools:
-  asset_studio_native_call_mode: "pool"
-  asset_studio_native_read_batch_size: 32
-  asset_studio_native_read_kinds:
+  asset_studio_ffi_call_mode: "pool"
+  asset_studio_ffi_read_batch_size: 32
+  asset_studio_ffi_read_kinds:
     Texture2D: image
     Sprite: image
     TextAsset: text_bytes
@@ -96,10 +96,10 @@ For crash investigation, set `RUST_BACKTRACE=1` and enable C# adapter logging
 with:
 
 ```bash
-export HARUKI_ASSET_STUDIO_NATIVE_TRACE=1
-export HARUKI_ASSET_STUDIO_NATIVE_WORKER_TRACE=1
-export HARUKI_ASSET_STUDIO_NATIVE_LOG_DIR=/tmp/haruki-native-logs
-export HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=3
+export HARUKI_ASSET_STUDIO_FFI_TRACE=1
+export HARUKI_ASSET_STUDIO_FFI_WORKER_TRACE=1
+export HARUKI_ASSET_STUDIO_FFI_LOG_DIR=/tmp/haruki-native-logs
+export HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY=3
 ```
 
 Each NativeAOT operation records an operation id, CLI-equivalent arguments,
@@ -210,15 +210,15 @@ player resource files. `context_read_object` accepts:
 - `kind`: `auto`, `raw`, `typetree_json`, `image`, `image_archive`,
   `audio`, `video`, `font`, `shader`, `text`, `text_bytes`, `mesh`, `obj`,
   `animator`, or `fbx`. Rust chooses defaults by AssetStudio type and can
-  override them with `tools.asset_studio_native_read_kinds`.
+  override them with `tools.asset_studio_ffi_read_kinds`.
 - `image_format`: currently `raw_rgba`; Rust encodes final image files.
 
 The typed response contains object metadata, payload kind, payload length,
 warnings, timing, and errors. Object bytes are returned through typed payload
 buffers and must be released with `haruki_assetstudio_result_free`. In
 worker-pool mode the Rust worker returns a JSON operation/result frame and a
-binary payload frame over its private process IPC. `tools.asset_studio_native_read_batch_size` or
-`HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE` controls how many object reads Rust
+binary payload frame over its private process IPC. `tools.asset_studio_ffi_read_batch_size` or
+`HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE` controls how many object reads Rust
 packs into one `context_read_objects` request; the default is `32`.
 Batch responses include diagnostics used by Rust benchmarks:
 `worker_id`, `call_seq`, `object_count`, `payload_bundle_bytes`,
@@ -231,7 +231,7 @@ percentiles should not be summed like ordinary elapsed-time counters.
 
 Keep `32` as the global default. Image-heavy workloads such as
 `character/member` can be re-benchmarked with
-`HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE=64` or
+`HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE=64` or
 `--native-read-batch-size 64`; audio/text-heavy paths such as `music/short`
 have recently favored `32`.
 
@@ -275,7 +275,7 @@ Keep the NativeAOT adapter and the texture decoder native library together:
 - macOS: `HarukiAssetStudioFFI.dylib`, `libTexture2DDecoderNative.dylib`
 - Windows: `HarukiAssetStudioFFI.dll`, `Texture2DDecoderNative.dll`
 
-Set `HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH` to the adapter library path. Rust
+Set `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` to the adapter library path. Rust
 also forwards that path to the adapter before calling it so the C# P/Invoke
 resolver can find the decoder library next to the adapter.
 
@@ -312,7 +312,7 @@ diagnostics. It also queries typed capabilities before native
 benchmarking so ABI loading failures are separated from export failures.
 
 For full region-rule benchmarks, use `asset_region_bench`. Keep the production
-default `tools.asset_studio_native_process_concurrency=0` for shared hosts, but
+default `tools.asset_studio_ffi_process_concurrency=0` for shared hosts, but
 `music/short` has recently benchmarked best with `native_process=16` and
 `media_encode=12`; `native_process=20` showed over-concurrency on the same
 machine. The benchmark summary reports effective native process concurrency,

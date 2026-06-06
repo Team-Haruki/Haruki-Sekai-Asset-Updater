@@ -24,17 +24,16 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 }
 
 #[test]
-fn real_assetstudio_native_exports_expected_file_when_configured() {
-    let Some(asset_studio_native_library_path) = required_env("ASSET_STUDIO_NATIVE_LIBRARY_PATH")
-    else {
+fn real_assetstudio_ffi_exports_expected_file_when_configured() {
+    let Some(asset_studio_ffi_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
         return;
     };
-    run_real_assetstudio_export(asset_studio_native_library_path);
+    run_real_assetstudio_export(asset_studio_ffi_library_path);
 }
 
 #[test]
-fn real_assetstudio_native_client_reads_object_when_configured() {
-    let Some(native_library_path) = required_env("ASSET_STUDIO_NATIVE_LIBRARY_PATH") else {
+fn real_assetstudio_ffi_client_reads_object_when_configured() {
+    let Some(native_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
         return;
     };
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
@@ -123,7 +122,7 @@ fn fixture_bundles_are_available_for_assetstudio_regressions() {
     }
 }
 
-fn run_real_assetstudio_export(asset_studio_native_library_path: String) {
+fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
         return;
     };
@@ -189,7 +188,7 @@ fn run_real_assetstudio_export(asset_studio_native_library_path: String) {
     let config = AppConfig {
         tools: haruki_sekai_asset_updater::core::config::ToolsConfig {
             ffmpeg_path: "ffmpeg".to_string(),
-            asset_studio_native_library_path: Some(asset_studio_native_library_path),
+            asset_studio_ffi_library_path: Some(asset_studio_ffi_library_path),
             ..haruki_sekai_asset_updater::core::config::ToolsConfig::default()
         },
         storage: StorageConfig {

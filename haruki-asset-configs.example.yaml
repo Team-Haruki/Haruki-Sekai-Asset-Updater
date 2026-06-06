@@ -36,14 +36,14 @@ execution:
 tools:
   ffmpeg_path: "ffmpeg"
   media_backend: "ffi" # ffi preferred; auto | cli are fallback/test paths
-  asset_studio_native_library_path: ""
-  asset_studio_native_call_mode: "pool" # direct | process | pool
-  asset_studio_native_worker_path: ""
-  asset_studio_native_process_concurrency: 0 # 0 = auto: CPU budget, or CPU-count oversubscription when CPU throttle is enabled
-  asset_studio_native_worker_max_calls: 256 # 0 disables recycling
-  asset_studio_native_read_batch_size: 32 # context_read_objects chunk size
-  asset_studio_native_image_format: "" # default raw_rgba; AssetStudioFFI image reads only support raw_rgba
-  asset_studio_native_read_kinds: # optional per AssetStudio type selector
+  asset_studio_ffi_library_path: ""
+  asset_studio_ffi_call_mode: "pool" # direct | process | pool
+  asset_studio_ffi_worker_path: ""
+  asset_studio_ffi_process_concurrency: 0 # 0 = auto: CPU budget, or CPU-count oversubscription when CPU throttle is enabled
+  asset_studio_ffi_worker_max_calls: 256 # 0 disables recycling
+  asset_studio_ffi_read_batch_size: 32 # context_read_objects chunk size
+  asset_studio_ffi_image_format: "" # default raw_rgba; AssetStudioFFI image reads only support raw_rgba
+  asset_studio_ffi_read_kinds: # optional per AssetStudio type selector
     Texture2D: image
     Sprite: image
     TextAsset: text_bytes
