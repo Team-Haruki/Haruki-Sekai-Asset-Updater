@@ -15,8 +15,8 @@
 - Exposes `POST /v2/jobs/{id}/cancel`
 - Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend
 - Includes `usmexport`, `usmmeta`, `assetinfo_dump`, and `s3ls` helper CLIs
-- Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and `git2-rs` chart sync
-- Uses a pure Rust WebP encoder for PNG to WebP conversion
+- Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
+- Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
 - Uses the double-FFI production path by default: AssetStudio FFI worker
   pool plus FFmpeg/rsmpeg FFI. FFmpeg CLI remains available as a media
   fallback/test path.
@@ -132,6 +132,12 @@ cargo run --bin usmmeta -- --input ./tests/files/0703.usm
 - `resources.cpu.throttle.enabled` is optional and defaults to `false`. Enable
   it only when the process should actively wait based on sampled process-tree
   CPU usage; leave it disabled for full-throughput export runs.
+- `backends.image` controls Rust-side image encoding. Keep
+  `png_compression: fast` for high-throughput exports unless smaller PNG output
+  is more important than CPU time.
+- `concurrency.post_process` limits bundle post-processing. The default `0`
+  follows `concurrency.media_encode`; raise it for image-heavy full exports such
+  as `character/member`.
 - Normal progress logging emits bundle-level start/completion/failure lines.
   Use debug logging for detailed download, native FFI, export, and post-process
   phase traces.

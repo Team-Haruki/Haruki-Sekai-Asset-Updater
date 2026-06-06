@@ -128,8 +128,8 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 | `export_acb_files` | `export.acb.export` |
 | `decode_acb_files` | `export.acb.decode` |
 | `decode_hca_files` | `export.hca.decode` |
-| `convert_photo_to_webp` | `export.images.convert_to_webp` |
-| `remove_png` | `export.images.remove_png` |
+| `convert_photo_to_webp` | `export.images.formats` | Migrated to `["png", "webp"]` or `["webp"]` depending on `remove_png`. |
+| `remove_png` | `export.images.formats` | Only meaningful with `convert_photo_to_webp`; migrated into the final format list. |
 | `convert_video_to_mp4` | `export.video.convert_to_mp4` |
 | `direct_usm_to_mp4_with_ffmpeg` | `export.video.direct_usm_to_mp4_with_ffmpeg` |
 | `remove_m2v` | `export.video.remove_m2v` |
@@ -149,10 +149,14 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 - `execution.retry.max_backoff_ms` defaults to `4000`.
 - `concurrency.download` defaults to `4`.
 - `concurrency.upload` defaults to `4`.
+- `concurrency.post_process` defaults to `0`, which follows
+  `concurrency.media_encode`.
 - `concurrency.acb` defaults to `8`.
 - `concurrency.usm` defaults to `4`.
 - `concurrency.hca` defaults to `16`.
 - `backends.media.backend` defaults to `ffi`.
+- `backends.image.backend` defaults to `rust`.
+- `backends.image.png_compression` defaults to `fast`.
 - `backends.asset_studio.call_mode` defaults to `pool`.
 - `resources.cpu.budget_auto` defaults to `true`.
 - `resources.cpu.budget_ratio` defaults to `0.75`.
