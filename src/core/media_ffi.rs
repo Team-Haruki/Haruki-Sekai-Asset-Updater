@@ -1168,6 +1168,7 @@ impl Drop for ChannelLayout {
 struct AudioFifo {
     ptr: *mut ffi::AVAudioFifo,
     frame_size: i32,
+    pad_final_frame: bool,
     sample_fmt: ffi::AVSampleFormat,
     sample_rate: i32,
     ch_layout: ChannelLayout,
@@ -1194,6 +1195,7 @@ impl AudioFifo {
             Ok(Some(Self {
                 ptr,
                 frame_size: (*encoder_ctx).frame_size,
+                pad_final_frame: (*encoder_ctx).codec_id == ffi::AV_CODEC_ID_MP3,
                 sample_fmt: (*encoder_ctx).sample_fmt,
                 sample_rate: (*encoder_ctx).sample_rate,
                 ch_layout,
@@ -1237,7 +1239,9 @@ impl AudioFifo {
             if available <= 0 || (!flush && available < self.frame_size) {
                 break;
             }
-            let samples = if flush {
+            let samples = if flush && self.pad_final_frame && available < self.frame_size {
+                self.frame_size
+            } else if flush {
                 available.min(self.frame_size)
             } else {
                 self.frame_size
@@ -1261,9 +1265,10 @@ impl AudioFifo {
                 let read = ffi::av_audio_fifo_read(
                     self.ptr,
                     (*self.frame.ptr).data.as_ptr() as *const *mut c_void,
-                    samples,
+                    available.min(samples),
                 );
-                if read != samples {
+                let expected_read = available.min(samples);
+                if read != expected_read {
                     if read < 0 {
                         return Err(ExportPipelineError::Media {
                             message: format!("av_audio_fifo_read failed: {}", ffmpeg_error(read)),
@@ -1272,6 +1277,18 @@ impl AudioFifo {
                     return Err(media_error(
                         "av_audio_fifo_read read fewer samples than requested",
                     ));
+                }
+                if read < samples {
+                    check(
+                        ffi::av_samples_set_silence(
+                            (*self.frame.ptr).extended_data,
+                            read,
+                            samples - read,
+                            self.ch_layout.inner.nb_channels,
+                            self.sample_fmt,
+                        ),
+                        "av_samples_set_silence audio fifo padding",
+                    )?;
                 }
                 (*self.frame.ptr).pts = *frame_index;
                 *frame_index += samples as i64;
