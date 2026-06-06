@@ -253,6 +253,9 @@ impl AppConfig {
             self.backends.asset_studio.cli_parity_mode =
                 parse_bool_env("backends.asset_studio.cli_parity_mode", &value)?;
         }
+        if let Ok(value) = env::var("HARUKI_ASSET_HTTP_VERSION") {
+            self.server.asset_http_version = value.parse()?;
+        }
         if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
             self.concurrency.media_encode =
                 parse_positive_usize("concurrency.media_encode", &value)?;
@@ -816,6 +819,7 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub proxy: Option<String>,
+    pub asset_http_version: AssetHttpVersion,
     pub auth: AuthConfig,
     pub tls: TlsConfig,
 }
@@ -826,8 +830,33 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             proxy: None,
+            asset_http_version: AssetHttpVersion::Auto,
             auth: AuthConfig::default(),
             tls: TlsConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetHttpVersion {
+    #[default]
+    Auto,
+    Http1,
+}
+
+impl FromStr for AssetHttpVersion {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "http1" | "http1_only" | "http/1" | "http/1.1" => Ok(Self::Http1),
+            other => Err(ConfigError::InvalidValue {
+                field: "server.asset_http_version".to_string(),
+                value: other.to_string(),
+                expected: "auto or http1".to_string(),
+            }),
         }
     }
 }
@@ -1679,6 +1708,7 @@ config_version: 3
 server:
   host: 127.0.0.1
   port: 18080
+  asset_http_version: http1
   auth:
     enabled: true
     bearer_token: secret
@@ -1705,6 +1735,7 @@ regions:
         config.validate().unwrap();
 
         assert_eq!(config.server.port, 18080);
+        assert_eq!(config.server.asset_http_version, AssetHttpVersion::Http1);
         assert_eq!(config.logging.level, "DEBUG");
         assert_eq!(config.execution.retry.attempts, 3);
         assert_eq!(config.enabled_regions(), vec!["jp".to_string()]);
@@ -1718,6 +1749,7 @@ regions:
     fn asset_studio_and_media_default_to_ffi() {
         let config = AppConfig::default();
         let asset_studio = &config.backends.asset_studio;
+        assert_eq!(config.server.asset_http_version, AssetHttpVersion::Auto);
         assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
         assert_eq!(
             AssetStudioFfiCallMode::default(),

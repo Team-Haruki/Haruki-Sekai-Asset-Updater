@@ -18,7 +18,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::core::cleanup::remove_file_if_exists;
-use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
+use crate::core::config::{AppConfig, AssetHttpVersion, RegionConfig, RegionProviderConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::{
@@ -245,9 +245,11 @@ impl AssetExecutionContext {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(180))
             .pool_max_idle_per_host(100)
-            .http1_only()
             .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
             .tcp_keepalive(Duration::from_secs(30));
+        if app_config.server.asset_http_version == AssetHttpVersion::Http1 {
+            builder = builder.http1_only();
+        }
 
         if let Some(proxy) = &app_config.server.proxy {
             if !proxy.is_empty() {
