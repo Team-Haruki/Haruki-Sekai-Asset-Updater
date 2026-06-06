@@ -125,6 +125,21 @@ cargo run --bin usmexport -- --input ./tests/files/0703.usm --output-dir ./expor
 cargo run --bin usmmeta -- --input ./tests/files/0703.usm
 ```
 
+## Runtime Tuning
+
+- `execution.max_in_flight_bundle_bytes` is a soft memory guard. The default
+  `0` disables it. On small Linux hosts, set it to the amount of bundle work the
+  process may keep in memory, for example
+  `HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES=4294967296`.
+- `concurrency.cpu_budget_auto` and `concurrency.cpu_budget_ratio` size the
+  CPU-heavy worker pools when auto tuning is enabled.
+- `concurrency.cpu_throttle_enabled` is optional and defaults to `false`. Enable
+  it only when the process should actively wait based on sampled process-tree
+  CPU usage; leave it disabled for full-throughput export runs.
+- Normal progress logging emits bundle-level start/completion/failure lines.
+  Use debug logging for detailed download, native FFI, export, and post-process
+  phase traces.
+
 ## Verification
 
 - Run the Rust test suite with `cargo test`.

@@ -957,12 +957,12 @@ type AssetStudioTypedContextReadObjectsDirectRetryFn = unsafe extern "C" fn(
 ) -> c_int;
 
 const ASSETSTUDIO_TYPED_ABI_VERSION: c_int = 1;
-const ASSETSTUDIO_TYPED_SCHEMA_VERSION: c_int = 2;
-const ASSETSTUDIO_TYPED_LAYOUT_VERSION: c_int = 2;
+const ASSETSTUDIO_TYPED_SCHEMA_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_LAYOUT_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_CONTEXT_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_LIMITS_ABI_VERSION: c_int = 1;
-const ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION: c_int = 3;
-const ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION: c_int = 3;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_INTO_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_DIRECT_RETRY_ABI_VERSION: c_int = 1;
@@ -970,17 +970,17 @@ const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_DIRECT_RETRY_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_SYMBOL_FREE_STRING: &[u8] = b"haruki_assetstudio_free_string";
 const ASSETSTUDIO_SYMBOL_FREE_BUFFER: &[u8] = b"haruki_assetstudio_free_buffer";
 const ASSETSTUDIO_SYMBOL_RESULT_FREE: &[u8] = b"haruki_assetstudio_result_free";
-const ASSETSTUDIO_SYMBOL_CAPABILITIES: &[u8] = b"haruki_assetstudio_capabilities_v2";
-const ASSETSTUDIO_SYMBOL_ABI_LAYOUT: &[u8] = b"haruki_assetstudio_abi_layout_v2";
+const ASSETSTUDIO_SYMBOL_CAPABILITIES: &[u8] = b"haruki_assetstudio_capabilities_v1";
+const ASSETSTUDIO_SYMBOL_ABI_LAYOUT: &[u8] = b"haruki_assetstudio_abi_layout_v1";
 const ASSETSTUDIO_SYMBOL_LIMITS: &[u8] = b"haruki_assetstudio_limits_v1";
-const ASSETSTUDIO_SYMBOL_CONTEXT_OPEN: &[u8] = b"haruki_assetstudio_context_open_v2";
+const ASSETSTUDIO_SYMBOL_CONTEXT_OPEN: &[u8] = b"haruki_assetstudio_context_open_v1";
 const ASSETSTUDIO_SYMBOL_CONTEXT_LIST_OBJECTS_SIZE: &[u8] =
-    b"haruki_assetstudio_context_list_objects_size_v3";
+    b"haruki_assetstudio_context_list_objects_size_v1";
 const ASSETSTUDIO_SYMBOL_CONTEXT_LIST_OBJECTS_INTO: &[u8] =
-    b"haruki_assetstudio_context_list_objects_into_v3";
-const ASSETSTUDIO_SYMBOL_CONTEXT_CLOSE: &[u8] = b"haruki_assetstudio_context_close_v2";
+    b"haruki_assetstudio_context_list_objects_into_v1";
+const ASSETSTUDIO_SYMBOL_CONTEXT_CLOSE: &[u8] = b"haruki_assetstudio_context_close_v1";
 const ASSETSTUDIO_SYMBOL_CONTEXT_READ_OBJECTS_DIRECT_RETRY: &[u8] =
-    b"haruki_assetstudio_context_read_objects_direct_retry_v7";
+    b"haruki_assetstudio_context_read_objects_direct_retry_v1";
 
 #[repr(C)]
 #[derive(Default)]
@@ -1039,13 +1039,13 @@ struct AssetStudioTypedAbiLayoutResponse {
     limits_response: c_int,
     capabilities_response: c_int,
     object_list_request: c_int,
-    object_list_into_request_v3: c_int,
+    object_list_into_request_v1: c_int,
     object_table: c_int,
     asset_object: c_int,
     object_read_item_request: c_int,
-    object_read_batch_into_request_v4: c_int,
-    object_read_item_response_v4: c_int,
-    object_read_batch_retry_response_v7: c_int,
+    object_read_batch_into_request_v1: c_int,
+    object_read_item_response_v1: c_int,
+    object_read_batch_retry_response_v1: c_int,
     flags: c_int,
     reserved: c_int,
 }
@@ -1642,7 +1642,7 @@ impl LoadedAssetStudioNativeLibrary {
             assetstudio_cli_version: None,
             error: (response.status != 0).then(|| {
                 format!(
-                    "AssetStudioFFI capabilities_v2 failed: status={} error_code={}",
+                    "AssetStudioFFI capabilities_v1 failed: status={} error_code={}",
                     response.status, response.error_code
                 )
             }),
@@ -1741,7 +1741,7 @@ impl LoadedAssetStudioNativeLibrary {
         if capabilities.struct_size != size_of::<AssetStudioTypedCapabilitiesResponse>() as c_int {
             return Err(ExportPipelineError::AssetStudioNative {
                 message: format!(
-                    "AssetStudioFFI capabilities_v2 struct size mismatch: native={} rust={}",
+                    "AssetStudioFFI capabilities_v1 struct size mismatch: native={} rust={}",
                     capabilities.struct_size,
                     size_of::<AssetStudioTypedCapabilitiesResponse>()
                 ),
@@ -1750,18 +1750,18 @@ impl LoadedAssetStudioNativeLibrary {
         if capabilities.status != 0 {
             return Err(ExportPipelineError::AssetStudioNative {
                 message: format!(
-                    "AssetStudioFFI capabilities_v2 failed: status={} error_code={}",
+                    "AssetStudioFFI capabilities_v1 failed: status={} error_code={}",
                     capabilities.status, capabilities.error_code
                 ),
             });
         }
         check_typed_abi_version(
-            "capabilities_v2 abi",
+            "capabilities_v1 abi",
             capabilities.abi_version,
             ASSETSTUDIO_TYPED_ABI_VERSION,
         )?;
         check_typed_abi_version(
-            "capabilities_v2 schema",
+            "capabilities_v1 schema",
             capabilities.schema_version,
             ASSETSTUDIO_TYPED_SCHEMA_VERSION,
         )?;
@@ -1801,7 +1801,7 @@ impl LoadedAssetStudioNativeLibrary {
         if status != 0 || layout.status != 0 {
             return Err(ExportPipelineError::AssetStudioNative {
                 message: format!(
-                    "AssetStudioFFI abi_layout_v2 failed: status={} response_status={} error_code={}",
+                    "AssetStudioFFI abi_layout_v1 failed: status={} response_status={} error_code={}",
                     status, layout.status, layout.error_code
                 ),
             });
@@ -1809,24 +1809,24 @@ impl LoadedAssetStudioNativeLibrary {
         if layout.struct_size != size_of::<AssetStudioTypedAbiLayoutResponse>() as c_int {
             return Err(ExportPipelineError::AssetStudioNative {
                 message: format!(
-                    "AssetStudioFFI abi_layout_v2 struct size mismatch: native={} rust={}",
+                    "AssetStudioFFI abi_layout_v1 struct size mismatch: native={} rust={}",
                     layout.struct_size,
                     size_of::<AssetStudioTypedAbiLayoutResponse>()
                 ),
             });
         }
         check_typed_abi_version(
-            "abi_layout_v2 abi",
+            "abi_layout_v1 abi",
             layout.abi_version,
             ASSETSTUDIO_TYPED_ABI_VERSION,
         )?;
         check_typed_abi_version(
-            "abi_layout_v2 schema",
+            "abi_layout_v1 schema",
             layout.schema_version,
             ASSETSTUDIO_TYPED_SCHEMA_VERSION,
         )?;
         check_typed_abi_version(
-            "abi_layout_v2 layout",
+            "abi_layout_v1 layout",
             layout.layout_version,
             ASSETSTUDIO_TYPED_LAYOUT_VERSION,
         )?;
@@ -1859,8 +1859,8 @@ impl LoadedAssetStudioNativeLibrary {
             "haruki_assetstudio_object_list_request",
         )?;
         check_typed_struct_size::<AssetStudioTypedObjectListIntoRequest>(
-            layout.object_list_into_request_v3,
-            "haruki_assetstudio_object_list_into_request_v3",
+            layout.object_list_into_request_v1,
+            "haruki_assetstudio_object_list_into_request_v1",
         )?;
         check_typed_struct_size::<AssetStudioTypedObjectTable>(
             layout.object_table,
@@ -1875,16 +1875,16 @@ impl LoadedAssetStudioNativeLibrary {
             "haruki_assetstudio_object_read_item_request",
         )?;
         check_typed_struct_size::<AssetStudioTypedObjectReadBatchIntoRequest>(
-            layout.object_read_batch_into_request_v4,
-            "haruki_assetstudio_object_read_batch_into_request_v4",
+            layout.object_read_batch_into_request_v1,
+            "haruki_assetstudio_object_read_batch_into_request_v1",
         )?;
         check_typed_struct_size::<AssetStudioTypedObjectReadItemResponse>(
-            layout.object_read_item_response_v4,
-            "haruki_assetstudio_object_read_item_response_v4",
+            layout.object_read_item_response_v1,
+            "haruki_assetstudio_object_read_item_response_v1",
         )?;
         check_typed_struct_size::<AssetStudioTypedObjectReadBatchRetryResponse>(
-            layout.object_read_batch_retry_response_v7,
-            "haruki_assetstudio_object_read_batch_retry_response_v7",
+            layout.object_read_batch_retry_response_v1,
+            "haruki_assetstudio_object_read_batch_retry_response_v1",
         )?;
 
         let mut limits = AssetStudioTypedLimitsResponse::default();
@@ -1932,7 +1932,7 @@ impl LoadedAssetStudioNativeLibrary {
         if status != 0 || response.status != 0 {
             return Err(ExportPipelineError::AssetStudioNative {
                 message: format!(
-                    "AssetStudioFFI capabilities_v2 failed: status={} response_status={} error_code={}",
+                    "AssetStudioFFI capabilities_v1 failed: status={} response_status={} error_code={}",
                     status, response.status, response.error_code
                 ),
             });
@@ -2074,7 +2074,7 @@ impl LoadedAssetStudioNativeLibrary {
         let success = status == 0 && response.status == 0;
         let mut phase_ms = HashMap::new();
         if response.duration_ms >= 0 {
-            phase_ms.insert("context_open_v2".to_string(), response.duration_ms as u64);
+            phase_ms.insert("context_open_v1".to_string(), response.duration_ms as u64);
         }
         Ok(AssetStudioNativeContextOpenResponse {
             success,
@@ -2092,7 +2092,7 @@ impl LoadedAssetStudioNativeLibrary {
             has_more_assets: response.has_more_assets != 0 || response.exportable_asset_count > 0,
             error: (!success).then(|| {
                 format!(
-                    "typed context_open_v2 failed: status={} response_status={} error_code={}",
+                    "typed context_open_v1 failed: status={} response_status={} error_code={}",
                     status, response.status, response.error_code
                 )
             }),
@@ -2167,7 +2167,7 @@ impl LoadedAssetStudioNativeLibrary {
             warnings: Vec::new(),
             error: (!success).then(|| {
                 format!(
-                    "typed context_close_v2 failed: status={} response_status={} error_code={}",
+                    "typed context_close_v1 failed: status={} response_status={} error_code={}",
                     status, response.status, response.error_code
                 )
             }),
@@ -2352,7 +2352,7 @@ fn typed_list_error_response(
         assets: Vec::new(),
         warnings: Vec::new(),
         error: Some(format!(
-            "typed context_list_objects_v3 failed: status={} response_status={} error_code={}",
+            "typed context_list_objects_v1 failed: status={} response_status={} error_code={}",
             status, response.status, response.error_code
         )),
         duration_ms: (response.duration_ms >= 0).then_some(response.duration_ms as u64),
@@ -2411,7 +2411,7 @@ fn typed_read_objects_response(
     let mut phase_ms = HashMap::new();
     if response.duration_ms >= 0 {
         phase_ms.insert(
-            "read_objects_direct_retry_v7".to_string(),
+            "read_objects_direct_retry_v1".to_string(),
             response.duration_ms as u64,
         );
     }
@@ -2501,7 +2501,7 @@ fn typed_read_objects_response(
         phase_stats: HashMap::new(),
         error: (!success).then(|| {
             format!(
-                "typed context_read_objects_direct_retry_v7 failed: requested={} status={} response_status={} error_code={}",
+                "typed context_read_objects_direct_retry_v1 failed: requested={} status={} response_status={} error_code={}",
                 request.objects.len(),
                 status,
                 response.status,
@@ -8377,12 +8377,12 @@ use std::ptr;
 static UNITY_VERSION: &[u8] = b"2022.3.21f1";
 static STRING_DATA: &[u8] = b"assetassets/foo.pngTexture2D/tmp/input.bundle";
 const ASSETSTUDIO_TYPED_ABI_VERSION: c_int = 1;
-const ASSETSTUDIO_TYPED_SCHEMA_VERSION: c_int = 2;
-const ASSETSTUDIO_TYPED_LAYOUT_VERSION: c_int = 2;
+const ASSETSTUDIO_TYPED_SCHEMA_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_LAYOUT_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_CONTEXT_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_LIMITS_ABI_VERSION: c_int = 1;
-const ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION: c_int = 3;
-const ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION: c_int = 3;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_ABI_VERSION: c_int = 1;
+const ASSETSTUDIO_TYPED_OBJECT_TABLE_INTO_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_INTO_ABI_VERSION: c_int = 1;
 const ASSETSTUDIO_TYPED_OBJECT_READ_BATCH_DIRECT_RETRY_ABI_VERSION: c_int = 1;
@@ -8530,13 +8530,13 @@ struct AbiLayoutResponse {
     limits_response: c_int,
     capabilities_response: c_int,
     object_list_request: c_int,
-    object_list_into_request_v3: c_int,
+    object_list_into_request_v1: c_int,
     object_table: c_int,
     asset_object: c_int,
     object_read_item_request: c_int,
-    object_read_batch_into_request_v4: c_int,
-    object_read_item_response_v4: c_int,
-    object_read_batch_retry_response_v7: c_int,
+    object_read_batch_into_request_v1: c_int,
+    object_read_item_response_v1: c_int,
+    object_read_batch_retry_response_v1: c_int,
     flags: c_int,
     reserved: c_int,
 }
@@ -8715,7 +8715,7 @@ static mut OBJECT: AssetObject = AssetObject {
 };
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_capabilities_v2(response: *mut CapabilitiesResponse) -> c_int {
+pub unsafe extern "C" fn haruki_assetstudio_capabilities_v1(response: *mut CapabilitiesResponse) -> c_int {
     if response.is_null() {
         return 20;
     }
@@ -8745,7 +8745,7 @@ pub unsafe extern "C" fn haruki_assetstudio_capabilities_v2(response: *mut Capab
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_abi_layout_v2(response: *mut AbiLayoutResponse) -> c_int {
+pub unsafe extern "C" fn haruki_assetstudio_abi_layout_v1(response: *mut AbiLayoutResponse) -> c_int {
     if response.is_null() {
         return 21;
     }
@@ -8761,13 +8761,13 @@ pub unsafe extern "C" fn haruki_assetstudio_abi_layout_v2(response: *mut AbiLayo
         limits_response: size_of::<LimitsResponse>() as c_int,
         capabilities_response: size_of::<CapabilitiesResponse>() as c_int,
         object_list_request: size_of::<ObjectListRequest>() as c_int,
-        object_list_into_request_v3: size_of::<ObjectListIntoRequest>() as c_int,
+        object_list_into_request_v1: size_of::<ObjectListIntoRequest>() as c_int,
         object_table: size_of::<ObjectTable>() as c_int,
         asset_object: size_of::<AssetObject>() as c_int,
         object_read_item_request: size_of::<ObjectReadItemRequest>() as c_int,
-        object_read_batch_into_request_v4: size_of::<ObjectReadBatchIntoRequest>() as c_int,
-        object_read_item_response_v4: size_of::<ObjectReadItemResponse>() as c_int,
-        object_read_batch_retry_response_v7: size_of::<ObjectReadBatchRetryResponse>() as c_int,
+        object_read_batch_into_request_v1: size_of::<ObjectReadBatchIntoRequest>() as c_int,
+        object_read_item_response_v1: size_of::<ObjectReadItemResponse>() as c_int,
+        object_read_batch_retry_response_v1: size_of::<ObjectReadBatchRetryResponse>() as c_int,
         ..AbiLayoutResponse::default()
     };
     0
@@ -8796,7 +8796,7 @@ pub unsafe extern "C" fn haruki_assetstudio_limits_v1(response: *mut LimitsRespo
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_context_open_v2(
+pub unsafe extern "C" fn haruki_assetstudio_context_open_v1(
     request: *const ContextOpenRequest,
     response: *mut ContextOpenResponse,
 ) -> c_int {
@@ -8819,7 +8819,7 @@ pub unsafe extern "C" fn haruki_assetstudio_context_open_v2(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_size_v3(
+pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_size_v1(
     request: *const ObjectListRequest,
     response: *mut ObjectTable,
 ) -> c_int {
@@ -8841,7 +8841,7 @@ pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_size_v3(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_into_v3(
+pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_into_v1(
     request: *const ObjectListIntoRequest,
     response: *mut ObjectTable,
 ) -> c_int {
@@ -8867,7 +8867,7 @@ pub unsafe extern "C" fn haruki_assetstudio_context_list_objects_into_v3(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_context_close_v2(
+pub unsafe extern "C" fn haruki_assetstudio_context_close_v1(
     request: *const ContextCloseRequest,
     response: *mut ContextCloseResponse,
 ) -> c_int {
@@ -8884,7 +8884,7 @@ pub unsafe extern "C" fn haruki_assetstudio_context_close_v2(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn haruki_assetstudio_context_read_objects_direct_retry_v7(
+pub unsafe extern "C" fn haruki_assetstudio_context_read_objects_direct_retry_v1(
     request: *const ObjectReadBatchIntoRequest,
     response: *mut ObjectReadBatchRetryResponse,
 ) -> c_int {
