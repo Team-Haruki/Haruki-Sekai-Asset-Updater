@@ -138,6 +138,12 @@ concurrency:
   cpu_budget_ratio: 0.5
 execution:
   max_in_flight_bundle_bytes: 1048576
+regions:
+  jp:
+    export:
+      images:
+        convert_to_webp: true
+        remove_png: false
 "#,
     )
     .unwrap();
@@ -156,10 +162,16 @@ execution:
     assert!(migrated.contains("config_version: 3"));
     assert!(migrated.contains("backends:"));
     assert!(migrated.contains("asset_studio:"));
+    assert!(migrated.contains("image:"));
+    assert!(migrated.contains("formats:"));
+    assert!(migrated.contains("- png"));
+    assert!(migrated.contains("- webp"));
     assert!(migrated.contains("library_path: /tmp/libHarukiAssetStudioFFI.dylib"));
     assert!(migrated.contains("resources:"));
     assert!(migrated.contains("budget_ratio: 0.5"));
     assert!(migrated.contains("download: 4"));
     assert!(!migrated.contains("tools:"));
     assert!(!migrated.contains("asset_studio_native_"));
+    assert!(!migrated.contains("convert_to_webp"));
+    assert!(!migrated.contains("remove_png"));
 }

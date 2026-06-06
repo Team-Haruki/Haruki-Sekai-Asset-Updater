@@ -20,8 +20,8 @@ use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::{
-    export_unity_asset_bundle_payloads, post_process_exported_files, NativeObjectReadPlanStats,
-    UnityAssetBundlePayloadExport,
+    export_unity_asset_bundle_payloads, flush_pending_native_image_writes,
+    post_process_exported_files, NativeObjectReadPlanStats, UnityAssetBundlePayloadExport,
 };
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
@@ -224,10 +224,7 @@ impl AssetExecutionContext {
             HeaderValue::from_static("ProductName/134 CFNetwork/1408.0.4 Darwin/22.5.0"),
         );
         headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
-        headers.insert(
-            ACCEPT_ENCODING,
-            HeaderValue::from_static("gzip, deflate, br"),
-        );
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
         headers.insert(
             ACCEPT_LANGUAGE,
             HeaderValue::from_static("zh-CN,zh-Hans;q=0.9"),
@@ -240,6 +237,10 @@ impl AssetExecutionContext {
 
         let mut builder = reqwest::Client::builder()
             .default_headers(headers)
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(180))
             .pool_max_idle_per_host(100)
@@ -334,11 +335,17 @@ impl AssetExecutionContext {
         let concurrency = app_config.effective_concurrency();
         let download_concurrency = concurrency.download.max(1);
         let media_encode_concurrency = concurrency.media_encode.max(1);
+        let post_process_concurrency = if concurrency.post_process == 0 {
+            media_encode_concurrency
+        } else {
+            concurrency.post_process
+        }
+        .max(1);
         let semaphore = std::sync::Arc::new(Semaphore::new(download_concurrency));
         let memory_limiter = BundleMemoryLimiter::from_config(app_config);
-        let post_process_semaphore = std::sync::Arc::new(Semaphore::new(media_encode_concurrency));
+        let post_process_semaphore = std::sync::Arc::new(Semaphore::new(post_process_concurrency));
         let post_process_backlog_capacity =
-            post_process_backlog_capacity(download_concurrency, media_encode_concurrency);
+            post_process_backlog_capacity(download_concurrency, post_process_concurrency);
         let post_process_backlog_semaphore =
             std::sync::Arc::new(Semaphore::new(post_process_backlog_capacity));
         let post_process_queued = std::sync::Arc::new(AtomicUsize::new(0));
@@ -358,6 +365,7 @@ impl AssetExecutionContext {
             queued = tasks.len(),
             download_concurrency,
             media_encode_concurrency,
+            post_process_concurrency,
             memory_limit_bytes = memory_limiter.limit_bytes(),
             "starting asset bundle processing"
         );
@@ -460,6 +468,10 @@ impl AssetExecutionContext {
                                         (
                                             "scheduler.post_process_backlog_capacity".to_string(),
                                             post_process_backlog_capacity as u64,
+                                        ),
+                                        (
+                                            "scheduler.post_process_concurrency".to_string(),
+                                            post_process_concurrency as u64,
                                         ),
                                     ]),
                                 },
@@ -836,9 +848,21 @@ impl AssetExecutionContext {
         region_name: &str,
         region: &RegionConfig,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
-        job: NativeBundlePostProcessJob,
+        mut job: NativeBundlePostProcessJob,
         queue_wait_ms: u128,
     ) -> Result<(), AssetExecutionError> {
+        let image_app_config = app_config.clone();
+        let pending_image_writes = std::mem::take(&mut job.payload_export.pending_image_writes);
+        let image_phase_ms = tokio::task::spawn_blocking(move || {
+            flush_pending_native_image_writes(&image_app_config, pending_image_writes)
+        })
+        .await
+        .map_err(
+            |source| crate::core::errors::ExportPipelineError::WorkerPanic {
+                worker: "native image flush".to_string(),
+                message: source.to_string(),
+            },
+        )??;
         let post_process_summary = post_process_exported_files(
             app_config,
             region_name,
@@ -852,6 +876,7 @@ impl AssetExecutionContext {
         .await?;
 
         let mut phase_ms = job.payload_export.ffi_export_phase_ms;
+        phase_ms.extend(image_phase_ms);
         phase_ms.extend(post_process_summary.post_process_phase_ms);
         phase_ms.insert(
             "post_process.queue_wait".to_string(),
@@ -1552,11 +1577,10 @@ pub fn should_download_bundle(
 
 fn post_process_backlog_capacity(
     download_concurrency: usize,
-    media_encode_concurrency: usize,
+    post_process_concurrency: usize,
 ) -> usize {
-    download_concurrency
-        .max(media_encode_concurrency.saturating_mul(2))
-        .max(1)
+    let _ = download_concurrency;
+    post_process_concurrency.saturating_mul(2).max(1)
 }
 
 fn download_path_for_region(
@@ -1724,9 +1748,9 @@ mod tests {
     }
 
     #[test]
-    fn post_process_backlog_capacity_tracks_download_and_media_pressure() {
+    fn post_process_backlog_capacity_tracks_post_process_pressure() {
         assert_eq!(post_process_backlog_capacity(0, 0), 1);
-        assert_eq!(post_process_backlog_capacity(8, 2), 8);
+        assert_eq!(post_process_backlog_capacity(8, 2), 4);
         assert_eq!(post_process_backlog_capacity(4, 12), 24);
     }
 

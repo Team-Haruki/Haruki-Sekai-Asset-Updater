@@ -169,6 +169,10 @@ impl AppConfig {
         if let Some(image_format) = &self.backends.asset_studio.image_format {
             validate_asset_studio_ffi_image_format(image_format)?;
         }
+        validate_image_backend(&self.backends.image)?;
+        for (region_name, region) in &self.regions {
+            validate_image_export_config(region_name, &region.export.images)?;
+        }
         validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
         warn_legacy_backend_options(&self.backends.media);
 
@@ -252,6 +256,13 @@ impl AppConfig {
         if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
             self.concurrency.media_encode =
                 parse_positive_usize("concurrency.media_encode", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_DOWNLOAD_CONCURRENCY") {
+            self.concurrency.download = parse_positive_usize("concurrency.download", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_POST_PROCESS_CONCURRENCY") {
+            self.concurrency.post_process =
+                parse_positive_usize("concurrency.post_process", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_CONCURRENCY_AUTO_TUNE") {
             self.concurrency.auto_tune = parse_bool_env("concurrency.auto_tune", &value)?;
@@ -691,6 +702,45 @@ fn validate_asset_studio_ffi_image_format(value: &str) -> Result<(), ConfigError
     }
 }
 
+fn validate_image_backend(image: &ImageBackendConfig) -> Result<(), ConfigError> {
+    match image.backend {
+        ImageBackend::Rust => {}
+    }
+    if !(1..=100).contains(&image.jpeg_quality) {
+        return Err(ConfigError::InvalidValue {
+            field: "backends.image.jpeg_quality".to_string(),
+            value: image.jpeg_quality.to_string(),
+            expected: "an integer from 1 to 100".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_image_export_config(
+    region_name: &str,
+    images: &ImageExportConfig,
+) -> Result<(), ConfigError> {
+    let formats = images.output_formats();
+    if formats.is_empty() {
+        return Err(ConfigError::InvalidValue {
+            field: format!("regions.{region_name}.export.images.formats"),
+            value: "[]".to_string(),
+            expected: "at least one of png, jpg, or webp".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn dedupe_image_formats(formats: Vec<ImageOutputFormat>) -> Vec<ImageOutputFormat> {
+    let mut output = Vec::new();
+    for format in formats {
+        if !output.contains(&format) {
+            output.push(format);
+        }
+    }
+    output
+}
+
 fn validate_asset_studio_ffi_read_kinds(
     read_kinds: &BTreeMap<String, String>,
 ) -> Result<(), ConfigError> {
@@ -849,6 +899,7 @@ impl Default for AccessLogConfig {
 pub struct BackendsConfig {
     pub asset_studio: AssetStudioBackendConfig,
     pub media: MediaBackendConfig,
+    pub image: ImageBackendConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -870,6 +921,88 @@ pub struct AssetStudioBackendConfig {
 pub struct MediaBackendConfig {
     pub backend: MediaBackend,
     pub ffmpeg_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageBackendConfig {
+    pub backend: ImageBackend,
+    pub png_compression: ImagePngCompression,
+    pub webp_lossless: bool,
+    pub jpeg_quality: u8,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageBackend {
+    #[default]
+    Rust,
+}
+
+impl FromStr for ImageBackend {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "rust" => Ok(Self::Rust),
+            other => Err(ConfigError::InvalidValue {
+                field: "backends.image.backend".to_string(),
+                value: other.to_string(),
+                expected: "rust".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImagePngCompression {
+    #[default]
+    Fast,
+    Default,
+    Best,
+}
+
+impl FromStr for ImagePngCompression {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "fast" => Ok(Self::Fast),
+            "default" => Ok(Self::Default),
+            "best" => Ok(Self::Best),
+            other => Err(ConfigError::InvalidValue {
+                field: "backends.image.png_compression".to_string(),
+                value: other.to_string(),
+                expected: "fast, default, or best".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageOutputFormat {
+    Png,
+    Jpg,
+    Webp,
+}
+
+impl FromStr for ImageOutputFormat {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "png" => Ok(Self::Png),
+            "jpg" | "jpeg" => Ok(Self::Jpg),
+            "webp" => Ok(Self::Webp),
+            other => Err(ConfigError::InvalidValue {
+                field: "export.images.formats".to_string(),
+                value: other.to_string(),
+                expected: "png, jpg, or webp".to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -997,12 +1130,24 @@ impl Default for MediaBackendConfig {
     }
 }
 
+impl Default for ImageBackendConfig {
+    fn default() -> Self {
+        Self {
+            backend: ImageBackend::Rust,
+            png_compression: ImagePngCompression::Fast,
+            webp_lossless: true,
+            jpeg_quality: 95,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConcurrencyConfig {
     pub auto_tune: bool,
     pub download: usize,
     pub upload: usize,
+    pub post_process: usize,
     pub acb: usize,
     pub usm: usize,
     pub hca: usize,
@@ -1016,6 +1161,7 @@ impl Default for ConcurrencyConfig {
             auto_tune: false,
             download: 4,
             upload: 4,
+            post_process: 0,
             acb: 8,
             usm: 4,
             hca: 16,
@@ -1050,6 +1196,11 @@ impl ConcurrencyConfig {
             auto_tune: true,
             download: self.download.min(cpus.saturating_mul(2).max(2)).max(1),
             upload: self.upload.min(cpus.max(2)).max(1),
+            post_process: if self.post_process == 0 {
+                0
+            } else {
+                self.post_process.min(cpus.saturating_mul(2).max(2)).max(1)
+            },
             acb: self.acb.min(cpus.max(2)).min(cpu_budget).max(1),
             usm: self.usm.min((cpus / 2).max(1)).max(1),
             hca: self
@@ -1424,8 +1575,26 @@ impl Default for HcaExportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ImageExportConfig {
+    pub formats: Vec<ImageOutputFormat>,
+    /// Legacy v3 compatibility. Prefer `formats`.
     pub convert_to_webp: bool,
+    /// Legacy v3 compatibility. Prefer `formats`.
     pub remove_png: bool,
+}
+
+impl ImageExportConfig {
+    pub fn output_formats(&self) -> Vec<ImageOutputFormat> {
+        if !self.formats.is_empty() {
+            return dedupe_image_formats(self.formats.clone());
+        }
+        if self.convert_to_webp && self.remove_png {
+            vec![ImageOutputFormat::Webp]
+        } else if self.convert_to_webp {
+            vec![ImageOutputFormat::Png, ImageOutputFormat::Webp]
+        } else {
+            vec![ImageOutputFormat::Png]
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1555,6 +1724,13 @@ regions:
             AssetStudioFfiCallMode::Pool
         );
         assert_eq!(config.backends.media.backend, MediaBackend::Ffi);
+        assert_eq!(config.backends.image.backend, ImageBackend::Rust);
+        assert_eq!(
+            config.backends.image.png_compression,
+            ImagePngCompression::Fast
+        );
+        assert!(config.backends.image.webp_lossless);
+        assert_eq!(config.backends.image.jpeg_quality, 95);
         assert_eq!(asset_studio.call_mode, AssetStudioFfiCallMode::Pool);
         assert_eq!(asset_studio.process_concurrency, 0);
         assert_eq!(asset_studio.worker_max_calls, 256);
@@ -1577,6 +1753,11 @@ regions:
 media:
   backend: ffi
   ffmpeg_path: ffmpeg
+image:
+  backend: rust
+  png_compression: best
+  webp_lossless: true
+  jpeg_quality: 88
 asset_studio:
   library_path: /tmp/libHarukiAssetStudioFFI.so
   call_mode: process
@@ -1593,6 +1774,9 @@ asset_studio:
         let backends: BackendsConfig = yaml_serde::from_str(yaml).unwrap();
         let asset_studio = &backends.asset_studio;
         assert_eq!(backends.media.backend, MediaBackend::Ffi);
+        assert_eq!(backends.image.backend, ImageBackend::Rust);
+        assert_eq!(backends.image.png_compression, ImagePngCompression::Best);
+        assert_eq!(backends.image.jpeg_quality, 88);
         assert_eq!(
             asset_studio.library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
@@ -1625,6 +1809,43 @@ asset_studio:
             err,
             ConfigError::InvalidValue { field, value, .. }
                 if field == "backends.media.backend" && value == "sidecar"
+        ));
+    }
+
+    #[test]
+    fn image_export_formats_override_legacy_webp_flags() {
+        let images = ImageExportConfig {
+            formats: vec![ImageOutputFormat::Jpg, ImageOutputFormat::Webp],
+            convert_to_webp: false,
+            remove_png: false,
+        };
+
+        assert_eq!(
+            images.output_formats(),
+            vec![ImageOutputFormat::Jpg, ImageOutputFormat::Webp]
+        );
+
+        let legacy_webp_only = ImageExportConfig {
+            convert_to_webp: true,
+            remove_png: true,
+            ..ImageExportConfig::default()
+        };
+        assert_eq!(
+            legacy_webp_only.output_formats(),
+            vec![ImageOutputFormat::Webp]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_image_backend_settings() {
+        let mut config = AppConfig::default();
+        config.backends.image.jpeg_quality = 0;
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { field, .. }
+                if field == "backends.image.jpeg_quality"
         ));
     }
 
@@ -1819,6 +2040,8 @@ regions:
         let old_read_batch_size = std::env::var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE").ok();
         let old_image_format = std::env::var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT").ok();
         let old_media_encode_concurrency = std::env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY").ok();
+        let old_download_concurrency = std::env::var("HARUKI_DOWNLOAD_CONCURRENCY").ok();
+        let old_post_process_concurrency = std::env::var("HARUKI_POST_PROCESS_CONCURRENCY").ok();
         let old_concurrency_auto_tune = std::env::var("HARUKI_CONCURRENCY_AUTO_TUNE").ok();
         let old_cpu_budget_auto = std::env::var("HARUKI_CPU_BUDGET_AUTO").ok();
         let old_cpu_budget_ratio = std::env::var("HARUKI_CPU_BUDGET_RATIO").ok();
@@ -1842,6 +2065,8 @@ regions:
         std::env::set_var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE", "48");
         std::env::set_var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT", "raw_rgba");
         std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", "9");
+        std::env::set_var("HARUKI_DOWNLOAD_CONCURRENCY", "11");
+        std::env::set_var("HARUKI_POST_PROCESS_CONCURRENCY", "13");
         std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", "true");
         std::env::set_var("HARUKI_CPU_BUDGET_AUTO", "true");
         std::env::set_var("HARUKI_CPU_BUDGET_RATIO", "0.5");
@@ -1890,6 +2115,8 @@ backends:
             Some("raw_rgba")
         );
         assert_eq!(config.concurrency.media_encode, 9);
+        assert_eq!(config.concurrency.download, 11);
+        assert_eq!(config.concurrency.post_process, 13);
         assert!(config.concurrency.auto_tune);
         assert!(config.resources.cpu.budget_auto);
         assert_eq!(config.resources.cpu.budget_ratio, 0.5);
@@ -1936,6 +2163,14 @@ backends:
         match old_media_encode_concurrency {
             Some(value) => std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", value),
             None => std::env::remove_var("HARUKI_MEDIA_ENCODE_CONCURRENCY"),
+        }
+        match old_download_concurrency {
+            Some(value) => std::env::set_var("HARUKI_DOWNLOAD_CONCURRENCY", value),
+            None => std::env::remove_var("HARUKI_DOWNLOAD_CONCURRENCY"),
+        }
+        match old_post_process_concurrency {
+            Some(value) => std::env::set_var("HARUKI_POST_PROCESS_CONCURRENCY", value),
+            None => std::env::remove_var("HARUKI_POST_PROCESS_CONCURRENCY"),
         }
         match old_concurrency_auto_tune {
             Some(value) => std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", value),
@@ -2130,6 +2365,7 @@ regions:
             auto_tune: true,
             download: 999,
             upload: 999,
+            post_process: 999,
             acb: 999,
             usm: 999,
             hca: 999,
@@ -2142,13 +2378,26 @@ regions:
         assert!(effective.auto_tune);
         assert!(effective.download <= config.download);
         assert!(effective.upload <= config.upload);
+        assert!(effective.post_process <= config.post_process);
         assert!(effective.acb <= config.acb);
         assert!(effective.usm <= config.usm);
         assert!(effective.hca <= config.hca);
         assert!(effective.media_encode <= config.media_encode);
         assert!(effective.images <= config.images);
         assert!(effective.download >= 1);
+        assert!(effective.post_process >= 1);
         assert!(effective.media_encode >= 1);
+    }
+
+    #[test]
+    fn effective_concurrency_preserves_zero_post_process_as_auto() {
+        let config = ConcurrencyConfig {
+            auto_tune: true,
+            post_process: 0,
+            ..ConcurrencyConfig::default()
+        };
+
+        assert_eq!(config.effective_for_cpus_with_budget(8, 8).post_process, 0);
     }
 
     #[test]

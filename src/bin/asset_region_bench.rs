@@ -99,6 +99,8 @@ struct Args {
     asset_hash: Option<String>,
     #[arg(long = "download-concurrency")]
     download_concurrency: Option<usize>,
+    #[arg(long = "post-process-concurrency")]
+    post_process_concurrency: Option<usize>,
     #[arg(long = "acb-concurrency")]
     acb_concurrency: Option<usize>,
     #[arg(long = "hca-concurrency")]
@@ -385,6 +387,9 @@ fn benchmark_config(
     config.execution.batch_save_size = 0;
     if let Some(download_concurrency) = args.download_concurrency {
         config.concurrency.download = download_concurrency.max(1);
+    }
+    if let Some(post_process_concurrency) = args.post_process_concurrency {
+        config.concurrency.post_process = post_process_concurrency.max(1);
     }
     if let Some(acb_concurrency) = args.acb_concurrency {
         config.concurrency.acb = acb_concurrency.max(1);

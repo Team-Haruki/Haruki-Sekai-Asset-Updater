@@ -10,6 +10,7 @@ pub fn migrate_legacy_config_shape(root: &mut Value) {
         Value::Number(3.into()),
     );
     migrate_legacy_tools_config(map);
+    migrate_image_config(map);
     migrate_legacy_resource_config(map);
 }
 
@@ -141,6 +142,54 @@ fn migrate_legacy_tools_config(root: &mut Mapping) {
     }
 }
 
+fn migrate_image_config(root: &mut Mapping) {
+    let backends = mapping_child(root, "backends");
+    let image_backend = mapping_child(backends, "image");
+    insert_default(image_backend, "backend", Value::String("rust".to_string()));
+    insert_default(
+        image_backend,
+        "png_compression",
+        Value::String("fast".to_string()),
+    );
+    insert_default(image_backend, "webp_lossless", Value::Bool(true));
+    insert_default(image_backend, "jpeg_quality", Value::Number(95.into()));
+
+    if let Some(Value::Mapping(regions)) = root.get_mut(Value::String("regions".to_string())) {
+        for region_value in regions.values_mut() {
+            let Value::Mapping(region) = region_value else {
+                continue;
+            };
+            let export = mapping_child(region, "export");
+            let images = mapping_child(export, "images");
+            migrate_image_export_formats(images);
+        }
+    }
+}
+
+fn migrate_image_export_formats(images: &mut Mapping) {
+    if images.contains_key(Value::String("formats".to_string())) {
+        return;
+    }
+    let convert_to_webp = bool_mapping_value(images, "convert_to_webp");
+    let remove_png = bool_mapping_value(images, "remove_png");
+    let formats = if convert_to_webp && remove_png {
+        vec![Value::String("webp".to_string())]
+    } else if convert_to_webp {
+        vec![
+            Value::String("png".to_string()),
+            Value::String("webp".to_string()),
+        ]
+    } else {
+        vec![Value::String("png".to_string())]
+    };
+    images.insert(
+        Value::String("formats".to_string()),
+        Value::Sequence(formats),
+    );
+    images.remove(Value::String("convert_to_webp".to_string()));
+    images.remove(Value::String("remove_png".to_string()));
+}
+
 fn migrate_legacy_resource_config(root: &mut Mapping) {
     let Some(concurrency_value) = root.remove(Value::String("concurrency".to_string())) else {
         migrate_legacy_execution_memory_config(root);
@@ -227,6 +276,21 @@ fn move_mapping_value(source: &mut Mapping, target: &mut Mapping, old_key: &str,
     }
 }
 
+fn insert_default(map: &mut Mapping, key: &str, value: Value) {
+    map.entry(Value::String(key.to_string())).or_insert(value);
+}
+
+fn bool_mapping_value(map: &Mapping, key: &str) -> bool {
+    match map.get(Value::String(key.to_string())) {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::String(value)) => matches!(
+            value.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +315,12 @@ concurrency:
   cpu_throttle_enabled: true
   cpu_throttle_sample_ms: 500
   download: 8
+regions:
+  jp:
+    export:
+      images:
+        convert_to_webp: true
+        remove_png: true
 "#,
         )
         .unwrap();
@@ -268,6 +338,12 @@ concurrency:
         assert!(migrated.contains("read_batch_size: 16"));
         assert!(migrated.contains("media:"));
         assert!(migrated.contains("backend: cli"));
+        assert!(migrated.contains("image:"));
+        assert!(migrated.contains("png_compression: fast"));
+        assert!(migrated.contains("formats:"));
+        assert!(migrated.contains("- webp"));
+        assert!(!migrated.contains("convert_to_webp"));
+        assert!(!migrated.contains("remove_png"));
         assert!(migrated.contains("resources:"));
         assert!(migrated.contains("budget_ratio: 0.5"));
         assert!(migrated.contains("sample_ms: 500"));

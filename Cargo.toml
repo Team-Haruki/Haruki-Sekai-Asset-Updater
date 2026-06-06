@@ -13,7 +13,7 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.6", features = ["derive"] }
 cridecoder = "0.2.3"
 hex = "0.4"
-image = { version = "0.25", default-features = false, features = ["bmp", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
 libc = "0.2"
 libloading = "0.8"
 mime_guess = "2.0"

@@ -13,6 +13,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageEncoder, ImageReader};
@@ -26,8 +27,8 @@ use tracing::{debug, info, warn};
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
 use crate::core::config::{
-    AppConfig, AssetStudioFfiCallMode, MediaBackend, RegionConfig, ResourcesConfig,
-    DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
+    AppConfig, AssetStudioFfiCallMode, ImageBackendConfig, ImageOutputFormat, ImagePngCompression,
+    MediaBackend, RegionConfig, ResourcesConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
 };
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
@@ -421,6 +422,7 @@ pub struct UnityAssetBundlePayloadExport {
     pub ffi_export_phase_ms: HashMap<String, u64>,
     pub ffi_skipped_object_reads: Vec<NativeSkippedObjectRead>,
     pub ffi_object_read_plan: NativeObjectReadPlanStats,
+    pub(crate) pending_image_writes: Vec<PendingNativeImageWrite>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -449,6 +451,7 @@ pub struct NativeObjectReadPlanStats {
 struct NativeObjectExportSummary {
     written_files: Vec<PathBuf>,
     acb_sources: Vec<NativeInMemoryMediaSource>,
+    pending_image_writes: Vec<PendingNativeImageWrite>,
     phase_ms: HashMap<String, u64>,
     skipped_object_reads: Vec<NativeSkippedObjectRead>,
     object_read_plan: NativeObjectReadPlanStats,
@@ -459,6 +462,14 @@ struct NativeSemanticExportPathState {
     claims: HashMap<PathBuf, usize>,
     written_files: Vec<PathBuf>,
     acb_sources: Vec<NativeInMemoryMediaSource>,
+    pending_image_writes: Vec<PendingNativeImageWrite>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingNativeImageWrite {
+    target: PathBuf,
+    payload: Vec<u8>,
+    region: RegionConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -566,7 +577,7 @@ pub async fn extract_unity_asset_bundle(
     output_dir: &Path,
     category: &str,
 ) -> Result<PostProcessSummary, ExportPipelineError> {
-    let payload_export = export_unity_asset_bundle_payloads(
+    let mut payload_export = export_unity_asset_bundle_payloads(
         app_config,
         region,
         asset_bundle_file,
@@ -575,6 +586,10 @@ pub async fn extract_unity_asset_bundle(
         category,
     )
     .await?;
+    let image_phase_ms = flush_pending_native_image_writes(
+        app_config,
+        std::mem::take(&mut payload_export.pending_image_writes),
+    )?;
     let mut summary = post_process_exported_files(
         app_config,
         region_name,
@@ -587,6 +602,7 @@ pub async fn extract_unity_asset_bundle(
     )
     .await?;
     summary.ffi_export_phase_ms = payload_export.ffi_export_phase_ms;
+    summary.post_process_phase_ms.extend(image_phase_ms);
     summary.ffi_skipped_object_reads = payload_export.ffi_skipped_object_reads;
     summary.ffi_object_read_plan = payload_export.ffi_object_read_plan;
     Ok(summary)
@@ -645,6 +661,7 @@ pub async fn export_unity_asset_bundle_payloads(
         native_scoped_post_process: true,
         native_written_files: native_object_summary.written_files,
         native_acb_sources: native_object_summary.acb_sources,
+        pending_image_writes: native_object_summary.pending_image_writes,
         ffi_export_phase_ms: native_object_summary.phase_ms,
         ffi_skipped_object_reads: native_object_summary.skipped_object_reads,
         ffi_object_read_plan: native_object_summary.object_read_plan,
@@ -1226,7 +1243,7 @@ pub fn open_assetstudio_ffi_context(
         warn!(warning = %warning, "assetstudio ffi context open warning");
     }
     if response.success {
-        info!(
+        debug!(
             context_id = response.context_id,
             assets = response.assets.len(),
             duration_ms = response.duration_ms,
@@ -2550,6 +2567,7 @@ async fn call_assetstudio_ffi_object_export_with_target(
     let mut summary = NativeObjectExportSummary {
         written_files: Vec::new(),
         acb_sources: Vec::new(),
+        pending_image_writes: Vec::new(),
         phase_ms: open_response.phase_ms.clone(),
         skipped_object_reads: Vec::new(),
         object_read_plan: NativeObjectReadPlanStats {
@@ -2623,6 +2641,7 @@ async fn call_assetstudio_ffi_object_export_with_target(
         write_assetstudio_playable_payloads(options, &mut path_state, playable_outputs)?;
         summary.written_files = path_state.written_files;
         summary.acb_sources = path_state.acb_sources;
+        summary.pending_image_writes = path_state.pending_image_writes;
         Ok(summary)
     }
     .await;
@@ -3483,7 +3502,8 @@ fn write_native_object_payload(
     }
 
     let written_files = if payload_kind == "image_array_bundle_raw_rgba" {
-        write_native_image_payload_bundle_final_files(
+        queue_native_image_payload_bundle_final_files(
+            path_state,
             &target,
             &read_output.payload,
             options.region,
@@ -3493,7 +3513,12 @@ fn write_native_object_payload(
     {
         write_payload_bundle(&target, &read_output.payload)?
     } else if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
-        write_native_image_payload_final_files(&target, &read_output.payload, options.region)?
+        queue_native_image_payload_final_files(
+            path_state,
+            &target,
+            &read_output.payload,
+            options.region,
+        )
     } else {
         write_native_payload_file(&target, &read_output.payload, options.cli_parity_mode)?;
         vec![target.clone()]
@@ -3849,43 +3874,113 @@ fn write_native_payload_file(
     }
 }
 
+fn queue_native_image_payload_final_files(
+    path_state: &mut NativeSemanticExportPathState,
+    target: &Path,
+    payload: &[u8],
+    region: &RegionConfig,
+) -> Vec<PathBuf> {
+    let written_files = planned_image_output_files(target, region);
+    path_state
+        .pending_image_writes
+        .push(PendingNativeImageWrite {
+            target: target.to_path_buf(),
+            payload: payload.to_vec(),
+            region: region.clone(),
+        });
+    written_files
+}
+
+#[cfg(test)]
 fn write_native_image_payload_final_files(
     target: &Path,
     payload: &[u8],
     region: &RegionConfig,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    write_native_image_payload_final_files_with_backend(
+        target,
+        payload,
+        region,
+        &ImageBackendConfig::default(),
+    )
+}
+
+fn write_native_image_payload_final_files_with_backend(
+    target: &Path,
+    payload: &[u8],
+    region: &RegionConfig,
+    image_backend: &ImageBackendConfig,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let formats = region.export.images.output_formats();
+    let raw_rgba = payload
+        .starts_with(NATIVE_AOT_RGBA_IR_MAGIC)
+        .then(|| parse_native_rgba_ir_payload(payload, target))
+        .transpose()?;
+    let mut image: Option<image::DynamicImage> = None;
     let mut written_files = Vec::new();
-    let raw_rgba = if payload.starts_with(NATIVE_AOT_RGBA_IR_MAGIC) {
-        Some(parse_native_rgba_ir_payload(payload, target)?)
-    } else {
-        None
-    };
-    let image = if region.export.images.convert_to_webp {
-        Some(decode_image_payload_bytes(payload, target)?)
-    } else {
-        None
-    };
 
-    if region.export.images.convert_to_webp {
-        let webp = target.with_extension("webp");
-        write_dynamic_image_to_webp_file(image.as_ref().unwrap(), &webp)?;
-        written_files.push(webp);
-    }
-
-    if !region.export.images.convert_to_webp || !region.export.images.remove_png {
+    for format in formats {
+        let output = image_output_file_for_format(target, format);
         if let Some(raw_rgba) = raw_rgba.as_ref() {
-            write_native_rgba_ir_to_png_file_fast(raw_rgba, target)?;
+            write_native_rgba_ir_to_image_file(raw_rgba, &output, format, image_backend)?;
         } else {
-            let image = match image.as_ref() {
+            let dynamic_image = match image.as_ref() {
                 Some(image) => Cow::Borrowed(image),
-                None => Cow::Owned(decode_image_payload_bytes(payload, target)?),
+                None => {
+                    image = Some(decode_image_payload_bytes(payload, target)?);
+                    Cow::Borrowed(image.as_ref().unwrap())
+                }
             };
-            write_dynamic_image_to_png_file_fast(&image, target)?;
+            write_dynamic_image_to_image_file(&dynamic_image, &output, format, image_backend)?;
         }
-        written_files.push(target.to_path_buf());
+        written_files.push(output);
     }
 
     Ok(written_files)
+}
+
+pub(crate) fn flush_pending_native_image_writes(
+    app_config: &AppConfig,
+    pending: Vec<PendingNativeImageWrite>,
+) -> Result<HashMap<String, u64>, ExportPipelineError> {
+    let mut phase_ms = HashMap::new();
+    let image_count = pending.len();
+    if image_count == 0 {
+        return Ok(phase_ms);
+    }
+
+    let image_concurrency = app_config.effective_concurrency().images;
+    let cpu_budget = app_config.effective_cpu_budget();
+    let image_backend = app_config.backends.image.clone();
+    let mut format_counts: HashMap<ImageOutputFormat, u64> = HashMap::new();
+    for job in &pending {
+        for format in job.region.export.images.output_formats() {
+            *format_counts.entry(format).or_default() += 1;
+        }
+    }
+    let started = Instant::now();
+    run_tasks(pending, image_concurrency, move |job| {
+        let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
+        write_native_image_payload_final_files_with_backend(
+            &job.target,
+            &job.payload,
+            &job.region,
+            &image_backend,
+        )
+    })?;
+    record_phase_ms(&mut phase_ms, "image_encode.wall", started);
+    phase_ms.insert("image_encode.count".to_string(), image_count as u64);
+    phase_ms.insert(
+        "image_encode.concurrency".to_string(),
+        image_concurrency as u64,
+    );
+    for (format, count) in format_counts {
+        phase_ms.insert(
+            format!("image_encode.format.{}", image_format_extension(format)),
+            count,
+        );
+    }
+    Ok(phase_ms)
 }
 
 fn native_image_surrogate_public_target(target: &Path, region: &RegionConfig) -> PathBuf {
@@ -3896,10 +3991,35 @@ fn native_image_surrogate_public_target(target: &Path, region: &RegionConfig) ->
     {
         return target.to_path_buf();
     }
-    if region.export.images.convert_to_webp && region.export.images.remove_png {
-        target.with_extension("webp")
-    } else {
-        target.with_extension("png")
+    let format = region
+        .export
+        .images
+        .output_formats()
+        .into_iter()
+        .next()
+        .unwrap_or(ImageOutputFormat::Png);
+    target.with_extension(image_format_extension(format))
+}
+
+fn planned_image_output_files(target: &Path, region: &RegionConfig) -> Vec<PathBuf> {
+    region
+        .export
+        .images
+        .output_formats()
+        .into_iter()
+        .map(|format| image_output_file_for_format(target, format))
+        .collect()
+}
+
+fn image_output_file_for_format(target: &Path, format: ImageOutputFormat) -> PathBuf {
+    target.with_extension(image_format_extension(format))
+}
+
+fn image_format_extension(format: ImageOutputFormat) -> &'static str {
+    match format {
+        ImageOutputFormat::Png => "png",
+        ImageOutputFormat::Jpg => "jpg",
+        ImageOutputFormat::Webp => "webp",
     }
 }
 
@@ -4081,7 +4201,8 @@ fn write_payload_bundle(
     Ok(written_files)
 }
 
-fn write_native_image_payload_bundle_final_files(
+fn queue_native_image_payload_bundle_final_files(
+    path_state: &mut NativeSemanticExportPathState,
     target: &Path,
     payload: &[u8],
     region: &RegionConfig,
@@ -4096,11 +4217,12 @@ fn write_native_image_payload_bundle_final_files(
                 source,
             })?;
         }
-        written_files.extend(write_native_image_payload_final_files(
+        written_files.extend(queue_native_image_payload_final_files(
+            path_state,
             &entry_target,
             bytes,
             region,
-        )?);
+        ));
     }
     Ok(written_files)
 }
@@ -4866,7 +4988,7 @@ fn parse_assetstudio_ffi_context_open_worker_output(
         warn!(warning = %warning, "assetstudio ffi context open warning");
     }
     if output.status_success && response.success {
-        info!(
+        debug!(
             context_id = response.context_id,
             assets = response.assets.len(),
             duration_ms = response.duration_ms,
@@ -6308,6 +6430,7 @@ pub async fn post_process_exported_files(
             export_path,
             &scoped_png_files,
             region,
+            &app_config.backends.image,
             concurrency.images,
             cpu_budget,
             scoped_post_process,
@@ -7611,25 +7734,42 @@ async fn handle_png_conversion(
     export_path: &Path,
     scoped_files: &[PathBuf],
     region: &RegionConfig,
+    image_backend: &ImageBackendConfig,
     image_concurrency: usize,
     cpu_budget: usize,
     scoped_post_process: bool,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
-    if !region.export.images.convert_to_webp {
+    let output_formats = region.export.images.output_formats();
+    let secondary_formats = output_formats
+        .iter()
+        .copied()
+        .filter(|format| *format != ImageOutputFormat::Png)
+        .collect::<Vec<_>>();
+    if secondary_formats.is_empty() {
         return Ok(Vec::new());
     }
 
     let png_files =
         post_process_files_by_extension(export_path, scoped_post_process, scoped_files, "png")?;
-    let remove_png = region.export.images.remove_png;
+    let keep_png = output_formats.contains(&ImageOutputFormat::Png);
+    let image_backend = image_backend.clone();
     run_path_tasks(png_files, image_concurrency, move |png_file| {
         let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
-        let webp = png_file.with_extension("webp");
-        convert_png_to_webp(&png_file, &webp)?;
-        if remove_png {
+        let payload = std::fs::read(&png_file).map_err(|source| ExportPipelineError::Io {
+            path: png_file.clone(),
+            source,
+        })?;
+        let image = decode_image_payload_bytes(&payload, &png_file)?;
+        let mut generated = Vec::new();
+        for format in &secondary_formats {
+            let output = image_output_file_for_format(&png_file, *format);
+            write_dynamic_image_to_image_file(&image, &output, *format, &image_backend)?;
+            generated.push(output);
+        }
+        if !keep_png {
             remove_export_file_if_exists(&png_file)?;
         }
-        Ok(vec![webp])
+        Ok(generated)
     })
 }
 
@@ -7681,21 +7821,24 @@ fn convert_image_to_png(source_file: &Path, png_file: &Path) -> Result<(), Expor
             other => other,
         })?;
 
-    write_dynamic_image_to_png_file_fast(&image, png_file)
+    write_dynamic_image_to_png_file(&image, png_file, ImagePngCompression::Fast)
 }
 
-fn convert_png_to_webp(png_file: &Path, webp_file: &Path) -> Result<(), ExportPipelineError> {
-    let image = ImageReader::open(png_file)
-        .map_err(|source| ExportPipelineError::Io {
-            path: png_file.to_path_buf(),
-            source,
-        })?
-        .decode()
-        .map_err(|source| ExportPipelineError::Image {
-            path: png_file.to_path_buf(),
-            source,
-        })?;
-    write_dynamic_image_to_webp_file(&image, webp_file)
+fn write_dynamic_image_to_image_file(
+    image: &image::DynamicImage,
+    output_file: &Path,
+    format: ImageOutputFormat,
+    image_backend: &ImageBackendConfig,
+) -> Result<(), ExportPipelineError> {
+    match format {
+        ImageOutputFormat::Png => {
+            write_dynamic_image_to_png_file(image, output_file, image_backend.png_compression)
+        }
+        ImageOutputFormat::Jpg => {
+            write_dynamic_image_to_jpeg_file(image, output_file, image_backend.jpeg_quality)
+        }
+        ImageOutputFormat::Webp => write_dynamic_image_to_webp_file(image, output_file),
+    }
 }
 
 fn write_dynamic_image_to_webp_file(
@@ -7718,9 +7861,10 @@ fn write_dynamic_image_to_webp_file(
         })
 }
 
-fn write_dynamic_image_to_png_file_fast(
+fn write_dynamic_image_to_png_file(
     image: &image::DynamicImage,
     png_file: &Path,
+    compression: ImagePngCompression,
 ) -> Result<(), ExportPipelineError> {
     let rgba = image.to_rgba8();
     let (width, height) = rgba.dimensions();
@@ -7730,17 +7874,60 @@ fn write_dynamic_image_to_png_file_fast(
     })?;
     let writer = std::io::BufWriter::new(writer);
 
-    PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Adaptive)
-        .write_image(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
+    PngEncoder::new_with_quality(
+        writer,
+        png_compression_type(compression),
+        FilterType::Adaptive,
+    )
+    .write_image(rgba.as_raw(), width, height, ExtendedColorType::Rgba8)
+    .map_err(|source| ExportPipelineError::Image {
+        path: png_file.to_path_buf(),
+        source,
+    })
+}
+
+fn write_dynamic_image_to_jpeg_file(
+    image: &image::DynamicImage,
+    jpeg_file: &Path,
+    quality: u8,
+) -> Result<(), ExportPipelineError> {
+    let rgb = image.to_rgb8();
+    let (width, height) = rgb.dimensions();
+    let writer = std::fs::File::create(jpeg_file).map_err(|source| ExportPipelineError::Io {
+        path: jpeg_file.to_path_buf(),
+        source,
+    })?;
+    let writer = std::io::BufWriter::new(writer);
+
+    JpegEncoder::new_with_quality(writer, quality)
+        .write_image(rgb.as_raw(), width, height, ExtendedColorType::Rgb8)
         .map_err(|source| ExportPipelineError::Image {
-            path: png_file.to_path_buf(),
+            path: jpeg_file.to_path_buf(),
             source,
         })
 }
 
-fn write_native_rgba_ir_to_png_file_fast(
+fn write_native_rgba_ir_to_image_file(
+    raw_rgba: &NativeRgbaIr<'_>,
+    output_file: &Path,
+    format: ImageOutputFormat,
+    image_backend: &ImageBackendConfig,
+) -> Result<(), ExportPipelineError> {
+    match format {
+        ImageOutputFormat::Png => {
+            write_native_rgba_ir_to_png_file(raw_rgba, output_file, image_backend.png_compression)
+        }
+        ImageOutputFormat::Jpg => {
+            write_native_rgba_ir_to_jpeg_file(raw_rgba, output_file, image_backend.jpeg_quality)
+        }
+        ImageOutputFormat::Webp => write_native_rgba_ir_to_webp_file(raw_rgba, output_file),
+    }
+}
+
+fn write_native_rgba_ir_to_png_file(
     raw_rgba: &NativeRgbaIr<'_>,
     png_file: &Path,
+    compression: ImagePngCompression,
 ) -> Result<(), ExportPipelineError> {
     let pixels = native_rgba_ir_contiguous_pixels(raw_rgba);
     let writer = std::fs::File::create(png_file).map_err(|source| ExportPipelineError::Io {
@@ -7749,17 +7936,82 @@ fn write_native_rgba_ir_to_png_file_fast(
     })?;
     let writer = std::io::BufWriter::new(writer);
 
-    PngEncoder::new_with_quality(writer, CompressionType::Fast, FilterType::Adaptive)
-        .write_image(
+    PngEncoder::new_with_quality(
+        writer,
+        png_compression_type(compression),
+        FilterType::Adaptive,
+    )
+    .write_image(
+        pixels.as_ref(),
+        raw_rgba.width,
+        raw_rgba.height,
+        ExtendedColorType::Rgba8,
+    )
+    .map_err(|source| ExportPipelineError::Image {
+        path: png_file.to_path_buf(),
+        source,
+    })
+}
+
+fn write_native_rgba_ir_to_webp_file(
+    raw_rgba: &NativeRgbaIr<'_>,
+    webp_file: &Path,
+) -> Result<(), ExportPipelineError> {
+    let pixels = native_rgba_ir_contiguous_pixels(raw_rgba);
+    let writer = std::fs::File::create(webp_file).map_err(|source| ExportPipelineError::Io {
+        path: webp_file.to_path_buf(),
+        source,
+    })?;
+    let writer = std::io::BufWriter::new(writer);
+
+    WebPEncoder::new_lossless(writer)
+        .encode(
             pixels.as_ref(),
             raw_rgba.width,
             raw_rgba.height,
             ExtendedColorType::Rgba8,
         )
         .map_err(|source| ExportPipelineError::Image {
-            path: png_file.to_path_buf(),
+            path: webp_file.to_path_buf(),
             source,
         })
+}
+
+fn write_native_rgba_ir_to_jpeg_file(
+    raw_rgba: &NativeRgbaIr<'_>,
+    jpeg_file: &Path,
+    quality: u8,
+) -> Result<(), ExportPipelineError> {
+    let pixels = native_rgba_ir_contiguous_pixels(raw_rgba);
+    let mut rgb = Vec::with_capacity(raw_rgba.width as usize * raw_rgba.height as usize * 3);
+    for rgba in pixels.chunks_exact(4) {
+        rgb.extend_from_slice(&rgba[..3]);
+    }
+    let writer = std::fs::File::create(jpeg_file).map_err(|source| ExportPipelineError::Io {
+        path: jpeg_file.to_path_buf(),
+        source,
+    })?;
+    let writer = std::io::BufWriter::new(writer);
+
+    JpegEncoder::new_with_quality(writer, quality)
+        .write_image(
+            &rgb,
+            raw_rgba.width,
+            raw_rgba.height,
+            ExtendedColorType::Rgb8,
+        )
+        .map_err(|source| ExportPipelineError::Image {
+            path: jpeg_file.to_path_buf(),
+            source,
+        })
+}
+
+fn png_compression_type(compression: ImagePngCompression) -> CompressionType {
+    match compression {
+        ImagePngCompression::Fast => CompressionType::Fast,
+        ImagePngCompression::Default => CompressionType::Default,
+        ImagePngCompression::Best => CompressionType::Best,
+    }
 }
 
 fn asset_studio_export_type_list(region: &RegionConfig) -> Vec<String> {
@@ -8007,9 +8259,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::core::config::{
-        AppConfig, ChartHashConfig, GitSyncConfig, MediaBackend, RegionConfig, RegionExportConfig,
-        RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig,
-        RetryConfig, StorageConfig,
+        AppConfig, ChartHashConfig, GitSyncConfig, ImageBackendConfig, ImageOutputFormat,
+        MediaBackend, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
+        RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
     };
     use crate::core::errors::ExportPipelineError;
 
@@ -8017,10 +8269,10 @@ mod tests {
         acquire_cpu_budget_permit_blocking, assetstudio_export_type_selector,
         assetstudio_fix_file_name, assetstudio_object_mode_supported_type,
         assetstudio_type_selector_matches, close_assetstudio_ffi_context,
-        convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
-        handle_png_conversion, inspect_assetstudio_ffi_bundle, merge_usm_files,
-        native_object_output_extension, native_object_output_path,
-        native_read_batch_size_for_assets, native_read_kind_for_asset,
+        convert_native_surrogate_images_to_png, extract_unity_asset_bundle,
+        flush_pending_native_image_writes, get_export_group, handle_png_conversion,
+        inspect_assetstudio_ffi_bundle, merge_usm_files, native_object_output_extension,
+        native_object_output_path, native_read_batch_size_for_assets, native_read_kind_for_asset,
         native_skipped_unsupported_asset, open_assetstudio_ffi_context,
         parse_assetstudio_ffi_context_list_objects_worker_output,
         parse_assetstudio_ffi_object_read_batch_worker_output_recoverable,
@@ -8030,7 +8282,8 @@ mod tests {
         record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
         scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
         text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
-        write_native_image_payload_final_files, write_native_object_payload,
+        write_native_image_payload_final_files,
+        write_native_image_payload_final_files_with_backend, write_native_object_payload,
         AssetStudioFfiAssetInfo, AssetStudioFfiContextCloseRequest, AssetStudioFfiInspectRequest,
         AssetStudioFfiObjectReadOutput, AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse,
         AssetStudioFfiVersion, NativeBatchPhaseStats, NativeObjectExportOptions,
@@ -8708,6 +8961,19 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         (config, region)
     }
 
+    fn make_native_rgba_ir_payload(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
+        let stride = width * 4;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(super::NATIVE_AOT_RGBA_IR_MAGIC);
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        payload.extend_from_slice(&stride.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+        payload.extend_from_slice(pixels);
+        payload
+    }
+
     #[test]
     fn get_export_group_matches_go_rules() {
         assert_eq!(get_export_group(""), "container");
@@ -8987,7 +9253,15 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let generated = runtime
-            .block_on(handle_png_conversion(dir.path(), &[], &region, 2, 2, false))
+            .block_on(handle_png_conversion(
+                dir.path(),
+                &[],
+                &region,
+                &ImageBackendConfig::default(),
+                2,
+                2,
+                false,
+            ))
             .unwrap();
 
         let webp = dir.path().join("sample.webp");
@@ -9249,6 +9523,103 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         assert!(webp.exists());
         assert!(!target.exists());
         assert!(!dir.path().join("normal.bmp").exists());
+    }
+
+    #[test]
+    fn native_raw_rgba_payload_writes_configured_image_formats_directly() {
+        let dir = tempdir().unwrap();
+        let payload = make_native_rgba_ir_payload(
+            2,
+            2,
+            &[255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 7, 8, 9, 64],
+        );
+        let (_config, mut region) = processing_config();
+        region.export.images.formats = vec![
+            ImageOutputFormat::Png,
+            ImageOutputFormat::Jpg,
+            ImageOutputFormat::Webp,
+        ];
+        let target = dir.path().join("normal.png");
+        let jpg = dir.path().join("normal.jpg");
+        let webp = dir.path().join("normal.webp");
+
+        let written = write_native_image_payload_final_files_with_backend(
+            &target,
+            &payload,
+            &region,
+            &ImageBackendConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(written, vec![target.clone(), jpg.clone(), webp.clone()]);
+        assert!(target.exists());
+        assert!(jpg.exists());
+        assert!(webp.exists());
+    }
+
+    #[test]
+    fn native_image_object_payload_is_flushed_after_export_queue() {
+        let dir = tempdir().unwrap();
+        let (config, region) = processing_config();
+        let read_kinds = BTreeMap::new();
+        let options = NativeObjectExportOptions {
+            output_dir: dir.path(),
+            export_path: "character/member/test",
+            strip_path_prefix: "assets/sekai/assetbundle/resources",
+            region: &region,
+            read_kinds: &read_kinds,
+            image_format: "raw_rgba",
+            read_batch_size: 16,
+            cli_parity_mode: false,
+        };
+        let mut path_state = NativeSemanticExportPathState::default();
+        let asset = AssetStudioFfiAssetInfo {
+            index: 0,
+            name: Some("normal".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/character/member/test/normal.png"
+                    .to_string(),
+            ),
+            asset_type: Some("Texture2D".to_string()),
+            type_id: 28,
+            path_id: 123,
+            unique_id: None,
+            size: 16,
+            source_file: None,
+        };
+        let payload = make_native_rgba_ir_payload(
+            2,
+            2,
+            &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 7, 8, 9, 255],
+        );
+        let read_output = AssetStudioFfiObjectReadOutput {
+            response: AssetStudioFfiObjectReadResponse {
+                success: true,
+                asset: Some(asset.clone()),
+                payload_kind: Some("image_raw_rgba".to_string()),
+                payload_len: payload.len() as i64,
+                suggested_extension: Some(".png".to_string()),
+                warnings: Vec::new(),
+                phase_ms: HashMap::new(),
+                error: None,
+                duration_ms: None,
+            },
+            payload,
+        };
+
+        write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+        let expected = dir.path().join("character/member/test/normal.png");
+        assert_eq!(path_state.written_files, vec![expected.clone()]);
+        assert_eq!(path_state.pending_image_writes.len(), 1);
+        assert!(!expected.exists());
+
+        let phase_ms =
+            flush_pending_native_image_writes(&config, path_state.pending_image_writes).unwrap();
+
+        assert!(expected.exists());
+        assert_eq!(phase_ms.get("image_encode.count"), Some(&1));
+        assert_eq!(phase_ms.get("image_encode.format.png"), Some(&1));
     }
 
     #[test]
@@ -10881,6 +11252,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let mut summary = NativeObjectExportSummary {
             written_files: Vec::new(),
             acb_sources: Vec::new(),
+            pending_image_writes: Vec::new(),
             phase_ms: HashMap::from([
                 ("read_batch.read_payload.p50".to_string(), 5),
                 ("read_batch.read_payload.p95".to_string(), 5),

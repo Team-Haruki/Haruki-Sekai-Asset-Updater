@@ -238,6 +238,7 @@ fn benchmark_config(args: &Args) -> AppConfig {
                 ffmpeg_path: "ffmpeg".to_string(),
                 ..MediaBackendConfig::default()
             },
+            image: Default::default(),
             asset_studio: AssetStudioBackendConfig {
                 library_path: args.ffi_library.clone(),
                 call_mode: args.ffi_call_mode.into(),
@@ -326,6 +327,7 @@ fn benchmark_region(args: &Args) -> RegionConfig {
             images: ImageExportConfig {
                 convert_to_webp: false,
                 remove_png: false,
+                ..ImageExportConfig::default()
             },
             ..RegionExportConfig::default()
         },

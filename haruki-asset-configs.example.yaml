@@ -36,6 +36,11 @@ backends:
   media:
     backend: "ffi" # ffi preferred; auto | cli are fallback/test paths
     ffmpeg_path: "ffmpeg"
+  image:
+    backend: "rust"
+    png_compression: "fast" # fast | default | best
+    webp_lossless: true
+    jpeg_quality: 95
   asset_studio:
     library_path: ""
     call_mode: "pool" # direct | process | pool
@@ -68,6 +73,7 @@ concurrency:
   auto_tune: false # when true, values below are treated as caps and scaled to CPU count
   download: 4
   upload: 4
+  post_process: 0 # 0 = use media_encode; raise for image/typetree-heavy full exports
   acb: 8
   usm: 4
   hca: 16
@@ -148,8 +154,7 @@ regions:
       hca:
         decode: true
       images:
-        convert_to_webp: false
-        remove_png: false
+        formats: ["png"] # png | jpg | webp; legacy convert_to_webp/remove_png is still accepted
       video:
         convert_to_mp4: true
         direct_usm_to_mp4_with_ffmpeg: true
@@ -202,8 +207,7 @@ regions:
       hca:
         decode: true
       images:
-        convert_to_webp: false
-        remove_png: false
+        formats: ["png"] # png | jpg | webp; legacy convert_to_webp/remove_png is still accepted
       video:
         convert_to_mp4: true
         direct_usm_to_mp4_with_ffmpeg: false

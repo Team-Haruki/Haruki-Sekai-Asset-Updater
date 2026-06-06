@@ -167,6 +167,7 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
             images: haruki_sekai_asset_updater::core::config::ImageExportConfig {
                 convert_to_webp: false,
                 remove_png: false,
+                ..haruki_sekai_asset_updater::core::config::ImageExportConfig::default()
             },
             ..RegionExportConfig::default()
         },
@@ -195,6 +196,7 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
                 library_path: Some(asset_studio_ffi_library_path),
                 ..haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default()
             },
+            ..haruki_sekai_asset_updater::core::config::BackendsConfig::default()
         },
         storage: StorageConfig {
             providers: Vec::new(),

@@ -220,7 +220,17 @@ impl JobManager {
                                         JobPhase::Completed,
                                         "dry-run plan completed".to_string(),
                                     );
-                                    info!(job_id = %id, region = %job.region, "dry-run plan completed");
+                                    let now = chrono::Utc::now();
+                                    job.updated_at = now;
+                                    info!(
+                                        job_id = %id,
+                                        region = %job.region,
+                                        elapsed_ms = job_elapsed_ms(job, now),
+                                        completed = job.progress.completed_downloads,
+                                        failed = job.progress.failed_downloads,
+                                        total = job.progress.total_downloads,
+                                        "dry-run plan completed"
+                                    );
                                 } else {
                                     job.status = JobStatus::Running;
                                     job.message = "job planned; starting execution".to_string();
@@ -230,8 +240,8 @@ impl JobManager {
                                         "job planned; starting execution".to_string(),
                                     );
                                     info!(job_id = %id, region = %job.region, "job planned; starting execution");
+                                    job.updated_at = chrono::Utc::now();
                                 }
-                                job.updated_at = chrono::Utc::now();
                                 false
                             }
                         } else {
@@ -289,6 +299,9 @@ impl JobManager {
                                             true
                                         } else {
                                             job.status = JobStatus::Completed;
+                                            let completed_downloads = summary.completed_downloads;
+                                            let failed_downloads = summary.failed_downloads;
+                                            let total_downloads = summary.queued_downloads;
                                             job.execution = Some(summary);
                                             job.failure = None;
                                             job.preview =
@@ -299,8 +312,17 @@ impl JobManager {
                                                 JobPhase::Completed,
                                                 "job completed".to_string(),
                                             );
-                                            job.updated_at = chrono::Utc::now();
-                                            info!(job_id = %id, region = %job.region, "job completed");
+                                            let now = chrono::Utc::now();
+                                            job.updated_at = now;
+                                            info!(
+                                                job_id = %id,
+                                                region = %job.region,
+                                                elapsed_ms = job_elapsed_ms(job, now),
+                                                completed = completed_downloads,
+                                                failed = failed_downloads,
+                                                total = total_downloads,
+                                                "job completed"
+                                            );
                                             false
                                         }
                                     } else {
@@ -330,14 +352,7 @@ impl JobManager {
             };
 
             if let Some(message) = planning_message {
-                error!(job_id = %id, error = %message, "job failed");
-                let mut job_map = jobs.write().await;
-                if let Some(job) = job_map.get_mut(&id) {
-                    job.status = JobStatus::Failed;
-                    job.message = message.clone();
-                    job.failure = Some(classify_failure(&message));
-                    job.updated_at = chrono::Utc::now();
-                }
+                finish_failed(&jobs, id, message).await;
             }
             remove_cancel_flag(&cancel_flags, id).await;
         });
@@ -345,14 +360,26 @@ impl JobManager {
 }
 
 async fn finish_failed(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid, message: String) {
-    error!(job_id = %id, error = %message, "job failed");
     let mut job_map = jobs.write().await;
     if let Some(job) = job_map.get_mut(&id) {
         job.status = JobStatus::Failed;
         job.message = message.clone();
         job.failure = Some(classify_failure(&message));
         push_progress_event(job, JobPhase::Failed, message);
-        job.updated_at = chrono::Utc::now();
+        let now = chrono::Utc::now();
+        job.updated_at = now;
+        error!(
+            job_id = %id,
+            region = %job.region,
+            elapsed_ms = job_elapsed_ms(job, now),
+            completed = job.progress.completed_downloads,
+            failed = job.progress.failed_downloads,
+            total = job.progress.total_downloads,
+            error = %job.message,
+            "job failed"
+        );
+    } else {
+        error!(job_id = %id, error = %message, "job failed");
     }
 }
 
@@ -361,7 +388,6 @@ async fn finish_cancelled(
     id: Uuid,
     message: String,
 ) {
-    warn!(job_id = %id, reason = %message, "job cancelled");
     let mut job_map = jobs.write().await;
     if let Some(job) = job_map.get_mut(&id) {
         job.status = JobStatus::Cancelled;
@@ -373,7 +399,20 @@ async fn finish_cancelled(
             at: chrono::Utc::now(),
         });
         push_progress_event(job, JobPhase::Cancelled, message);
-        job.updated_at = chrono::Utc::now();
+        let now = chrono::Utc::now();
+        job.updated_at = now;
+        warn!(
+            job_id = %id,
+            region = %job.region,
+            elapsed_ms = job_elapsed_ms(job, now),
+            completed = job.progress.completed_downloads,
+            failed = job.progress.failed_downloads,
+            total = job.progress.total_downloads,
+            reason = %job.message,
+            "job cancelled"
+        );
+    } else {
+        warn!(job_id = %id, reason = %message, "job cancelled");
     }
 }
 
@@ -612,6 +651,12 @@ fn format_ffi_export_phases(phase_ms: &HashMap<String, u64>) -> String {
         .map(|(phase, elapsed_ms)| format!("{phase}={elapsed_ms}ms"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn job_elapsed_ms(job: &JobSnapshot, now: chrono::DateTime<chrono::Utc>) -> i64 {
+    now.signed_duration_since(job.created_at)
+        .num_milliseconds()
+        .max(0)
 }
 
 fn push_progress_event(job: &mut JobSnapshot, phase: JobPhase, message: String) {
