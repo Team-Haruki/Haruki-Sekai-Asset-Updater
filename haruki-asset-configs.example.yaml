@@ -26,6 +26,7 @@ execution:
   timeout_seconds: 300
   allow_cancel: true
   asset_bundle_cache_dir: "" # optional benchmark/debug raw bundle cache
+  max_in_flight_bundle_bytes: 0 # 0 disables the soft memory guard; try 4294967296 on small Linux hosts
   batch_save_size: 50
   retry:
     attempts: 4

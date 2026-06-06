@@ -229,6 +229,10 @@ impl AppConfig {
             self.concurrency.cpu_throttle_sample_ms =
                 parse_positive_usize("concurrency.cpu_throttle_sample_ms", &value)? as u64;
         }
+        if let Ok(value) = env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES") {
+            self.execution.max_in_flight_bundle_bytes =
+                parse_usize_env("execution.max_in_flight_bundle_bytes", &value)?;
+        }
         resolve_secret_env(
             "git_sync.chart_hashes.password",
             &mut self.git_sync.chart_hashes.password,
@@ -614,6 +618,10 @@ pub struct ExecutionConfig {
     pub timeout_seconds: u64,
     pub allow_cancel: bool,
     pub asset_bundle_cache_dir: Option<String>,
+    /// Soft process memory guard for bundle work.  When non-zero, bundle
+    /// downloads/native payloads acquire permits by estimated bundle size and
+    /// keep them until export/post-process finishes.
+    pub max_in_flight_bundle_bytes: usize,
     /// How many successful downloads to accumulate before flushing the download
     /// record to disk mid-run.  Set to `0` to disable mid-run flushing (record
     /// is only written once at the end).  Mirrors Go's `batchSaveSize`.
@@ -627,6 +635,7 @@ impl Default for ExecutionConfig {
             timeout_seconds: 300,
             allow_cancel: true,
             asset_bundle_cache_dir: None,
+            max_in_flight_bundle_bytes: 0,
             batch_save_size: 50,
             retry: RetryConfig::default(),
         }
@@ -1449,6 +1458,8 @@ regions:
         let old_cpu_reserved = std::env::var("HARUKI_CPU_RESERVED").ok();
         let old_cpu_throttle_enabled = std::env::var("HARUKI_CPU_THROTTLE_ENABLED").ok();
         let old_cpu_throttle_sample_ms = std::env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS").ok();
+        let old_max_in_flight_bundle_bytes =
+            std::env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES").ok();
         std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", "auto");
         std::env::set_var("HARUKI_MEDIA_BACKEND", "cli");
         std::env::set_var(
@@ -1471,6 +1482,7 @@ regions:
         std::env::set_var("HARUKI_CPU_RESERVED", "2");
         std::env::set_var("HARUKI_CPU_THROTTLE_ENABLED", "true");
         std::env::set_var("HARUKI_CPU_THROTTLE_SAMPLE_MS", "500");
+        std::env::set_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES", "1048576");
 
         let mut file = NamedTempFile::new().unwrap();
         write!(
@@ -1519,6 +1531,7 @@ tools:
         assert_eq!(config.concurrency.cpu_reserved, 2);
         assert!(config.concurrency.cpu_throttle_enabled);
         assert_eq!(config.concurrency.cpu_throttle_sample_ms, 500);
+        assert_eq!(config.execution.max_in_flight_bundle_bytes, 1_048_576);
 
         match old_backend {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", value),
@@ -1585,6 +1598,10 @@ tools:
         match old_cpu_throttle_sample_ms {
             Some(value) => std::env::set_var("HARUKI_CPU_THROTTLE_SAMPLE_MS", value),
             None => std::env::remove_var("HARUKI_CPU_THROTTLE_SAMPLE_MS"),
+        }
+        match old_max_in_flight_bundle_bytes {
+            Some(value) => std::env::set_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES", value),
+            None => std::env::remove_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES"),
         }
     }
 

@@ -113,6 +113,7 @@ struct DownloadTask {
     bundle_path: String,
     bundle_hash: String,
     category: AssetCategory,
+    file_size: i64,
     priority: usize,
 }
 
@@ -201,6 +202,7 @@ struct NativeBundlePostProcessJob {
     payload_export: UnityAssetBundlePayloadExport,
     backlog_wait_ms: u128,
     _backlog_permit: Option<OwnedSemaphorePermit>,
+    _memory_permit: Option<OwnedSemaphorePermit>,
 }
 
 enum BundleWorkOutput {
@@ -310,6 +312,11 @@ impl AssetExecutionContext {
         );
 
         if tasks.is_empty() {
+            tracing::info!(
+                region = %self.region_name,
+                discovered = info.bundles.len(),
+                "no new assets to download"
+            );
             return Ok(ExecutionSummary {
                 discovered_bundles: info.bundles.len(),
                 queued_downloads: 0,
@@ -328,6 +335,7 @@ impl AssetExecutionContext {
         let download_concurrency = concurrency.download.max(1);
         let media_encode_concurrency = concurrency.media_encode.max(1);
         let semaphore = std::sync::Arc::new(Semaphore::new(download_concurrency));
+        let memory_limiter = BundleMemoryLimiter::from_config(app_config);
         let post_process_semaphore = std::sync::Arc::new(Semaphore::new(media_encode_concurrency));
         let post_process_backlog_capacity =
             post_process_backlog_capacity(download_concurrency, media_encode_concurrency);
@@ -348,10 +356,19 @@ impl AssetExecutionContext {
                 message: format!("downloading {} bundle(s)", tasks.len()),
             },
         );
+        tracing::info!(
+            region = %self.region_name,
+            queued = tasks.len(),
+            download_concurrency,
+            media_encode_concurrency,
+            memory_limit_bytes = memory_limiter.limit_bytes(),
+            "starting asset bundle processing"
+        );
 
         for task in tasks.clone() {
             let ctx = self.clone();
             let semaphore = semaphore.clone();
+            let memory_limiter = memory_limiter.clone();
             let post_process_backlog_semaphore = post_process_backlog_semaphore.clone();
             let app_config = app_config_cloned.clone();
             let progress = progress.clone();
@@ -370,6 +387,10 @@ impl AssetExecutionContext {
                         Err(AssetExecutionError::Cancelled),
                     );
                 }
+                let memory_wait_started = Instant::now();
+                let mut memory_permit =
+                    memory_limiter.acquire(task.file_size.max(0) as usize).await;
+                let memory_wait_ms = memory_wait_started.elapsed().as_millis();
                 Self::send_progress(
                     &progress,
                     ExecutionProgressUpdate::BundleStarted {
@@ -392,6 +413,7 @@ impl AssetExecutionContext {
                             let backlog_wait_ms = backlog_wait_started.elapsed().as_millis();
                             job.backlog_wait_ms = backlog_wait_ms;
                             job._backlog_permit = Some(backlog_permit);
+                            job._memory_permit = memory_permit.take();
                             Ok(BundleWorkOutput::NativePostProcess(Box::new(job)))
                         }
                         Err(error) => Err(error),
@@ -405,6 +427,10 @@ impl AssetExecutionContext {
                 phase_ms.insert(
                     "scheduler.download_slot_wait".to_string(),
                     download_slot_wait_ms.min(u128::from(u64::MAX)) as u64,
+                );
+                phase_ms.insert(
+                    "scheduler.memory_wait".to_string(),
+                    memory_wait_ms.min(u128::from(u64::MAX)) as u64,
                 );
                 Self::send_progress(
                     &progress,
@@ -642,6 +668,11 @@ impl AssetExecutionContext {
         );
 
         if tasks.is_empty() {
+            tracing::info!(
+                region = %self.region_name,
+                discovered = info.bundles.len(),
+                "no assets matched prefetch filters"
+            );
             return Ok(ExecutionSummary {
                 discovered_bundles: info.bundles.len(),
                 queued_downloads: 0,
@@ -655,6 +686,7 @@ impl AssetExecutionContext {
         let semaphore = Arc::new(Semaphore::new(
             app_config.effective_concurrency().download.max(1),
         ));
+        let memory_limiter = BundleMemoryLimiter::from_config(app_config);
         let mut joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
         Self::send_progress(
@@ -664,10 +696,17 @@ impl AssetExecutionContext {
                 message: format!("prefetching {} bundle(s)", tasks.len()),
             },
         );
+        tracing::info!(
+            region = %self.region_name,
+            queued = tasks.len(),
+            memory_limit_bytes = memory_limiter.limit_bytes(),
+            "starting asset bundle prefetch"
+        );
 
         for task in tasks.clone() {
             let ctx = self.clone();
             let semaphore = semaphore.clone();
+            let memory_limiter = memory_limiter.clone();
             let app_config = app_config_cloned.clone();
             let progress = progress.clone();
             let cancel_flag = cancel_flag.clone();
@@ -682,6 +721,7 @@ impl AssetExecutionContext {
                         Err(AssetExecutionError::Cancelled),
                     );
                 }
+                let _memory_permit = memory_limiter.acquire(task.file_size.max(0) as usize).await;
                 Self::send_progress(
                     &progress,
                     ExecutionProgressUpdate::BundleStarted {
@@ -776,6 +816,14 @@ impl AssetExecutionContext {
         *completed += 1;
         downloaded_assets.insert(bundle_path.clone(), bundle_hash);
         *pending_save_count += 1;
+        if progress.is_none() {
+            tracing::info!(
+                region = %region_name,
+                bundle = %bundle_path,
+                completed = *completed,
+                "bundle completed"
+            );
+        }
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleCompleted {
@@ -1117,6 +1165,7 @@ impl AssetExecutionContext {
                 bundle_path: bundle_name.clone(),
                 bundle_hash,
                 category: detail.category.clone(),
+                file_size: detail.file_size,
                 priority,
             });
         }
@@ -1374,6 +1423,7 @@ impl AssetExecutionContext {
             payload_export: payload_export?,
             backlog_wait_ms: 0,
             _backlog_permit: None,
+            _memory_permit: None,
         })
     }
 
@@ -1495,6 +1545,50 @@ impl BundleFetchSource {
             Self::Network => "network",
         }
     }
+}
+
+#[derive(Clone)]
+struct BundleMemoryLimiter {
+    semaphore: Option<Arc<Semaphore>>,
+    limit_bytes: usize,
+    limit_units: u32,
+}
+
+impl BundleMemoryLimiter {
+    const UNIT_BYTES: usize = 1024 * 1024;
+
+    fn from_config(app_config: &AppConfig) -> Self {
+        let limit_bytes = app_config.execution.max_in_flight_bundle_bytes;
+        if limit_bytes == 0 {
+            return Self {
+                semaphore: None,
+                limit_bytes,
+                limit_units: 0,
+            };
+        }
+        let limit_units = bytes_to_units(limit_bytes).min(u32::MAX as usize).max(1) as u32;
+        Self {
+            semaphore: Some(Arc::new(Semaphore::new(limit_units as usize))),
+            limit_bytes,
+            limit_units,
+        }
+    }
+
+    fn limit_bytes(&self) -> usize {
+        self.limit_bytes
+    }
+
+    async fn acquire(&self, estimated_bytes: usize) -> Option<OwnedSemaphorePermit> {
+        let semaphore = self.semaphore.as_ref()?;
+        let units = bytes_to_units(estimated_bytes)
+            .min(self.limit_units as usize)
+            .max(1) as u32;
+        semaphore.clone().acquire_many_owned(units).await.ok()
+    }
+}
+
+fn bytes_to_units(bytes: usize) -> usize {
+    bytes.div_ceil(BundleMemoryLimiter::UNIT_BYTES).max(1)
 }
 
 fn configured_asset_bundle_cache_dir(app_config: &AppConfig) -> Option<PathBuf> {
