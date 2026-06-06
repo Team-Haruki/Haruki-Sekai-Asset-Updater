@@ -35,9 +35,7 @@ execution:
 
 tools:
   ffmpeg_path: "ffmpeg"
-  media_backend: "ffi" # ffi preferred; auto | cli are legacy
-  asset_studio_backend: "native" # native preferred; cli | auto are legacy
-  asset_studio_cli_path: ""
+  media_backend: "ffi" # ffi preferred; auto | cli are fallback/test paths
   asset_studio_native_library_path: ""
   asset_studio_native_call_mode: "pool" # direct | process | pool
   asset_studio_native_worker_path: ""

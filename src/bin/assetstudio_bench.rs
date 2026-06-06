@@ -3,22 +3,15 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioBackend, AssetStudioNativeCallMode, ChartHashConfig, ExecutionConfig,
-    GitSyncConfig, ImageExportConfig, RegionConfig, RegionExportConfig, RegionPathsConfig,
-    RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
-    ToolsConfig,
+    AppConfig, AssetStudioNativeCallMode, ChartHashConfig, ExecutionConfig, GitSyncConfig,
+    ImageExportConfig, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
+    RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig, ToolsConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::{
     extract_unity_asset_bundle, query_assetstudio_native_version,
     query_assetstudio_native_version_worker,
 };
 use tempfile::tempdir;
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum BenchBackend {
-    Cli,
-    Native,
-}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BenchNativeCallMode {
@@ -37,25 +30,9 @@ impl From<BenchNativeCallMode> for AssetStudioNativeCallMode {
     }
 }
 
-impl BenchBackend {
-    fn config_backend(self) -> AssetStudioBackend {
-        match self {
-            Self::Cli => AssetStudioBackend::Cli,
-            Self::Native => AssetStudioBackend::Native,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cli => "cli",
-            Self::Native => "native",
-        }
-    }
-}
-
 #[derive(Debug, Parser)]
 #[command(name = "assetstudio_bench")]
-#[command(about = "Benchmark AssetStudio CLI and NativeAOT FFI exports through the Rust pipeline")]
+#[command(about = "Benchmark AssetStudio NativeAOT FFI exports through the Rust pipeline")]
 struct Args {
     #[arg(long)]
     bundle: PathBuf,
@@ -69,8 +46,6 @@ struct Args {
     expected_file: Option<PathBuf>,
     #[arg(long = "output-dir")]
     output_dir: Option<PathBuf>,
-    #[arg(long = "cli-path")]
-    cli_path: Option<String>,
     #[arg(long = "native-library")]
     native_library: Option<String>,
     #[arg(long = "native-call-mode", value_enum, default_value = "pool")]
@@ -95,8 +70,6 @@ struct Args {
     media_encode_concurrency: Option<usize>,
     #[arg(long = "asset-types", value_delimiter = ',')]
     asset_types: Vec<String>,
-    #[arg(long, value_enum, value_delimiter = ',', default_value = "native")]
-    backend: Vec<BenchBackend>,
     #[arg(long, default_value_t = 1)]
     warmup: usize,
     #[arg(long, default_value_t = 5)]
@@ -129,34 +102,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let mut results = Vec::new();
-    for backend in &args.backend {
-        validate_backend_inputs(*backend, &args)?;
+    validate_inputs(&args)?;
 
-        for _ in 0..args.warmup {
-            run_once(*backend, &args).await?;
-        }
+    for _ in 0..args.warmup {
+        run_once(&args).await?;
+    }
 
-        let mut elapsed_ms = Vec::new();
-        let mut exported_files = Vec::new();
-        let mut native_skipped_object_reads = Vec::new();
-        let mut native_skipped_object_read_details = Vec::new();
-        let mut native_object_read_plan = Vec::new();
-        let mut native_phase_ms = Vec::new();
-        for _ in 0..args.iterations {
-            let result = run_once(*backend, &args).await?;
-            elapsed_ms.push(result.elapsed_ms);
-            exported_files.push(result.exported_files);
-            native_skipped_object_reads.push(result.native_skipped_object_reads);
-            native_skipped_object_read_details.push(result.native_skipped_object_read_details);
-            native_object_read_plan.push(result.native_object_read_plan);
-            native_phase_ms.push(result.native_phase_ms);
-        }
-        elapsed_ms.sort_unstable();
-        let mean_ms = elapsed_ms.iter().sum::<u128>() as f64 / elapsed_ms.len() as f64;
-        let median_ms = elapsed_ms[elapsed_ms.len() / 2];
-        results.push(sonic_rs::json!({
-            "backend": backend.as_str(),
+    let mut elapsed_ms = Vec::new();
+    let mut exported_files = Vec::new();
+    let mut native_skipped_object_reads = Vec::new();
+    let mut native_skipped_object_read_details = Vec::new();
+    let mut native_object_read_plan = Vec::new();
+    let mut native_phase_ms = Vec::new();
+    for _ in 0..args.iterations {
+        let result = run_once(&args).await?;
+        elapsed_ms.push(result.elapsed_ms);
+        exported_files.push(result.exported_files);
+        native_skipped_object_reads.push(result.native_skipped_object_reads);
+        native_skipped_object_read_details.push(result.native_skipped_object_read_details);
+        native_object_read_plan.push(result.native_object_read_plan);
+        native_phase_ms.push(result.native_phase_ms);
+    }
+    elapsed_ms.sort_unstable();
+    let mean_ms = elapsed_ms.iter().sum::<u128>() as f64 / elapsed_ms.len() as f64;
+    let median_ms = elapsed_ms[elapsed_ms.len() / 2];
+
+    println!(
+        "{}",
+        sonic_rs::to_string_pretty(&sonic_rs::json!({
+            "bundle": args.bundle.display().to_string(),
+            "export_path": args.export_path,
+            "category": args.category,
+            "backend": "native",
             "iterations": args.iterations,
             "mean_ms": mean_ms,
             "median_ms": median_ms,
@@ -167,48 +144,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "native_skipped_object_read_details": native_skipped_object_read_details,
             "native_object_read_plan": native_object_read_plan,
             "native_phase_ms": native_phase_ms,
-        }));
-    }
-
-    println!(
-        "{}",
-        sonic_rs::to_string_pretty(&sonic_rs::json!({
-            "bundle": args.bundle.display().to_string(),
-            "export_path": args.export_path,
-            "category": args.category,
-            "backends": results,
         }))?
     );
     Ok(())
 }
 
-fn validate_backend_inputs(
-    backend: BenchBackend,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
-    match backend {
-        BenchBackend::Cli
-            if args
-                .cli_path
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty() =>
-        {
-            Err("--cli-path is required when benchmarking cli".into())
-        }
-        BenchBackend::Native
-            if args
-                .native_library
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty() =>
-        {
-            Err("--native-library is required when benchmarking native".into())
-        }
-        _ => Ok(()),
+fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args
+        .native_library
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err("--native-library is required".into());
     }
+    Ok(())
 }
 
 struct RunResult {
@@ -220,10 +171,7 @@ struct RunResult {
     native_phase_ms: sonic_rs::Value,
 }
 
-async fn run_once(
-    backend: BenchBackend,
-    args: &Args,
-) -> Result<RunResult, Box<dyn std::error::Error>> {
+async fn run_once(args: &Args) -> Result<RunResult, Box<dyn std::error::Error>> {
     let temp_output_dir = if args.output_dir.is_none() {
         Some(tempdir()?)
     } else {
@@ -240,7 +188,7 @@ async fn run_once(
         None => temp_output_dir.as_ref().unwrap().path(),
     };
     let region = benchmark_region(args);
-    let config = benchmark_config(backend, args);
+    let config = benchmark_config(args);
 
     let start = Instant::now();
     let summary = extract_unity_asset_bundle(
@@ -289,13 +237,11 @@ async fn run_once(
     })
 }
 
-fn benchmark_config(backend: BenchBackend, args: &Args) -> AppConfig {
+fn benchmark_config(args: &Args) -> AppConfig {
     AppConfig {
         tools: ToolsConfig {
             ffmpeg_path: "ffmpeg".to_string(),
             media_backend: ToolsConfig::default().media_backend,
-            asset_studio_backend: backend.config_backend(),
-            asset_studio_cli_path: args.cli_path.clone(),
             asset_studio_native_library_path: args.native_library.clone(),
             asset_studio_native_call_mode: args.native_call_mode.into(),
             asset_studio_native_worker_path: args.native_worker_path.clone(),

@@ -9,19 +9,13 @@ use haruki_sekai_asset_updater::core::asset_execution::{
     AssetExecutionContext, ExecutionProgressUpdate,
 };
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioBackend, AssetStudioNativeCallMode, MediaBackend,
+    AppConfig, AssetStudioNativeCallMode, MediaBackend,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::NativeObjectReadPlanStats;
 use haruki_sekai_asset_updater::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
 use serde::Serialize;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum BenchBackend {
-    Cli,
-    Native,
-}
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BenchNativeCallMode {
@@ -57,22 +51,6 @@ impl From<BenchMediaBackend> for MediaBackend {
     }
 }
 
-impl BenchBackend {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Cli => "cli",
-            Self::Native => "native",
-        }
-    }
-
-    fn config_backend(self) -> AssetStudioBackend {
-        match self {
-            Self::Cli => AssetStudioBackend::Cli,
-            Self::Native => AssetStudioBackend::Native,
-        }
-    }
-}
-
 fn start_app_rules(args: &Args) -> Vec<String> {
     if args.start_app_rule.is_empty() {
         vec!["^character/".to_string()]
@@ -97,8 +75,6 @@ struct Args {
     start_app_rule: Vec<String>,
     #[arg(long = "on-demand-rule")]
     on_demand_rule: Vec<String>,
-    #[arg(long = "cli-path")]
-    cli_path: Option<String>,
     #[arg(long = "native-library")]
     native_library: Option<String>,
     #[arg(long = "native-call-mode", value_enum, default_value = "pool")]
@@ -117,8 +93,6 @@ struct Args {
     native_cli_parity: bool,
     #[arg(long = "media-backend", value_enum)]
     media_backend: Option<BenchMediaBackend>,
-    #[arg(long, value_enum, value_delimiter = ',', default_value = "native")]
-    backend: Vec<BenchBackend>,
     #[arg(long = "asset-types", value_delimiter = ',')]
     asset_types: Vec<String>,
     #[arg(long = "asset-version")]
@@ -228,14 +202,9 @@ struct BackendReport {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let mut reports = Vec::new();
-
-    for backend in &args.backend {
-        let report = run_backend(*backend, &args).await?;
-        if let Some(path) = &args.jsonl_output {
-            append_jsonl(path, &report)?;
-        }
-        reports.push(report);
+    let report = run_backend(&args).await?;
+    if let Some(path) = &args.jsonl_output {
+        append_jsonl(path, &report)?;
     }
 
     let output = sonic_rs::json!({
@@ -245,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "start_app": start_app_rules(&args),
             "on_demand": on_demand_rules(&args),
         },
-        "backends": reports,
+        "backend": report,
     });
     println!("{}", sonic_rs::to_string_pretty(&output)?);
     Ok(())
@@ -261,17 +230,14 @@ fn append_jsonl(path: &PathBuf, report: &BackendReport) -> Result<(), Box<dyn st
     Ok(())
 }
 
-async fn run_backend(
-    backend: BenchBackend,
-    args: &Args,
-) -> Result<BackendReport, Box<dyn std::error::Error>> {
-    validate_backend_inputs(backend, args)?;
+async fn run_backend(args: &Args) -> Result<BackendReport, Box<dyn std::error::Error>> {
+    validate_inputs(args)?;
 
     let temp_dir = tempfile::Builder::new()
-        .prefix(&format!("haruki-region-bench-{}-", backend.as_str()))
+        .prefix("haruki-region-bench-native-")
         .tempdir()?;
     let (config, region_name, temp_asset_save_dir, temp_record_file) =
-        benchmark_config(backend, args, &temp_dir)?;
+        benchmark_config(args, &temp_dir)?;
     let region = config
         .regions
         .get(&region_name)
@@ -286,7 +252,7 @@ async fn run_backend(
     let (tx, rx) = mpsc::unbounded_channel();
     let collector = tokio::spawn(collect_progress(
         rx,
-        backend.as_str().to_string(),
+        "native".to_string(),
         args.progress_every,
     ));
 
@@ -302,7 +268,7 @@ async fn run_backend(
     let progress = collector.await?;
 
     let report = BackendReport {
-        backend: backend.as_str().to_string(),
+        backend: "native".to_string(),
         mode: if args.prefetch_only {
             "prefetch".to_string()
         } else {
@@ -353,49 +319,28 @@ async fn run_backend(
     Ok(report)
 }
 
-fn validate_backend_inputs(
-    backend: BenchBackend,
-    args: &Args,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_inputs(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.prefetch_only {
         return Ok(());
     }
 
-    match backend {
-        BenchBackend::Cli
-            if args
-                .cli_path
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty() =>
-        {
-            Err("--cli-path is required for cli backend".into())
-        }
-        BenchBackend::Native
-            if args
-                .native_library
-                .as_deref()
-                .unwrap_or_default()
-                .trim()
-                .is_empty() =>
-        {
-            Err("--native-library is required for native backend".into())
-        }
-        _ => Ok(()),
+    if args
+        .native_library
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        return Err("--native-library is required".into());
     }
+    Ok(())
 }
 
 fn benchmark_config(
-    backend: BenchBackend,
     args: &Args,
     temp_dir: &TempDir,
 ) -> Result<(AppConfig, String, PathBuf, PathBuf), Box<dyn std::error::Error>> {
     let mut config = AppConfig::load_from_path(&args.config)?;
-    config.tools.asset_studio_backend = backend.config_backend();
-    if let Some(cli_path) = &args.cli_path {
-        config.tools.asset_studio_cli_path = Some(cli_path.clone());
-    }
     if let Some(native_library) = &args.native_library {
         config.tools.asset_studio_native_library_path = Some(native_library.clone());
     }

@@ -16,7 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::core::cleanup::remove_file_if_exists;
-use crate::core::config::{AppConfig, AssetStudioBackend, RegionConfig, RegionProviderConfig};
+use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::{
@@ -347,9 +347,7 @@ impl AssetExecutionContext {
         let mut joins = JoinSet::new();
         let mut post_process_joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
-        let use_native_pipeline = app_config.tools.asset_studio_backend
-            == AssetStudioBackend::Native
-            && app_config.tools.asset_studio_native_unitypy_mode;
+        let use_native_pipeline = app_config.tools.asset_studio_native_unitypy_mode;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::Phase {
@@ -1761,7 +1759,6 @@ mod tests {
         AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionPathsConfig,
         RegionProviderConfig, RegionRuntimeConfig,
     };
-    use crate::core::download_records::load_download_record;
     use crate::core::models::AssetUpdateRequest;
 
     use super::{
@@ -1894,7 +1891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_dry_run_can_fetch_asset_info_and_update_download_record() {
+    async fn prefetch_can_fetch_asset_info_and_download_bundle() {
         let temp = tempdir().unwrap();
         let record_file = temp.path().join("downloaded_assets.json");
         let save_dir = temp.path().join("exports");
@@ -1995,8 +1992,6 @@ mod tests {
             regions,
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: "ffmpeg".to_string(),
-                asset_studio_backend: crate::core::config::AssetStudioBackend::Cli,
-                asset_studio_cli_path: None,
                 ..crate::core::config::ToolsConfig::default()
             },
             git_sync: GitSyncConfig {
@@ -2012,11 +2007,13 @@ mod tests {
         };
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
-        let summary = executor.execute(&config, None, None).await.unwrap();
+        let summary = executor
+            .prefetch_asset_bundles(&config, None, None)
+            .await
+            .unwrap();
         assert_eq!(summary.completed_downloads, 1);
 
-        let record = load_download_record(&record_file).unwrap();
-        assert_eq!(record.get("start/a").map(String::as_str), Some("hash-a"));
+        assert_eq!(summary.failed_downloads, 0);
     }
 
     #[tokio::test]
@@ -2148,8 +2145,6 @@ mod tests {
             regions,
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: "ffmpeg".to_string(),
-                asset_studio_backend: crate::core::config::AssetStudioBackend::Cli,
-                asset_studio_cli_path: None,
                 ..crate::core::config::ToolsConfig::default()
             },
             git_sync: GitSyncConfig {
@@ -2169,7 +2164,10 @@ mod tests {
         };
 
         let executor = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
-        let summary = executor.execute(&config, None, None).await.unwrap();
+        let summary = executor
+            .prefetch_asset_bundles(&config, None, None)
+            .await
+            .unwrap();
         assert_eq!(summary.completed_downloads, 1);
         assert_eq!(version_hits.load(Ordering::SeqCst), 1);
         assert!(cookie_seen.load(Ordering::SeqCst));
@@ -2291,10 +2289,7 @@ mod tests {
                 },
                 ..crate::core::config::ExecutionConfig::default()
             },
-            tools: crate::core::config::ToolsConfig {
-                asset_studio_backend: crate::core::config::AssetStudioBackend::Cli,
-                ..crate::core::config::ToolsConfig::default()
-            },
+            tools: crate::core::config::ToolsConfig::default(),
             ..AppConfig::default()
         };
         let request = AssetUpdateRequest {
@@ -2305,7 +2300,10 @@ mod tests {
         };
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
-        let summary = executor.execute(&config, None, None).await.unwrap();
+        let summary = executor
+            .prefetch_asset_bundles(&config, None, None)
+            .await
+            .unwrap();
 
         assert_eq!(summary.completed_downloads, 1);
         assert_eq!(info_hits.load(Ordering::SeqCst), 3);

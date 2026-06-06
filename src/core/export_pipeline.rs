@@ -26,8 +26,8 @@ use tracing::{debug, info, warn};
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
 use crate::core::config::{
-    AppConfig, AssetStudioBackend, AssetStudioNativeCallMode, ConcurrencyConfig, MediaBackend,
-    RegionConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
+    AppConfig, AssetStudioNativeCallMode, ConcurrencyConfig, MediaBackend, RegionConfig,
+    DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
 };
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
@@ -36,7 +36,6 @@ use crate::core::media::{
     convert_usm_to_mp4_with_backend, convert_wav_bytes_to_flac_with_backend,
     convert_wav_bytes_to_mp3_with_backend, FrameRate,
 };
-use crate::core::retry::retry_async;
 use crate::core::storage::upload_to_all_storages;
 
 const NATIVE_AOT_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";
@@ -56,13 +55,6 @@ const NATIVE_AOT_FFI_CALL_STACK_SIZE: usize = 64 * 1024 * 1024;
 const ASSETSTUDIO_MANIFEST_LOCKS: usize = 64;
 const ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS: usize = 220;
 static ASSETSTUDIO_MANIFEST_APPEND_LOCKS: OnceLock<Vec<Mutex<()>>> = OnceLock::new();
-
-#[derive(Debug, Clone, Copy)]
-struct AssetStudioCliCapabilities {
-    filter_exclude_mode: bool,
-    filter_blacklist_mode: bool,
-    sekai_keep_single_container_filename: bool,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioNativeInspectRequest {
@@ -630,128 +622,32 @@ pub async fn export_unity_asset_bundle_payloads(
         output_dir.join(export_path)
     };
     let mut post_process_export_path = actual_export_path.clone();
-    let mut native_unitypy_summary = NativeUnityPyUnpackSummary::default();
-    let mut native_scoped_post_process = false;
 
-    match app_config.tools.asset_studio_backend {
-        AssetStudioBackend::Cli => {
-            let Some(asset_studio_cli_path) =
-                configured_path(app_config.tools.asset_studio_cli_path.as_deref())
-            else {
-                return Ok(UnityAssetBundlePayloadExport {
-                    export_path: actual_export_path,
-                    export_root: output_dir.to_path_buf(),
-                    ..UnityAssetBundlePayloadExport::default()
-                });
-            };
-            run_assetstudio_cli_export(
-                app_config,
-                region,
-                asset_bundle_file,
-                output_dir,
-                export_path,
-                &exclude_path_prefix,
-                asset_studio_cli_path,
-            )
-            .await?;
-        }
-        AssetStudioBackend::Native => {
-            let native_library_path =
-                configured_path(app_config.tools.asset_studio_native_library_path.as_deref())
-                    .ok_or_else(|| ExportPipelineError::AssetStudioNative {
-                        message:
-                            "tools.asset_studio_native_library_path is required for native backend"
-                                .to_string(),
-                    })?;
-            warn_ignored_native_unitypy_mode(app_config);
-            native_unitypy_summary = run_assetstudio_native_unitypy_unpack(
-                app_config,
-                region,
-                asset_bundle_file,
-                output_dir,
-                export_path,
-                &exclude_path_prefix,
-                native_library_path,
-            )
-            .await?;
-            native_scoped_post_process = true;
-            if region.export.by_category {
-                post_process_export_path = output_dir.to_path_buf();
-            }
-        }
-        AssetStudioBackend::Auto => {
-            if let Some(native_library_path) =
-                configured_path(app_config.tools.asset_studio_native_library_path.as_deref())
-            {
-                warn_ignored_native_unitypy_mode(app_config);
-                let native_result = run_assetstudio_native_unitypy_unpack(
-                    app_config,
-                    region,
-                    asset_bundle_file,
-                    output_dir,
-                    export_path,
-                    &exclude_path_prefix,
-                    native_library_path,
-                )
-                .await;
-                match native_result {
-                    Ok(summary) => {
-                        native_unitypy_summary = summary;
-                        native_scoped_post_process = true;
-                        if region.export.by_category {
-                            post_process_export_path = output_dir.to_path_buf();
-                        }
-                    }
-                    Err(error) => {
-                        if let Some(asset_studio_cli_path) =
-                            configured_path(app_config.tools.asset_studio_cli_path.as_deref())
-                        {
-                            warn!(
-                                error = %error,
-                                "assetstudio native backend failed; falling back to cli backend"
-                            );
-                            run_assetstudio_cli_export(
-                                app_config,
-                                region,
-                                asset_bundle_file,
-                                output_dir,
-                                export_path,
-                                &exclude_path_prefix,
-                                asset_studio_cli_path,
-                            )
-                            .await?;
-                        } else {
-                            return Err(error);
-                        }
-                    }
-                }
-            } else if let Some(asset_studio_cli_path) =
-                configured_path(app_config.tools.asset_studio_cli_path.as_deref())
-            {
-                run_assetstudio_cli_export(
-                    app_config,
-                    region,
-                    asset_bundle_file,
-                    output_dir,
-                    export_path,
-                    &exclude_path_prefix,
-                    asset_studio_cli_path,
-                )
-                .await?;
-            } else {
-                return Ok(UnityAssetBundlePayloadExport {
-                    export_path: actual_export_path,
-                    export_root: output_dir.to_path_buf(),
-                    ..UnityAssetBundlePayloadExport::default()
-                });
-            }
-        }
+    let native_library_path = configured_path(
+        app_config.tools.asset_studio_native_library_path.as_deref(),
+    )
+    .ok_or_else(|| ExportPipelineError::AssetStudioNative {
+        message: "tools.asset_studio_native_library_path is required".to_string(),
+    })?;
+    warn_ignored_native_unitypy_mode(app_config);
+    let native_unitypy_summary = run_assetstudio_native_unitypy_unpack(
+        app_config,
+        region,
+        asset_bundle_file,
+        output_dir,
+        export_path,
+        &exclude_path_prefix,
+        native_library_path,
+    )
+    .await?;
+    if region.export.by_category {
+        post_process_export_path = output_dir.to_path_buf();
     }
 
     Ok(UnityAssetBundlePayloadExport {
         export_path: post_process_export_path,
         export_root: output_dir.to_path_buf(),
-        native_scoped_post_process,
+        native_scoped_post_process: true,
         native_written_files: native_unitypy_summary.written_files,
         native_acb_sources: native_unitypy_summary.acb_sources,
         native_export_phase_ms: native_unitypy_summary.phase_ms,
@@ -770,53 +666,6 @@ fn warn_ignored_native_unitypy_mode(app_config: &AppConfig) {
             "tools.asset_studio_native_unitypy_mode=false is ignored; native backend now always uses object-level context_read_objects"
         );
     }
-}
-
-async fn run_assetstudio_cli_export(
-    app_config: &AppConfig,
-    region: &RegionConfig,
-    asset_bundle_file: &Path,
-    output_dir: &Path,
-    export_path: &str,
-    exclude_path_prefix: &str,
-    asset_studio_cli_path: &str,
-) -> Result<(), ExportPipelineError> {
-    let capabilities = detect_assetstudio_cli_capabilities(asset_studio_cli_path);
-    let args = build_assetstudio_export_args(
-        asset_bundle_file,
-        output_dir,
-        export_path,
-        exclude_path_prefix,
-        region,
-        capabilities,
-    );
-
-    retry_async(
-        &app_config.execution.retry,
-        "assetstudio cli export",
-        |_| async {
-            let output = Command::new(asset_studio_cli_path)
-                .args(&args)
-                .output()
-                .await
-                .map_err(|source| ExportPipelineError::Spawn {
-                    program: asset_studio_cli_path.to_string(),
-                    source,
-                })?;
-
-            if output.status.success() {
-                Ok(())
-            } else {
-                Err(ExportPipelineError::CommandFailed {
-                    program: asset_studio_cli_path.to_string(),
-                    status: output.status.to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                })
-            }
-        },
-        is_retryable_command_error,
-    )
-    .await
 }
 
 async fn run_assetstudio_native_unitypy_unpack(
@@ -3533,7 +3382,7 @@ fn assetstudio_object_mode_known_unreadable_type(asset_type: &str) -> bool {
     )
 }
 
-fn assetstudio_cli_export_type_name(asset_type: &str) -> Option<&'static str> {
+fn assetstudio_export_type_selector(asset_type: &str) -> Option<&'static str> {
     match asset_type.trim().to_ascii_lowercase().as_str() {
         "texture2d" | "tex2d" => Some("tex2d"),
         "texture2darray" | "tex2darray" | "tex2d_array" => Some("tex2dArray"),
@@ -7938,89 +7787,11 @@ fn write_native_rgba_ir_to_png_file_fast(
         })
 }
 
-fn is_retryable_command_error(err: &ExportPipelineError) -> bool {
-    match err {
-        ExportPipelineError::Spawn { source, .. } => matches!(
-            source.kind(),
-            std::io::ErrorKind::Interrupted
-                | std::io::ErrorKind::TimedOut
-                | std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::BrokenPipe
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionAborted
-                | std::io::ErrorKind::ConnectionRefused
-        ),
-        ExportPipelineError::CommandFailed { .. } => true,
-        _ => false,
-    }
-}
-
-fn build_assetstudio_export_args(
-    asset_bundle_file: &Path,
-    output_dir: &Path,
-    export_path: &str,
-    exclude_path_prefix: &str,
-    region: &RegionConfig,
-    capabilities: AssetStudioCliCapabilities,
-) -> Vec<String> {
-    let mut args = vec![
-        asset_bundle_file.to_string_lossy().to_string(),
-        "-m".to_string(),
-        "export".to_string(),
-        "-t".to_string(),
-        asset_studio_export_types(region),
-        "-g".to_string(),
-        get_export_group(export_path).to_string(),
-        "-f".to_string(),
-        "assetName".to_string(),
-        "-o".to_string(),
-        output_dir.to_string_lossy().to_string(),
-        "--strip-path-prefix".to_string(),
-        exclude_path_prefix.to_string(),
-        "-r".to_string(),
-    ];
-
-    if capabilities.filter_exclude_mode {
-        args.push("--filter-exclude-mode".to_string());
-    } else if capabilities.filter_blacklist_mode {
-        args.push("--filter-blacklist-mode".to_string());
-    }
-
-    args.push("--filter-with-regex".to_string());
-
-    if capabilities.sekai_keep_single_container_filename {
-        args.push("--sekai-keep-single-container-filename".to_string());
-    }
-
-    if !region.runtime.unity_version.is_empty() {
-        args.push("--unity-version".to_string());
-        args.push(region.runtime.unity_version.clone());
-    }
-
-    let mut excluded_exts = Vec::new();
-    if !region.export.usm.export {
-        excluded_exts.push("usm");
-    }
-    if !region.export.acb.export {
-        excluded_exts.push("acb");
-    }
-    if !excluded_exts.is_empty() {
-        args.push("--filter-by-name".to_string());
-        args.push(format!(r".*\.({})$", excluded_exts.join("|")));
-    }
-
-    args
-}
-
-fn asset_studio_export_types(region: &RegionConfig) -> String {
-    asset_studio_export_type_list(region).join(",")
-}
-
 fn asset_studio_export_type_list(region: &RegionConfig) -> Vec<String> {
     let mut export_types = Vec::new();
     for asset_type in &region.export.asset_studio_types {
         let asset_type = asset_type.trim();
-        let asset_type = assetstudio_cli_export_type_name(asset_type).unwrap_or(asset_type);
+        let asset_type = assetstudio_export_type_selector(asset_type).unwrap_or(asset_type);
         if asset_type.is_empty() || export_types.iter().any(|value| value == asset_type) {
             continue;
         }
@@ -8035,49 +7806,6 @@ fn asset_studio_export_type_list(region: &RegionConfig) -> Vec<String> {
     } else {
         export_types
     }
-}
-
-fn detect_assetstudio_cli_capabilities(asset_studio_cli_path: &str) -> AssetStudioCliCapabilities {
-    static CACHE: std::sync::OnceLock<
-        Mutex<std::collections::HashMap<String, AssetStudioCliCapabilities>>,
-    > = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-
-    if let Some(cached) = cache.lock().unwrap().get(asset_studio_cli_path).copied() {
-        return cached;
-    }
-
-    let fallback = AssetStudioCliCapabilities {
-        filter_exclude_mode: true,
-        filter_blacklist_mode: false,
-        sekai_keep_single_container_filename: true,
-    };
-
-    let detected = match std::process::Command::new(asset_studio_cli_path)
-        .arg("--help")
-        .output()
-    {
-        Ok(output) => {
-            let help = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            AssetStudioCliCapabilities {
-                filter_exclude_mode: help.contains("--filter-exclude-mode"),
-                filter_blacklist_mode: help.contains("--filter-blacklist-mode"),
-                sekai_keep_single_container_filename: help
-                    .contains("--sekai-keep-single-container-filename"),
-            }
-        }
-        Err(_) => fallback,
-    };
-
-    cache
-        .lock()
-        .unwrap()
-        .insert(asset_studio_cli_path.to_string(), detected);
-    detected
 }
 
 fn run_path_tasks<F>(
@@ -8304,21 +8032,20 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::core::config::{
-        AppConfig, AssetStudioBackend, ChartHashConfig, GitSyncConfig, MediaBackend, RegionConfig,
-        RegionExportConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
-        RegionUploadConfig, RetryConfig, StorageConfig,
+        AppConfig, ChartHashConfig, GitSyncConfig, MediaBackend, RegionConfig, RegionExportConfig,
+        RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig,
+        RetryConfig, StorageConfig,
     };
     use crate::core::errors::ExportPipelineError;
 
     use super::{
-        acquire_cpu_budget_permit_blocking, assetstudio_cli_export_type_name,
+        acquire_cpu_budget_permit_blocking, assetstudio_export_type_selector,
         assetstudio_fix_file_name, assetstudio_object_mode_supported_type,
-        assetstudio_type_selector_matches, build_assetstudio_export_args,
-        close_assetstudio_native_context, convert_native_surrogate_images_to_png,
-        extract_unity_asset_bundle, get_export_group, handle_png_conversion,
-        inspect_assetstudio_native_bundle, merge_usm_files, native_read_batch_size_for_assets,
-        native_read_kind_for_asset, native_skipped_unsupported_asset,
-        open_assetstudio_native_context,
+        assetstudio_type_selector_matches, close_assetstudio_native_context,
+        convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
+        handle_png_conversion, inspect_assetstudio_native_bundle, merge_usm_files,
+        native_read_batch_size_for_assets, native_read_kind_for_asset,
+        native_skipped_unsupported_asset, open_assetstudio_native_context,
         parse_assetstudio_native_context_list_objects_worker_output,
         parse_assetstudio_native_object_read_batch_worker_output_recoverable,
         parse_assetstudio_native_object_read_worker_output_recoverable, parse_payload_bundle,
@@ -8329,13 +8056,12 @@ mod tests {
         text_asset_public_bytes_target, unitypy_object_output_extension,
         unitypy_object_output_path, write_assetstudio_export_manifest_entry,
         write_native_image_payload_final_files, write_unitypy_object_payload,
-        AssetStudioCliCapabilities, AssetStudioNativeAssetInfo,
-        AssetStudioNativeContextCloseRequest, AssetStudioNativeInspectRequest,
-        AssetStudioNativeObjectReadOutput, AssetStudioNativeObjectReadResponse,
-        AssetStudioNativeResponse, AssetStudioNativeVersion, NativeBatchPhaseStats,
-        NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
-        NativeSemanticExportPathState, NativeUnityPyUnpackOptions, NativeUnityPyUnpackSummary,
-        NativeWorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+        AssetStudioNativeAssetInfo, AssetStudioNativeContextCloseRequest,
+        AssetStudioNativeInspectRequest, AssetStudioNativeObjectReadOutput,
+        AssetStudioNativeObjectReadResponse, AssetStudioNativeResponse, AssetStudioNativeVersion,
+        NativeBatchPhaseStats, NativeObjectReadBatchParseOutput, NativeObjectReadParseResult,
+        NativeObjectReadPlanStats, NativeSemanticExportPathState, NativeUnityPyUnpackOptions,
+        NativeUnityPyUnpackSummary, NativeWorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
         NATIVE_AOT_DEFAULT_IMAGE_FORMAT, NATIVE_AOT_FAST_IMAGE_FORMAT,
         NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
     };
@@ -8988,7 +8714,6 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let config = AppConfig {
             tools: crate::core::config::ToolsConfig {
                 ffmpeg_path: std::env::var("FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".to_string()),
-                asset_studio_cli_path: None,
                 ..crate::core::config::ToolsConfig::default()
             },
             storage: StorageConfig {
@@ -9107,69 +8832,6 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
     }
 
     #[test]
-    fn extract_unity_asset_bundle_invokes_cli_and_post_processes_outputs() {
-        std::thread::Builder::new()
-            .name("fake-assetstudio-cli".to_string())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(|| {
-                let source_usm = sample_path("0703.usm");
-                let source_acb = sample_path("se_0126_01.acb");
-                if !source_usm.exists() || !source_acb.exists() {
-                    return;
-                }
-
-                let dir = tempdir().unwrap();
-                let output_dir = dir.path().join("out");
-                fs::create_dir_all(&output_dir).unwrap();
-                let fake_bundle = dir.path().join("bundle.bin");
-                fs::write(&fake_bundle, b"bundle").unwrap();
-                let script_path = dir.path().join("fake_assetstudio.sh");
-                let export_path = "test/export";
-
-                let script = format!(
-                    "#!/bin/sh\nset -eu\nOUT=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then\n    OUT=\"$2\"\n    shift 2\n  else\n    shift\n  fi\ndone\nmkdir -p \"$OUT/{export_path}\"\ncp \"{}\" \"$OUT/{export_path}/0703.usm\"\ncp \"{}\" \"$OUT/{export_path}/se_0126_01.acb\"\n",
-                    source_usm.display(),
-                    source_acb.display()
-                );
-                fs::write(&script_path, script).unwrap();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(&script_path).unwrap().permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&script_path, perms).unwrap();
-                }
-
-                let (mut config, region) = processing_config();
-                config.tools.asset_studio_backend = AssetStudioBackend::Cli;
-                config.tools.asset_studio_cli_path = Some(script_path.to_string_lossy().into_owned());
-
-                let runtime = tokio::runtime::Runtime::new().unwrap();
-                let summary = runtime
-                    .block_on(extract_unity_asset_bundle(
-                        &config,
-                        "jp",
-                        &region,
-                        &fake_bundle,
-                        export_path,
-                        &output_dir,
-                        "StartApp",
-                    ))
-                    .unwrap();
-
-                assert!(output_dir.join(export_path).join("0703.m2v").exists());
-                assert!(output_dir
-                    .join(export_path)
-                    .join("se_0126_01_BGM.wav")
-                    .exists());
-                assert!(!summary.generated_files.is_empty());
-            })
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    #[test]
     fn native_backend_queries_version_through_typed_capabilities() {
         let _env_lock = native_shim_env_lock();
         let dir = tempdir().unwrap();
@@ -9255,8 +8917,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
         let fake_bundle = dir.path().join("bundle.bin");
         fs::write(&fake_bundle, b"bundle").unwrap();
         let output_dir = dir.path().join("out");
-        let (mut config, region) = processing_config();
-        config.tools.asset_studio_backend = AssetStudioBackend::Native;
+        let (config, region) = processing_config();
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let err = runtime
@@ -9276,69 +8937,6 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             ExportPipelineError::AssetStudioNative { ref message }
                 if message.contains("asset_studio_native_library_path")
         ));
-    }
-
-    #[test]
-    fn auto_backend_falls_back_to_cli_when_native_load_fails() {
-        let dir = tempdir().unwrap();
-        let output_dir = dir.path().join("out");
-        let fake_bundle = dir.path().join("bundle.bin");
-        let script_path = dir.path().join("fake_assetstudio.sh");
-        fs::write(&fake_bundle, b"bundle").unwrap();
-        let script = r#"#!/bin/sh
-set -eu
-if [ "${1:-}" = "--help" ]; then
-  echo "--filter-exclude-mode --sekai-keep-single-container-filename"
-  exit 0
-fi
-OUT=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-o" ]; then
-    OUT="$2"
-    shift 2
-  else
-    shift
-  fi
-done
-mkdir -p "$OUT/fallback/path"
-printf fallback > "$OUT/fallback/path/done.txt"
-"#;
-        fs::write(&script_path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let (mut config, region) = processing_config();
-        config.tools.asset_studio_backend = AssetStudioBackend::Auto;
-        config.tools.asset_studio_native_library_path = Some(
-            dir.path()
-                .join("missing-native.so")
-                .to_string_lossy()
-                .into_owned(),
-        );
-        config.tools.asset_studio_cli_path = Some(script_path.to_string_lossy().into_owned());
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime
-            .block_on(extract_unity_asset_bundle(
-                &config,
-                "jp",
-                &region,
-                &fake_bundle,
-                "fallback/path",
-                &output_dir,
-                "StartApp",
-            ))
-            .unwrap();
-
-        assert_eq!(
-            fs::read_to_string(output_dir.join("fallback/path/done.txt")).unwrap(),
-            "fallback"
-        );
     }
 
     #[test]
@@ -10012,65 +9610,6 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
-    fn assetstudio_args_use_configured_export_types() {
-        let (_config, mut region) = processing_config();
-        region.export.asset_studio_types = vec![
-            "MonoBehaviour".to_string(),
-            "TextAsset".to_string(),
-            "font".to_string(),
-            "font".to_string(),
-            "VideoClip".to_string(),
-        ];
-        let args = build_assetstudio_export_args(
-            Path::new("/tmp/input.bundle"),
-            Path::new("/tmp/out"),
-            "event_story/foo",
-            "assets/sekai/assetbundle/resources",
-            &region,
-            AssetStudioCliCapabilities {
-                filter_exclude_mode: false,
-                filter_blacklist_mode: true,
-                sekai_keep_single_container_filename: false,
-            },
-        );
-        let type_arg = args
-            .iter()
-            .position(|arg| arg == "-t")
-            .and_then(|index| args.get(index + 1))
-            .unwrap();
-
-        assert_eq!(type_arg, "monoBehaviour,textAsset,font,video");
-    }
-
-    #[test]
-    fn assetstudio_args_fall_back_to_default_export_types() {
-        let (_config, mut region) = processing_config();
-        region.export.asset_studio_types = vec![" ".to_string()];
-        let args = build_assetstudio_export_args(
-            Path::new("/tmp/input.bundle"),
-            Path::new("/tmp/out"),
-            "event_story/foo",
-            "assets/sekai/assetbundle/resources",
-            &region,
-            AssetStudioCliCapabilities {
-                filter_exclude_mode: false,
-                filter_blacklist_mode: true,
-                sekai_keep_single_container_filename: false,
-            },
-        );
-        let type_arg = args
-            .iter()
-            .position(|arg| arg == "-t")
-            .and_then(|index| args.get(index + 1))
-            .unwrap();
-
-        assert_eq!(
-            type_arg,
-            "monoBehaviour,textAsset,tex2d,tex2dArray,sprite,audio"
-        );
-    }
-
-    #[test]
     fn native_object_mode_supports_assetstudio_export_type_parity() {
         for asset_type in [
             "Texture2D",
@@ -10100,7 +9639,7 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
-    fn native_object_mode_selectors_match_cli_aliases_and_class_names() {
+    fn native_object_mode_selectors_match_short_aliases_and_class_names() {
         assert!(assetstudio_type_selector_matches("tex2d", "Texture2D"));
         assert!(assetstudio_type_selector_matches(
             "monoBehaviour",
@@ -10762,27 +10301,27 @@ printf fallback > "$OUT/fallback/path/done.txt"
     }
 
     #[test]
-    fn assetstudio_type_names_accept_cli_and_class_aliases() {
-        assert_eq!(assetstudio_cli_export_type_name("Texture2D"), Some("tex2d"));
-        assert_eq!(assetstudio_cli_export_type_name("tex2d"), Some("tex2d"));
+    fn assetstudio_type_names_accept_short_and_class_aliases() {
+        assert_eq!(assetstudio_export_type_selector("Texture2D"), Some("tex2d"));
+        assert_eq!(assetstudio_export_type_selector("tex2d"), Some("tex2d"));
         assert_eq!(
-            assetstudio_cli_export_type_name("Texture2DArray"),
+            assetstudio_export_type_selector("Texture2DArray"),
             Some("tex2dArray")
         );
         assert_eq!(
-            assetstudio_cli_export_type_name("MonoBehavior"),
+            assetstudio_export_type_selector("MonoBehavior"),
             Some("monoBehaviour")
         );
-        assert_eq!(assetstudio_cli_export_type_name("AudioClip"), Some("audio"));
+        assert_eq!(assetstudio_export_type_selector("AudioClip"), Some("audio"));
         assert_eq!(
-            assetstudio_cli_export_type_name("MovieTexture"),
+            assetstudio_export_type_selector("MovieTexture"),
             Some("movieTexture")
         );
         assert_eq!(
-            assetstudio_cli_export_type_name("Animator"),
+            assetstudio_export_type_selector("Animator"),
             Some("animator")
         );
-        assert_eq!(assetstudio_cli_export_type_name("GameObject"), None);
+        assert_eq!(assetstudio_export_type_selector("GameObject"), None);
     }
 
     #[test]
@@ -11427,50 +10966,5 @@ printf fallback > "$OUT/fallback/path/done.txt"
                 .get("read_batch.payload_bytes_by_kind.text_bytes"),
             Some(&3)
         );
-    }
-
-    #[test]
-    fn assetstudio_args_use_blacklist_mode_when_new_cli_is_detected() {
-        let (_config, region) = processing_config();
-        let args = build_assetstudio_export_args(
-            Path::new("/tmp/input.bundle"),
-            Path::new("/tmp/out"),
-            "event_story/foo",
-            "assets/sekai/assetbundle/resources",
-            &region,
-            AssetStudioCliCapabilities {
-                filter_exclude_mode: false,
-                filter_blacklist_mode: true,
-                sekai_keep_single_container_filename: false,
-            },
-        );
-
-        assert!(args.iter().any(|arg| arg == "--filter-blacklist-mode"));
-        assert!(!args.iter().any(|arg| arg == "--filter-exclude-mode"));
-        assert!(!args
-            .iter()
-            .any(|arg| arg == "--sekai-keep-single-container-filename"));
-    }
-
-    #[test]
-    fn assetstudio_args_keep_legacy_flags_when_supported() {
-        let (_config, region) = processing_config();
-        let args = build_assetstudio_export_args(
-            Path::new("/tmp/input.bundle"),
-            Path::new("/tmp/out"),
-            "event_story/foo",
-            "assets/sekai/assetbundle/resources",
-            &region,
-            AssetStudioCliCapabilities {
-                filter_exclude_mode: true,
-                filter_blacklist_mode: false,
-                sekai_keep_single_container_filename: true,
-            },
-        );
-
-        assert!(args.iter().any(|arg| arg == "--filter-exclude-mode"));
-        assert!(args
-            .iter()
-            .any(|arg| arg == "--sekai-keep-single-container-filename"));
     }
 }

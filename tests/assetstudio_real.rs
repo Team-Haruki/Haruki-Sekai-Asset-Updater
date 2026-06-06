@@ -3,9 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, AssetStudioBackend, ChartHashConfig, GitSyncConfig, RegionConfig,
-    RegionExportConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
-    RegionUploadConfig, RetryConfig, StorageConfig,
+    AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionExportConfig, RegionPathsConfig,
+    RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::extract_unity_asset_bundle;
 use haruki_sekai_asset_updater::{
@@ -24,24 +23,12 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 }
 
 #[test]
-fn real_assetstudio_cli_exports_expected_file_when_configured() {
-    let Some(asset_studio_cli_path) = required_env("ASSET_STUDIO_CLI_PATH") else {
-        return;
-    };
-    run_real_assetstudio_export(AssetStudioBackend::Cli, Some(asset_studio_cli_path), None);
-}
-
-#[test]
 fn real_assetstudio_native_exports_expected_file_when_configured() {
     let Some(asset_studio_native_library_path) = required_env("ASSET_STUDIO_NATIVE_LIBRARY_PATH")
     else {
         return;
     };
-    run_real_assetstudio_export(
-        AssetStudioBackend::Native,
-        None,
-        Some(asset_studio_native_library_path),
-    );
+    run_real_assetstudio_export(asset_studio_native_library_path);
 }
 
 #[test]
@@ -105,11 +92,7 @@ fn real_assetstudio_native_client_reads_object_when_configured() {
     context.close().unwrap();
 }
 
-fn run_real_assetstudio_export(
-    backend: AssetStudioBackend,
-    asset_studio_cli_path: Option<String>,
-    asset_studio_native_library_path: Option<String>,
-) {
+fn run_real_assetstudio_export(asset_studio_native_library_path: String) {
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
         return;
     };
@@ -172,9 +155,7 @@ fn run_real_assetstudio_export(
     let config = AppConfig {
         tools: haruki_sekai_asset_updater::core::config::ToolsConfig {
             ffmpeg_path: "ffmpeg".to_string(),
-            asset_studio_backend: backend,
-            asset_studio_cli_path,
-            asset_studio_native_library_path,
+            asset_studio_native_library_path: Some(asset_studio_native_library_path),
             ..haruki_sekai_asset_updater::core::config::ToolsConfig::default()
         },
         storage: StorageConfig {

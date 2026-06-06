@@ -153,10 +153,6 @@ impl AppConfig {
             &mut self.server.auth.bearer_token,
         )?;
         resolve_secret_env(
-            "tools.asset_studio_cli_path",
-            &mut self.tools.asset_studio_cli_path,
-        )?;
-        resolve_secret_env(
             "tools.asset_studio_native_library_path",
             &mut self.tools.asset_studio_native_library_path,
         )?;
@@ -164,9 +160,6 @@ impl AppConfig {
             "tools.asset_studio_native_worker_path",
             &mut self.tools.asset_studio_native_worker_path,
         )?;
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_BACKEND") {
-            self.tools.asset_studio_backend = value.parse()?;
-        }
         if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
             self.tools.media_backend = value.parse()?;
         }
@@ -372,16 +365,6 @@ fn validate_asset_studio_native_read_kinds(
 }
 
 fn warn_legacy_backend_options(tools: &ToolsConfig) {
-    match tools.asset_studio_backend {
-        AssetStudioBackend::Native => {}
-        AssetStudioBackend::Cli => {
-            tracing::warn!("tools.asset_studio_backend=cli is legacy; production should use native")
-        }
-        AssetStudioBackend::Auto => tracing::warn!(
-            "tools.asset_studio_backend=auto is legacy fallback mode; production should use native"
-        ),
-    }
-
     match tools.media_backend {
         MediaBackend::Ffi => {}
         MediaBackend::Cli => {
@@ -520,8 +503,6 @@ impl Default for AccessLogConfig {
 pub struct ToolsConfig {
     pub ffmpeg_path: String,
     pub media_backend: MediaBackend,
-    pub asset_studio_backend: AssetStudioBackend,
-    pub asset_studio_cli_path: Option<String>,
     pub asset_studio_native_library_path: Option<String>,
     pub asset_studio_native_call_mode: AssetStudioNativeCallMode,
     pub asset_studio_native_worker_path: Option<String>,
@@ -555,32 +536,6 @@ impl FromStr for MediaBackend {
                 field: "tools.media_backend".to_string(),
                 value: other.to_string(),
                 expected: "auto, ffi, or cli".to_string(),
-            }),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AssetStudioBackend {
-    Cli,
-    #[default]
-    Native,
-    Auto,
-}
-
-impl FromStr for AssetStudioBackend {
-    type Err = ConfigError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_lowercase().as_str() {
-            "cli" => Ok(Self::Cli),
-            "native" => Ok(Self::Native),
-            "auto" => Ok(Self::Auto),
-            other => Err(ConfigError::InvalidValue {
-                field: "tools.asset_studio_backend".to_string(),
-                value: other.to_string(),
-                expected: "cli, native, or auto".to_string(),
             }),
         }
     }
@@ -665,8 +620,6 @@ impl Default for ToolsConfig {
         Self {
             ffmpeg_path: "ffmpeg".to_string(),
             media_backend: MediaBackend::Ffi,
-            asset_studio_backend: AssetStudioBackend::Native,
-            asset_studio_cli_path: None,
             asset_studio_native_library_path: None,
             asset_studio_native_call_mode: AssetStudioNativeCallMode::Pool,
             asset_studio_native_worker_path: None,
@@ -1140,15 +1093,13 @@ regions:
     }
 
     #[test]
-    fn asset_studio_backend_defaults_to_double_ffi() {
+    fn asset_studio_and_media_default_to_ffi() {
         let tools = AppConfig::default().tools;
         assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
-        assert_eq!(AssetStudioBackend::default(), AssetStudioBackend::Native);
         assert_eq!(
             AssetStudioNativeCallMode::default(),
             AssetStudioNativeCallMode::Pool
         );
-        assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Native);
         assert_eq!(tools.media_backend, MediaBackend::Ffi);
         assert_eq!(
             tools.asset_studio_native_call_mode,
@@ -1171,11 +1122,9 @@ regions:
     }
 
     #[test]
-    fn parses_asset_studio_backend_variants() {
+    fn parses_asset_studio_native_options() {
         let yaml = r#"
 media_backend: ffi
-asset_studio_backend: native
-asset_studio_cli_path: /tmp/assetstudio-cli
 asset_studio_native_library_path: /tmp/libHarukiAssetStudioFFI.so
 asset_studio_native_call_mode: process
 asset_studio_native_worker_path: /tmp/assetstudio-native-worker
@@ -1190,7 +1139,6 @@ asset_studio_native_read_kinds:
 "#;
         let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
         assert_eq!(tools.media_backend, MediaBackend::Ffi);
-        assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Native);
         assert_eq!(
             tools.asset_studio_native_library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
@@ -1224,12 +1172,6 @@ asset_studio_native_read_kinds:
                 .map(String::as_str),
             Some("typetree_json")
         );
-
-        let yaml = r#"
-asset_studio_backend: auto
-"#;
-        let tools: ToolsConfig = yaml_serde::from_str(yaml).unwrap();
-        assert_eq!(tools.asset_studio_backend, AssetStudioBackend::Auto);
     }
 
     #[test]
@@ -1241,16 +1183,6 @@ asset_studio_backend: auto
             err,
             ConfigError::InvalidValue { field, value, .. }
                 if field == "tools.media_backend" && value == "sidecar"
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_asset_studio_backend() {
-        let err = "sidecar".parse::<AssetStudioBackend>().unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "tools.asset_studio_backend" && value == "sidecar"
         ));
     }
 
@@ -1360,7 +1292,6 @@ asset_studio_types:
         );
         std::env::set_var("HARUKI_TEST_AES_IV_HEX", "0102030405060708090a0b0c0d0e0f10");
         std::env::set_var("HARUKI_TEST_BEARER_TOKEN", "secret-token");
-        std::env::set_var("HARUKI_TEST_ASSET_STUDIO_CLI_PATH", "/tmp/assetstudio");
         std::env::set_var(
             "HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
             "/tmp/libassetstudio-native.so",
@@ -1382,7 +1313,6 @@ logging:
   access:
     format: "[${{time}}] ${{status}}"
 tools:
-  asset_studio_cli_path: "${{env:HARUKI_TEST_ASSET_STUDIO_CLI_PATH}}"
   asset_studio_native_library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH}}"
   asset_studio_native_worker_path: "${{env:HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH}}"
 regions:
@@ -1416,10 +1346,6 @@ regions:
             Some("0102030405060708090a0b0c0d0e0f10")
         );
         assert_eq!(
-            config.tools.asset_studio_cli_path.as_deref(),
-            Some("/tmp/assetstudio")
-        );
-        assert_eq!(
             config.tools.asset_studio_native_library_path.as_deref(),
             Some("/tmp/libassetstudio-native.so")
         );
@@ -1432,7 +1358,6 @@ regions:
         std::env::remove_var("HARUKI_TEST_AES_KEY_HEX");
         std::env::remove_var("HARUKI_TEST_AES_IV_HEX");
         std::env::remove_var("HARUKI_TEST_BEARER_TOKEN");
-        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_CLI_PATH");
         std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_NATIVE_LIBRARY_PATH");
         std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_NATIVE_WORKER_PATH");
     }
@@ -1440,7 +1365,6 @@ regions:
     #[test]
     fn load_from_path_applies_asset_studio_env_overrides() {
         let _env_lock = env_lock();
-        let old_backend = std::env::var("HARUKI_ASSET_STUDIO_BACKEND").ok();
         let old_media_backend = std::env::var("HARUKI_MEDIA_BACKEND").ok();
         let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH").ok();
         let old_call_mode = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE").ok();
@@ -1460,7 +1384,6 @@ regions:
         let old_cpu_throttle_sample_ms = std::env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS").ok();
         let old_max_in_flight_bundle_bytes =
             std::env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES").ok();
-        std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", "auto");
         std::env::set_var("HARUKI_MEDIA_BACKEND", "cli");
         std::env::set_var(
             "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
@@ -1490,7 +1413,6 @@ regions:
             r#"
 config_version: 2
 tools:
-  asset_studio_backend: cli
   asset_studio_native_library_path: /tmp/config-native.so
   asset_studio_native_call_mode: direct
   asset_studio_native_worker_path: /tmp/config-native-worker
@@ -1503,7 +1425,6 @@ tools:
         .unwrap();
 
         let config = AppConfig::load_from_path(file.path()).unwrap();
-        assert_eq!(config.tools.asset_studio_backend, AssetStudioBackend::Auto);
         assert_eq!(config.tools.media_backend, MediaBackend::Cli);
         assert_eq!(
             config.tools.asset_studio_native_library_path.as_deref(),
@@ -1533,10 +1454,6 @@ tools:
         assert_eq!(config.concurrency.cpu_throttle_sample_ms, 500);
         assert_eq!(config.execution.max_in_flight_bundle_bytes, 1_048_576);
 
-        match old_backend {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_BACKEND", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_BACKEND"),
-        }
         match old_media_backend {
             Some(value) => std::env::set_var("HARUKI_MEDIA_BACKEND", value),
             None => std::env::remove_var("HARUKI_MEDIA_BACKEND"),

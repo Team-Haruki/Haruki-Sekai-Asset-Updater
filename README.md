@@ -18,8 +18,8 @@
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and `git2-rs` chart sync
 - Uses a pure Rust WebP encoder for PNG to WebP conversion
 - Uses the double-FFI production path by default: AssetStudio NativeAOT worker
-  pool plus FFmpeg/rsmpeg FFI. CLI backends remain as legacy test/fallback
-  paths.
+  pool plus FFmpeg/rsmpeg FFI. FFmpeg CLI remains available as a media
+  fallback/test path.
 
 ## Layout
 
@@ -37,7 +37,6 @@
 - Sensitive config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
 - The loader resolves this syntax for:
   `server.auth.bearer_token`,
-  `tools.asset_studio_cli_path`,
   `tools.asset_studio_native_library_path`,
   `tools.asset_studio_native_worker_path`,
   `storage.providers[].access_key`,
@@ -47,8 +46,6 @@
   `regions.*.crypto.aes_iv_hex`.
 - Tracked config templates expect values such as:
   `HARUKI_MEDIA_BACKEND`,
-  `HARUKI_ASSET_STUDIO_CLI_PATH`,
-  `HARUKI_ASSET_STUDIO_BACKEND`,
   `HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH`,
   `HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE`,
   `HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH`,
@@ -79,7 +76,6 @@ cp haruki-asset-configs.example.yaml haruki-asset-configs.yaml
 ```bash
 cp .env.example .env
 export HARUKI_MEDIA_BACKEND=ffi
-export HARUKI_ASSET_STUDIO_BACKEND=native
 export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
 export HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/path/to/assetstudio_native_worker
 export HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE=pool
