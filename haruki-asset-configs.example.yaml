@@ -155,6 +155,9 @@ regions:
     upload:
       enabled: false
       providers: []
+      public_read:
+        include: []
+        exclude: []
       remove_local_after_upload: false
 
   cn:
@@ -206,4 +209,7 @@ regions:
     upload:
       enabled: false
       providers: []
+      public_read:
+        include: []
+        exclude: []
       remove_local_after_upload: false

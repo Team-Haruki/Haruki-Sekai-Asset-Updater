@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use opendal::Operator;
+use regex::Regex;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -27,14 +28,24 @@ struct ResolvedStorageProvider {
 #[derive(Clone)]
 pub struct StorageOperatorTarget {
     pub provider: String,
+    pub scheme: String,
     pub operator: Operator,
+    pub public_operator: Option<Operator>,
 }
 
 pub struct StorageUploadOptions<'a> {
     pub selected_providers: &'a [String],
+    pub public_read_include: &'a [String],
+    pub public_read_exclude: &'a [String],
     pub remove_local: bool,
     pub concurrency: usize,
     pub retry: &'a RetryConfig,
+}
+
+#[derive(Debug)]
+struct PublicReadMatcher {
+    include: Vec<Regex>,
+    exclude: Vec<Regex>,
 }
 
 pub fn build_storage_operator_targets(
@@ -93,6 +104,8 @@ pub async fn upload_to_all_storages(
     }
 
     let targets = build_storage_operator_targets(storage, region_name, options.selected_providers)?;
+    let public_read_matcher =
+        PublicReadMatcher::new(options.public_read_include, options.public_read_exclude)?;
 
     let semaphore = Arc::new(Semaphore::new(options.concurrency.max(1)));
     let mut tasks = JoinSet::new();
@@ -103,10 +116,12 @@ pub async fn upload_to_all_storages(
             let extracted_save_path = extracted_save_path.to_path_buf();
             let semaphore = semaphore.clone();
             let target = target.clone();
+            let public_read =
+                public_read_matcher.matches_file(extracted_save_path.as_ref(), file.as_path())?;
             let retry = options.retry.clone();
             tasks.spawn(async move {
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
-                upload_single_file(&target, &extracted_save_path, &file, &retry).await
+                upload_single_file(&target, &extracted_save_path, &file, public_read, &retry).await
             });
         }
     }
@@ -188,6 +203,7 @@ async fn upload_single_file(
     target: &StorageOperatorTarget,
     extracted_save_path: &Path,
     file_path: &Path,
+    public_read: bool,
     retry: &RetryConfig,
 ) -> Result<(), StorageError> {
     let remote_path = construct_remote_path(extracted_save_path, file_path)?;
@@ -205,7 +221,7 @@ async fn upload_single_file(
         retry,
         "storage upload",
         |_| {
-            let operator = target.operator.clone();
+            let operator = target.operator_for_file(public_read).clone();
             let remote_path = remote_path.clone();
             let content_type = content_type.clone();
             let content = content.clone();
@@ -238,17 +254,83 @@ fn build_operator_target(
 ) -> Result<StorageOperatorTarget, StorageError> {
     opendal::init_default_registry();
     let resolved = resolve_storage_provider(provider, region_name)?;
-    let operator = Operator::via_iter(&resolved.scheme, resolved.options).map_err(|source| {
-        StorageError::Provider {
-            provider: resolved.provider.clone(),
-            source,
-        }
-    })?;
+    let operator =
+        Operator::via_iter(&resolved.scheme, resolved.options.clone()).map_err(|source| {
+            StorageError::Provider {
+                provider: resolved.provider.clone(),
+                source,
+            }
+        })?;
+    let public_operator = if resolved.scheme == "s3" && !resolved.public_read {
+        let mut public_options = resolved.options.clone();
+        public_options.insert("default_acl".to_string(), "public-read".to_string());
+        Some(
+            Operator::via_iter(&resolved.scheme, public_options).map_err(|source| {
+                StorageError::Provider {
+                    provider: resolved.provider.clone(),
+                    source,
+                }
+            })?,
+        )
+    } else {
+        None
+    };
 
     Ok(StorageOperatorTarget {
         provider: resolved.provider,
+        scheme: resolved.scheme,
         operator,
+        public_operator,
     })
+}
+
+impl StorageOperatorTarget {
+    fn operator_for_file(&self, public_read: bool) -> &Operator {
+        if public_read && self.scheme == "s3" {
+            self.public_operator.as_ref().unwrap_or(&self.operator)
+        } else {
+            &self.operator
+        }
+    }
+}
+
+impl PublicReadMatcher {
+    fn new(include: &[String], exclude: &[String]) -> Result<Self, StorageError> {
+        Ok(Self {
+            include: compile_public_read_rules(include)?,
+            exclude: compile_public_read_rules(exclude)?,
+        })
+    }
+
+    fn matches_file(
+        &self,
+        extracted_save_path: &Path,
+        file_path: &Path,
+    ) -> Result<bool, StorageError> {
+        let remote_path = construct_remote_path(extracted_save_path, file_path)?;
+        Ok(self.matches_remote_path(&remote_path))
+    }
+
+    fn matches_remote_path(&self, remote_path: &str) -> bool {
+        if self.include.is_empty() {
+            return false;
+        }
+        self.include.iter().any(|rule| rule.is_match(remote_path))
+            && !self.exclude.iter().any(|rule| rule.is_match(remote_path))
+    }
+}
+
+fn compile_public_read_rules(patterns: &[String]) -> Result<Vec<Regex>, StorageError> {
+    patterns
+        .iter()
+        .filter(|pattern| !pattern.trim().is_empty())
+        .map(|pattern| {
+            Regex::new(pattern).map_err(|source| StorageError::InvalidPublicReadRule {
+                pattern: pattern.clone(),
+                source,
+            })
+        })
+        .collect()
 }
 
 fn selected_provider_configs<'a>(
@@ -482,11 +564,12 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::core::config::{RetryConfig, StorageConfig, StorageProviderConfig};
+    use crate::core::errors::StorageError;
 
     use super::{
         build_storage_operator_target, construct_endpoint_url, construct_remote_path,
         construct_storage_key, normalize_prefix, plan_storage_targets, resolve_bucket_template,
-        upload_to_all_storages, StorageUploadOptions,
+        upload_to_all_storages, PublicReadMatcher, StorageUploadOptions,
     };
 
     #[test]
@@ -620,6 +703,66 @@ mod tests {
     }
 
     #[test]
+    fn file_public_read_rules_match_relative_upload_paths() {
+        let matcher =
+            PublicReadMatcher::new(&["\\.(png|mp3)$".to_string()], &["^private/".to_string()])
+                .unwrap();
+
+        assert!(matcher.matches_remote_path("startapp/icon.png"));
+        assert!(matcher.matches_remote_path("ondemand/music/song.mp3"));
+        assert!(!matcher.matches_remote_path("startapp/data.json"));
+        assert!(!matcher.matches_remote_path("private/icon.png"));
+    }
+
+    #[test]
+    fn invalid_file_public_read_regex_is_reported() {
+        let err = PublicReadMatcher::new(&["[".to_string()], &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::InvalidPublicReadRule { ref pattern, .. } if pattern == "["
+        ));
+    }
+
+    #[test]
+    fn s3_target_builds_public_operator_for_file_level_rules() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("assets".to_string()),
+                scheme: "s3".to_string(),
+                endpoint: "s3.example.com".to_string(),
+                region: Some("us-east-1".to_string()),
+                bucket: "sekai-{region}-assets".to_string(),
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        let target = build_storage_operator_target(&storage, "assets", "jp").unwrap();
+
+        assert_eq!(target.scheme, "s3");
+        assert!(target.public_operator.is_some());
+    }
+
+    #[test]
+    fn provider_level_public_read_reuses_default_operator() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("assets".to_string()),
+                scheme: "s3".to_string(),
+                endpoint: "s3.example.com".to_string(),
+                region: Some("us-east-1".to_string()),
+                bucket: "sekai-{region}-assets".to_string(),
+                public_read: true,
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        let target = build_storage_operator_target(&storage, "assets", "jp").unwrap();
+
+        assert_eq!(target.scheme, "s3");
+        assert!(target.public_operator.is_none());
+    }
+
+    #[test]
     fn storage_targets_can_filter_selected_named_providers() {
         let storage = StorageConfig {
             providers: vec![
@@ -686,6 +829,8 @@ mod tests {
             std::slice::from_ref(&nested),
             StorageUploadOptions {
                 selected_providers: &[],
+                public_read_include: &[],
+                public_read_exclude: &[],
                 remove_local: false,
                 concurrency: 1,
                 retry: &RetryConfig {
@@ -737,6 +882,8 @@ mod tests {
             std::slice::from_ref(&nested),
             StorageUploadOptions {
                 selected_providers: &["backup".to_string()],
+                public_read_include: &[],
+                public_read_exclude: &[],
                 remove_local: false,
                 concurrency: 1,
                 retry: &RetryConfig {
@@ -772,6 +919,8 @@ mod tests {
             std::slice::from_ref(&file),
             StorageUploadOptions {
                 selected_providers: &["backup".to_string()],
+                public_read_include: &[],
+                public_read_exclude: &[],
                 remove_local: false,
                 concurrency: 1,
                 retry: &RetryConfig {
@@ -827,6 +976,8 @@ mod tests {
             std::slice::from_ref(&nested),
             StorageUploadOptions {
                 selected_providers: &["seaweed".to_string()],
+                public_read_include: &[],
+                public_read_exclude: &[],
                 remove_local: false,
                 concurrency: 1,
                 retry: &RetryConfig {

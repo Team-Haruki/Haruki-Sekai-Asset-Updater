@@ -6360,6 +6360,8 @@ pub async fn post_process_exported_files(
             &files,
             StorageUploadOptions {
                 selected_providers: &region.upload.providers,
+                public_read_include: &region.upload.public_read.include,
+                public_read_exclude: &region.upload.public_read.exclude,
                 remove_local: region.upload.remove_local_after_upload,
                 concurrency: concurrency.upload,
                 retry: &app_config.execution.retry,
@@ -8710,6 +8712,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             upload: RegionUploadConfig {
                 enabled: false,
                 providers: Vec::new(),
+                public_read: crate::core::config::UploadPublicReadConfig::default(),
                 remove_local_after_upload: false,
             },
             ..RegionConfig::default()

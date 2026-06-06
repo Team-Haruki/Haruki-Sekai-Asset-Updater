@@ -1404,7 +1404,15 @@ impl Default for AudioExportConfig {
 pub struct RegionUploadConfig {
     pub enabled: bool,
     pub providers: Vec<String>,
+    pub public_read: UploadPublicReadConfig,
     pub remove_local_after_upload: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct UploadPublicReadConfig {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 #[cfg(test)]

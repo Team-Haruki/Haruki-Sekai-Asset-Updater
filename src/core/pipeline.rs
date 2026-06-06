@@ -108,6 +108,7 @@ mod tests {
                 upload: RegionUploadConfig {
                     enabled: true,
                     providers: Vec::new(),
+                    public_read: crate::core::config::UploadPublicReadConfig::default(),
                     remove_local_after_upload: false,
                 },
                 ..RegionConfig::default()

@@ -337,6 +337,8 @@ fn benchmark_region(args: &Args) -> RegionConfig {
         upload: RegionUploadConfig {
             enabled: false,
             providers: Vec::new(),
+            public_read: haruki_sekai_asset_updater::core::config::UploadPublicReadConfig::default(
+            ),
             remove_local_after_upload: false,
         },
         ..RegionConfig::default()

@@ -174,6 +174,8 @@ fn run_real_assetstudio_export(asset_studio_native_library_path: String) {
         upload: RegionUploadConfig {
             enabled: false,
             providers: Vec::new(),
+            public_read: haruki_sekai_asset_updater::core::config::UploadPublicReadConfig::default(
+            ),
             remove_local_after_upload: false,
         },
         ..RegionConfig::default()

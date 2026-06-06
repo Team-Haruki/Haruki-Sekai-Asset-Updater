@@ -76,6 +76,27 @@ For S3-compatible providers, `public_read: true` maps to OpenDAL
 `default_acl=public-read` during upload. Leave it `false` for private buckets,
 CDN origin access, or providers that do not support S3 ACLs.
 
+Provider-level `public_read` makes every uploaded object public. For file-level
+control, keep the provider private and configure upload rules on the region.
+Rules match the exported path relative to the upload root; `exclude` wins over
+`include`.
+
+```yaml
+regions:
+  jp:
+    upload:
+      enabled: true
+      public_read:
+        include:
+          - "\\.(png|webp|mp3|mp4)$"
+        exclude:
+          - "^private/"
+```
+
+OpenDAL exposes S3 ACL as an operator-level `default_acl`, so the uploader
+internally keeps a private S3 operator and a public-read S3 operator and chooses
+between them per file.
+
 By default, uploads fan out to every configured provider. A region can limit
 upload to named providers:
 

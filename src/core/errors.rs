@@ -180,6 +180,12 @@ pub enum StorageError {
     MissingBucket { provider: String },
     #[error("storage provider `{provider}` has invalid configuration: {message}")]
     InvalidProviderConfig { provider: String, message: String },
+    #[error("invalid upload public-read regex `{pattern}`: {source}")]
+    InvalidPublicReadRule {
+        pattern: String,
+        #[source]
+        source: regex::Error,
+    },
     #[error("upload root {0} is not relative to the extracted save path")]
     InvalidRelativePath(String),
     #[error("io error at {path}: {source}")]
