@@ -4,9 +4,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
+use yaml_serde::{Mapping, Value};
 
 use crate::core::errors::ConfigError;
+
+const CONFIG_URI_ENV: &str = "HARUKI_CONFIG_URI";
+const CONFIG_OPENDAL_SCHEME_ENV: &str = "HARUKI_CONFIG_OPENDAL_SCHEME";
+const CONFIG_OPENDAL_ROOT_ENV: &str = "HARUKI_CONFIG_OPENDAL_ROOT";
+const CONFIG_OPENDAL_OPTION_PREFIX: &str = "HARUKI_CONFIG_OPENDAL_OPTION_";
+const CONFIG_OPENDAL_URI_PREFIX: &str = "opendal://";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigStorageUri {
+    provider: String,
+    path: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,7 +53,15 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load_default() -> Result<Self, ConfigError> {
+    pub async fn load_default() -> Result<Self, ConfigError> {
+        if let Some(uri) = env::var(CONFIG_URI_ENV)
+            .ok()
+            .map(|uri| uri.trim().to_string())
+            .filter(|uri| !uri.is_empty())
+        {
+            return Self::load_from_opendal_uri(&uri).await;
+        }
+
         let candidates = candidate_paths();
         for candidate in &candidates {
             if candidate.exists() {
@@ -62,11 +84,48 @@ impl AppConfig {
             path: path.clone(),
             source,
         })?;
-        let mut config: Self = yaml_serde::from_str(&raw).map_err(|source| ConfigError::Parse {
+        Self::load_from_str(path, &raw)
+    }
+
+    pub async fn load_from_opendal_uri(uri: &str) -> Result<Self, ConfigError> {
+        let storage_uri = parse_config_storage_uri(uri)?;
+        let (scheme, options) = config_storage_provider_options()?;
+
+        opendal::init_default_registry();
+        let operator = opendal::Operator::via_iter(&scheme, options).map_err(|source| {
+            ConfigError::ConfigStorageProvider {
+                provider: storage_uri.provider.clone(),
+                source,
+            }
+        })?;
+        let bytes = operator.read(&storage_uri.path).await.map_err(|source| {
+            ConfigError::ConfigStorageRead {
+                uri: uri.to_string(),
+                source,
+            }
+        })?;
+        let raw = String::from_utf8(bytes.to_vec()).map_err(|source| ConfigError::InvalidUtf8 {
+            path: uri.to_string(),
+            source,
+        })?;
+
+        Self::load_from_str(PathBuf::from(uri), &raw)
+    }
+
+    fn load_from_str(path: PathBuf, raw: &str) -> Result<Self, ConfigError> {
+        let mut value: Value = yaml_serde::from_str(raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
             source,
         })?;
-        config.resolve_env_references()?;
+        expand_env_references(&mut value)?;
+        apply_env_overrides(&mut value)?;
+
+        let mut config: Self =
+            yaml_serde::from_value(value).map_err(|source| ConfigError::Parse {
+                path: path.clone(),
+                source,
+            })?;
+        config.resolve_legacy_env_overrides()?;
         config.validate()?;
         Ok(config)
     }
@@ -147,19 +206,7 @@ impl AppConfig {
             .collect()
     }
 
-    fn resolve_env_references(&mut self) -> Result<(), ConfigError> {
-        resolve_secret_env(
-            "server.auth.bearer_token",
-            &mut self.server.auth.bearer_token,
-        )?;
-        resolve_secret_env(
-            "tools.asset_studio_native_library_path",
-            &mut self.tools.asset_studio_native_library_path,
-        )?;
-        resolve_secret_env(
-            "tools.asset_studio_native_worker_path",
-            &mut self.tools.asset_studio_native_worker_path,
-        )?;
+    fn resolve_legacy_env_overrides(&mut self) -> Result<(), ConfigError> {
         if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
             self.tools.media_backend = value.parse()?;
         }
@@ -276,6 +323,300 @@ fn resolve_secret_env(field: &str, value: &mut Option<String>) -> Result<(), Con
     })?;
     *value = Some(resolved);
     Ok(())
+}
+
+fn parse_config_storage_uri(uri: &str) -> Result<ConfigStorageUri, ConfigError> {
+    let Some(raw) = uri.strip_prefix(CONFIG_OPENDAL_URI_PREFIX) else {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason:
+                "only opendal:// config URIs are supported; use HARUKI_CONFIG_PATH for local files"
+                    .to_string(),
+        });
+    };
+
+    let raw = raw.trim_start_matches('/');
+    let Some((provider, path)) = raw.split_once('/') else {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason: "expected opendal://<provider>/<path>".to_string(),
+        });
+    };
+    let provider = provider.trim();
+    let path = path.trim().trim_matches('/').replace('\\', "/");
+
+    if provider.is_empty() {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason: "provider is empty".to_string(),
+        });
+    }
+    if path.is_empty() {
+        return Err(ConfigError::InvalidConfigUri {
+            uri: uri.to_string(),
+            reason: "path is empty".to_string(),
+        });
+    }
+
+    Ok(ConfigStorageUri {
+        provider: provider.to_string(),
+        path,
+    })
+}
+
+fn config_storage_provider_options() -> Result<(String, BTreeMap<String, String>), ConfigError> {
+    let scheme = env::var(CONFIG_OPENDAL_SCHEME_ENV)
+        .ok()
+        .map(|scheme| scheme.trim().to_ascii_lowercase())
+        .filter(|scheme| !scheme.is_empty())
+        .ok_or_else(|| ConfigError::MissingEnvironmentVariable {
+            field: CONFIG_URI_ENV.to_string(),
+            name: CONFIG_OPENDAL_SCHEME_ENV.to_string(),
+        })?;
+
+    let mut options = BTreeMap::new();
+    if let Some(root) = env::var(CONFIG_OPENDAL_ROOT_ENV)
+        .ok()
+        .map(|root| root.trim().to_string())
+        .filter(|root| !root.is_empty())
+    {
+        options.insert("root".to_string(), root);
+    }
+
+    for (name, value) in env::vars().filter(|(name, value)| {
+        name.starts_with(CONFIG_OPENDAL_OPTION_PREFIX)
+            && name.len() > CONFIG_OPENDAL_OPTION_PREFIX.len()
+            && !value.trim().is_empty()
+    }) {
+        let key = name
+            .strip_prefix(CONFIG_OPENDAL_OPTION_PREFIX)
+            .expect("prefix was checked")
+            .to_ascii_lowercase();
+        if key.is_empty() {
+            return Err(ConfigError::InvalidConfigBootstrap {
+                name,
+                reason: "OpenDAL option key is empty".to_string(),
+            });
+        }
+        options.insert(key, value);
+    }
+
+    Ok((scheme, options))
+}
+
+fn expand_env_references(value: &mut Value) -> Result<(), ConfigError> {
+    match value {
+        Value::String(raw) => {
+            if let Some(expanded) = expand_env_references_in_string(raw)? {
+                *raw = expanded;
+            }
+        }
+        Value::Sequence(items) => {
+            for item in items {
+                expand_env_references(item)?;
+            }
+        }
+        Value::Mapping(map) => {
+            for (_, value) in map.iter_mut() {
+                expand_env_references(value)?;
+            }
+        }
+        Value::Tagged(tagged) => expand_env_references(&mut tagged.value)?,
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+
+    Ok(())
+}
+
+fn expand_env_references_in_string(raw: &str) -> Result<Option<String>, ConfigError> {
+    let Some(mut start) = raw.find("${env:") else {
+        return Ok(None);
+    };
+
+    let mut expanded = String::with_capacity(raw.len());
+    let mut cursor = 0;
+
+    while start < raw.len() {
+        expanded.push_str(&raw[cursor..start]);
+        let name_start = start + "${env:".len();
+        let Some(relative_end) = raw[name_start..].find('}') else {
+            expanded.push_str(&raw[start..]);
+            return Ok(Some(expanded));
+        };
+        let end = name_start + relative_end;
+        let name = raw[name_start..end].trim();
+        let value = env::var(name).map_err(|_| ConfigError::MissingEnvironmentVariable {
+            field: "config file".to_string(),
+            name: name.to_string(),
+        })?;
+        expanded.push_str(&value);
+        cursor = end + 1;
+
+        let Some(next) = raw[cursor..].find("${env:") else {
+            break;
+        };
+        start = cursor + next;
+    }
+
+    expanded.push_str(&raw[cursor..]);
+    Ok(Some(expanded))
+}
+
+fn apply_env_overrides(root: &mut Value) -> Result<(), ConfigError> {
+    let overrides = env::vars()
+        .filter(|(name, _)| name.starts_with("HARUKI__"))
+        .collect::<BTreeMap<_, _>>();
+
+    for (name, raw_value) in overrides {
+        let path = parse_env_override_path(&name)?;
+        let value = parse_env_override_value(&raw_value);
+        apply_env_override(root, &name, &path, value)?;
+    }
+
+    Ok(())
+}
+
+fn parse_env_override_path(name: &str) -> Result<Vec<String>, ConfigError> {
+    let raw_path =
+        name.strip_prefix("HARUKI__")
+            .ok_or_else(|| ConfigError::InvalidConfigBootstrap {
+                name: name.to_string(),
+                reason: "override names must start with HARUKI__".to_string(),
+            })?;
+
+    if raw_path.is_empty() {
+        return Err(ConfigError::InvalidConfigBootstrap {
+            name: name.to_string(),
+            reason: "override path is empty".to_string(),
+        });
+    }
+
+    raw_path
+        .split("__")
+        .map(|segment| {
+            if segment.is_empty() {
+                Err(ConfigError::InvalidConfigBootstrap {
+                    name: name.to_string(),
+                    reason: "override path contains an empty segment".to_string(),
+                })
+            } else {
+                Ok(segment.to_ascii_lowercase())
+            }
+        })
+        .collect()
+}
+
+fn parse_env_override_value(raw: &str) -> Value {
+    if raw.is_empty() {
+        return Value::String(String::new());
+    }
+
+    yaml_serde::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+fn apply_env_override(
+    root: &mut Value,
+    name: &str,
+    path: &[String],
+    value: Value,
+) -> Result<(), ConfigError> {
+    if path.is_empty() {
+        return Err(ConfigError::InvalidConfigBootstrap {
+            name: name.to_string(),
+            reason: "override path is empty".to_string(),
+        });
+    }
+
+    let mut current = root;
+    for (idx, segment) in path.iter().enumerate() {
+        let is_last = idx + 1 == path.len();
+        if is_last {
+            set_env_override_leaf(current, segment, value);
+            return Ok(());
+        }
+
+        current =
+            descend_env_override_path(current, segment, path.get(idx + 1).map(String::as_str));
+    }
+
+    Ok(())
+}
+
+fn set_env_override_leaf(current: &mut Value, segment: &str, value: Value) {
+    if let Ok(index) = segment.parse::<usize>() {
+        match current {
+            Value::Sequence(items) => {
+                if items.len() <= index {
+                    items.resize(index + 1, Value::Null);
+                }
+                items[index] = value;
+                return;
+            }
+            Value::Null => {
+                let mut items = Vec::new();
+                items.resize(index + 1, Value::Null);
+                items[index] = value;
+                *current = Value::Sequence(items);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if !matches!(current, Value::Mapping(_)) {
+        *current = Value::Mapping(Mapping::new());
+    }
+
+    if let Value::Mapping(map) = current {
+        map.insert(Value::String(segment.to_string()), value);
+    }
+}
+
+fn descend_env_override_path<'a>(
+    current: &'a mut Value,
+    segment: &str,
+    next_segment: Option<&str>,
+) -> &'a mut Value {
+    let default_child = || match next_segment.and_then(|next| next.parse::<usize>().ok()) {
+        Some(_) => Value::Sequence(Vec::new()),
+        None => Value::Mapping(Mapping::new()),
+    };
+
+    if let Ok(index) = segment.parse::<usize>() {
+        match current {
+            Value::Sequence(items) => {
+                if items.len() <= index {
+                    items.resize_with(index + 1, Value::default);
+                }
+                if matches!(items[index], Value::Null) {
+                    items[index] = default_child();
+                }
+                return &mut items[index];
+            }
+            Value::Null => {
+                let mut items = Vec::new();
+                items.resize_with(index + 1, Value::default);
+                items[index] = default_child();
+                *current = Value::Sequence(items);
+                if let Value::Sequence(items) = current {
+                    return &mut items[index];
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !matches!(current, Value::Mapping(_)) {
+        *current = Value::Mapping(Mapping::new());
+    }
+
+    if let Value::Mapping(map) = current {
+        return map
+            .entry(Value::String(segment.to_string()))
+            .or_insert_with(default_child);
+    }
+
+    unreachable!("current value was normalized into a mapping")
 }
 
 fn non_empty_option(value: String) -> Option<String> {
@@ -742,7 +1083,13 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageProviderConfig {
-    pub kind: String,
+    pub name: Option<String>,
+    #[serde(alias = "kind")]
+    pub scheme: String,
+    pub root: Option<String>,
+    pub public_base_url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_storage_options")]
+    pub options: BTreeMap<String, String>,
     pub endpoint: String,
     pub tls: bool,
     pub bucket: String,
@@ -757,7 +1104,11 @@ pub struct StorageProviderConfig {
 impl Default for StorageProviderConfig {
     fn default() -> Self {
         Self {
-            kind: "s3".to_string(),
+            name: None,
+            scheme: "s3".to_string(),
+            root: None,
+            public_base_url: None,
+            options: BTreeMap::new(),
             endpoint: String::new(),
             tls: true,
             bucket: String::new(),
@@ -767,6 +1118,34 @@ impl Default for StorageProviderConfig {
             public_read: false,
             access_key: None,
             secret_key: None,
+        }
+    }
+}
+
+fn deserialize_storage_options<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, Value>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(key, value)| {
+            storage_option_value_to_string(value)
+                .map(|value| (key, value))
+                .map_err(de::Error::custom)
+        })
+        .collect()
+}
+
+fn storage_option_value_to_string(value: Value) -> Result<String, String> {
+    match value {
+        Value::Null => Ok(String::new()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::String(value) => Ok(value),
+        Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => {
+            Err("storage provider options must be scalar values".to_string())
         }
     }
 }
@@ -1024,6 +1403,7 @@ impl Default for AudioExportConfig {
 #[serde(default)]
 pub struct RegionUploadConfig {
     pub enabled: bool,
+    pub providers: Vec<String>,
     pub remove_local_after_upload: bool,
 }
 
@@ -1284,7 +1664,7 @@ asset_studio_types:
     }
 
     #[test]
-    fn load_from_path_resolves_secret_env_references_only_for_supported_fields() {
+    fn load_from_path_expands_env_references_across_config_values() {
         let _env_lock = env_lock();
         std::env::set_var(
             "HARUKI_TEST_AES_KEY_HEX",
@@ -1522,6 +1902,106 @@ tools:
         }
     }
 
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_default_reads_config_from_opendal_fs_uri() {
+        let _env_lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("haruki-asset-configs.yaml"),
+            r#"
+config_version: 2
+server:
+  port: 19090
+regions:
+  cn:
+    enabled: true
+    provider:
+      kind: nuverse
+      asset_version_url: "https://example.com/version"
+      app_version: "5.2.0"
+      asset_info_url_template: "https://example.com/info/{asset_version}"
+      asset_bundle_url_template: "https://example.com/{bundle_path}"
+"#,
+        )
+        .unwrap();
+
+        let old_config_uri = std::env::var("HARUKI_CONFIG_URI").ok();
+        let old_scheme = std::env::var("HARUKI_CONFIG_OPENDAL_SCHEME").ok();
+        let old_root = std::env::var("HARUKI_CONFIG_OPENDAL_ROOT").ok();
+        std::env::set_var(
+            "HARUKI_CONFIG_URI",
+            "opendal://config/haruki-asset-configs.yaml",
+        );
+        std::env::set_var("HARUKI_CONFIG_OPENDAL_SCHEME", "fs");
+        std::env::set_var("HARUKI_CONFIG_OPENDAL_ROOT", dir.path());
+
+        let config = AppConfig::load_default().await.unwrap();
+        assert_eq!(config.server.port, 19090);
+        assert_eq!(config.enabled_regions(), vec!["cn".to_string()]);
+
+        restore_env("HARUKI_CONFIG_URI", old_config_uri);
+        restore_env("HARUKI_CONFIG_OPENDAL_SCHEME", old_scheme);
+        restore_env("HARUKI_CONFIG_OPENDAL_ROOT", old_root);
+    }
+
+    #[test]
+    fn load_from_path_applies_double_underscore_env_overrides() {
+        let _env_lock = env_lock();
+        let old_port = std::env::var("HARUKI__SERVER__PORT").ok();
+        let old_provider = std::env::var("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0").ok();
+        let old_bucket = std::env::var("HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET").ok();
+
+        std::env::set_var("HARUKI__SERVER__PORT", "19091");
+        std::env::set_var("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0", "assets");
+        std::env::set_var(
+            "HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET",
+            "sekai-jp-assets",
+        );
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 2
+storage:
+  providers:
+    - name: assets
+      scheme: s3
+      options:
+        endpoint: https://s3.example.com
+regions:
+  jp:
+    enabled: true
+    upload:
+      enabled: true
+    provider:
+      kind: colorful_palette
+      asset_info_url_template: "https://example.com/{{env}}/{{asset_version}}/{{asset_hash}}"
+      asset_bundle_url_template: "https://example.com/assets/{{bundle_path}}"
+      profile: production
+      profile_hashes:
+        production: abc123
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(file.path()).unwrap();
+        assert_eq!(config.server.port, 19091);
+        assert_eq!(
+            config.regions["jp"].upload.providers,
+            vec!["assets".to_string()]
+        );
+        assert_eq!(
+            config.storage.providers[0].options.get("bucket"),
+            Some(&"sekai-jp-assets".to_string())
+        );
+
+        restore_env("HARUKI__SERVER__PORT", old_port);
+        restore_env("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0", old_provider);
+        restore_env("HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET", old_bucket);
+    }
+
     #[test]
     fn effective_concurrency_auto_tune_respects_configured_caps() {
         let config = ConcurrencyConfig {
@@ -1651,5 +2131,12 @@ regions:
             ConfigError::MissingEnvironmentVariable { ref name, .. }
             if name == "HARUKI_TEST_MISSING_AES_KEY"
         ));
+    }
+
+    fn restore_env(name: &str, value: Option<String>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
     }
 }

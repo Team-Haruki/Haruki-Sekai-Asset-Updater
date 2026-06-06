@@ -70,6 +70,18 @@ concurrency:
 
 storage:
   providers: []
+  # Example OpenDAL S3-compatible provider:
+  # providers:
+  #   - name: assets
+  #     scheme: s3
+  #     root: "assets/{region}"
+  #     public_base_url: "https://cdn.example.com/assets/{region}"
+  #     options:
+  #       bucket: "sekai-{region}-assets"
+  #       endpoint: "https://s3.example.com"
+  #       region: "auto"
+  #       access_key_id: "${env:HARUKI_STORAGE_ACCESS_KEY_ID}"
+  #       secret_access_key: "${env:HARUKI_STORAGE_SECRET_ACCESS_KEY}"
 
 git_sync:
   chart_hashes:
@@ -141,6 +153,7 @@ regions:
         remove_wav: true
     upload:
       enabled: false
+      providers: []
       remove_local_after_upload: false
 
   cn:
@@ -191,4 +204,5 @@ regions:
         remove_wav: true
     upload:
       enabled: false
+      providers: []
       remove_local_after_upload: false

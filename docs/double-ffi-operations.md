@@ -9,7 +9,6 @@ Recommended production settings:
 
 ```yaml
 tools:
-  asset_studio_backend: "native"
   asset_studio_native_call_mode: "pool"
   asset_studio_native_unitypy_mode: true
   asset_studio_native_read_batch_size: 32
@@ -27,19 +26,9 @@ Required paths:
 ```bash
 export HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioNative.so
 export HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH=/app/assetstudio_native_worker
-export HARUKI_ASSET_STUDIO_CLI_PATH=/app/assetstudio/AssetStudioCLI
 ```
 
-`HARUKI_ASSET_STUDIO_CLI_PATH` is still useful for explicit legacy benchmark
-runs and rollback testing.
-
 ## Backend Modes
-
-AssetStudio backend:
-
-- `native`: production default
-- `cli`: legacy benchmark and rollback path
-- `auto`: compatibility value; not recommended for production benchmarking
 
 Native call mode:
 
@@ -62,7 +51,7 @@ Useful environment variables:
 export HARUKI_ASSET_STUDIO_NATIVE_PROCESS_CONCURRENCY=0
 export HARUKI_ASSET_STUDIO_NATIVE_WORKER_MAX_CALLS=256
 export HARUKI_ASSET_STUDIO_NATIVE_READ_BATCH_SIZE=32
-export HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT=bmp
+export HARUKI_ASSET_STUDIO_NATIVE_IMAGE_FORMAT=raw_rgba
 export HARUKI_CPU_BUDGET_AUTO=true
 export HARUKI_CPU_BUDGET_RATIO=0.75
 export HARUKI_CPU_RESERVED=1

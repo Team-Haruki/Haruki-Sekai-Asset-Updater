@@ -336,6 +336,7 @@ fn benchmark_region(args: &Args) -> RegionConfig {
         },
         upload: RegionUploadConfig {
             enabled: false,
+            providers: Vec::new(),
             remove_local_after_upload: false,
         },
         ..RegionConfig::default()

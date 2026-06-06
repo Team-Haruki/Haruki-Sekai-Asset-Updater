@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let config = match args.config {
         Some(path) => AppConfig::load_from_path(path)?,
-        None => AppConfig::load_default()?,
+        None => AppConfig::load_default().await?,
     };
     let region = config
         .regions

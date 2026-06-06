@@ -66,7 +66,9 @@
 常见环境变量：
 
 - `HARUKI_CONFIG_PATH`
-- `HARUKI_ASSET_STUDIO_CLI_PATH`
+- `HARUKI_CONFIG_URI`
+- `HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH`
+- `HARUKI_ASSET_STUDIO_NATIVE_WORKER_PATH`
 - `HARUKI_SHARED_AES_KEY_HEX`
 - `HARUKI_SHARED_AES_IV_HEX`
 - `HARUKI_EN_AES_KEY_HEX`
@@ -81,6 +83,8 @@
 
 - `tests/files/0703.usm`
 - `tests/files/se_0126_01.acb`
+- `tests/files/unityasset_long`
+- `tests/files/jacket_s_712`
 
 如果需要引用样本，请从 `tests/files/` 读取，不要再假定样本在仓库根目录。
 

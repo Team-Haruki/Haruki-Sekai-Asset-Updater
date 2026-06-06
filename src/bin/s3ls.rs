@@ -1,10 +1,10 @@
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::Builder;
-use aws_sdk_s3::Client;
+use std::collections::BTreeMap;
+
 use clap::Parser;
+use opendal::Operator;
 
 #[derive(Debug, Parser)]
-#[command(about = "List objects from an S3-compatible bucket prefix")]
+#[command(about = "List objects from an S3-compatible bucket prefix via OpenDAL")]
 struct Args {
     #[arg(long)]
     endpoint: String,
@@ -21,7 +21,7 @@ struct Args {
     #[arg(long, default_value_t = false)]
     path_style: bool,
     #[arg(long, default_value_t = 100)]
-    max_keys: i32,
+    max_keys: usize,
     #[arg(long, default_value_t = true)]
     tls: bool,
 }
@@ -29,39 +29,33 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
-    let shared_config = aws_config::defaults(BehaviorVersion::latest())
-        .region(aws_config::Region::new(args.region.clone()))
-        .load()
-        .await;
-
-    let credentials =
-        aws_sdk_s3::config::Credentials::new(args.access_key, args.secret_key, None, None, "s3ls");
-
     let scheme = if args.tls { "https" } else { "http" };
-    let endpoint_url = format!("{scheme}://{}", args.endpoint);
-    let client = Client::from_conf(
-        Builder::from(&shared_config)
-            .endpoint_url(endpoint_url)
-            .force_path_style(args.path_style)
-            .credentials_provider(credentials)
-            .build(),
-    );
+    let endpoint = if args.endpoint.starts_with("http://") || args.endpoint.starts_with("https://")
+    {
+        args.endpoint.clone()
+    } else {
+        format!("{scheme}://{}", args.endpoint)
+    };
 
-    let response = client
-        .list_objects_v2()
-        .bucket(args.bucket)
-        .prefix(args.prefix)
-        .max_keys(args.max_keys)
-        .send()
-        .await?;
+    opendal::init_default_registry();
+    let mut options = BTreeMap::from([
+        ("bucket".to_string(), args.bucket),
+        ("endpoint".to_string(), endpoint),
+        ("region".to_string(), args.region),
+        ("access_key_id".to_string(), args.access_key),
+        ("secret_access_key".to_string(), args.secret_key),
+    ]);
+    if !args.path_style {
+        options.insert("enable_virtual_host_style".to_string(), "true".to_string());
+    }
 
-    let objects = response.contents();
-    println!("count={}", objects.len());
-    for object in objects {
-        let key = object.key().unwrap_or_default();
-        let size = object.size().unwrap_or_default();
-        println!("{size}\t{key}");
+    let operator = Operator::via_iter("s3", options)?;
+    let entries = operator.list_with(&args.prefix).recursive(true).await?;
+
+    println!("count={}", entries.len().min(args.max_keys));
+    for entry in entries.into_iter().take(args.max_keys) {
+        let meta = entry.metadata();
+        println!("{}\t{}", meta.content_length(), entry.path());
     }
 
     Ok(())

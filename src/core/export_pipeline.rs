@@ -36,7 +36,7 @@ use crate::core::media::{
     convert_usm_to_mp4_with_backend, convert_wav_bytes_to_flac_with_backend,
     convert_wav_bytes_to_mp3_with_backend, FrameRate,
 };
-use crate::core::storage::upload_to_all_storages;
+use crate::core::storage::{upload_to_all_storages, StorageUploadOptions};
 
 const NATIVE_AOT_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";
 const NATIVE_AOT_IMAGE_SURROGATE_FORMAT: &str = "bmp";
@@ -6358,9 +6358,12 @@ pub async fn post_process_exported_files(
             region_name,
             upload_root,
             &files,
-            region.upload.remove_local_after_upload,
-            concurrency.upload,
-            &app_config.execution.retry,
+            StorageUploadOptions {
+                selected_providers: &region.upload.providers,
+                remove_local: region.upload.remove_local_after_upload,
+                concurrency: concurrency.upload,
+                retry: &app_config.execution.retry,
+            },
         )
         .await?;
         summary.uploaded_files = files;
@@ -8706,6 +8709,7 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
             },
             upload: RegionUploadConfig {
                 enabled: false,
+                providers: Vec::new(),
                 remove_local_after_upload: false,
             },
             ..RegionConfig::default()
