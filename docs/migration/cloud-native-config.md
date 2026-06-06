@@ -60,6 +60,7 @@ storage:
       scheme: s3
       root: "assets/{region}"
       public_base_url: "https://cdn.example.com/assets/{region}"
+      public_read: false
       options:
         bucket: "sekai-{region}-assets"
         endpoint: "https://s3.example.com"
@@ -71,6 +72,9 @@ storage:
 ```
 
 `{region}` and `{server}` are both replaced with the active region key.
+For S3-compatible providers, `public_read: true` maps to OpenDAL
+`default_acl=public-read` during upload. Leave it `false` for private buckets,
+CDN origin access, or providers that do not support S3 ACLs.
 
 By default, uploads fan out to every configured provider. A region can limit
 upload to named providers:

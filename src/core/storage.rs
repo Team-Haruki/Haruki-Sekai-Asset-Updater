@@ -411,7 +411,7 @@ fn resolve_storage_provider(
             .or_insert_with(|| secret_key.to_string());
     }
 
-    if provider.public_read {
+    if scheme == "s3" && provider.public_read {
         options
             .entry("default_acl".to_string())
             .or_insert_with(|| "public-read".to_string());
@@ -580,6 +580,43 @@ mod tests {
         );
         assert!(targets[0].public_read);
         assert!(!targets[0].path_style);
+    }
+
+    #[test]
+    fn s3_public_read_field_sets_default_acl() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("assets".to_string()),
+                scheme: "s3".to_string(),
+                endpoint: "s3.example.com".to_string(),
+                bucket: "sekai-{region}-assets".to_string(),
+                public_read: true,
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        let targets = plan_storage_targets(&storage, "jp", &[]).unwrap();
+
+        assert_eq!(targets[0].provider, "assets");
+        assert!(targets[0].public_read);
+    }
+
+    #[test]
+    fn public_read_field_is_ignored_for_non_s3_providers() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("local".to_string()),
+                scheme: "fs".to_string(),
+                root: Some("tmp/local".to_string()),
+                public_read: true,
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        let targets = plan_storage_targets(&storage, "jp", &[]).unwrap();
+
+        assert_eq!(targets[0].provider, "local");
+        assert!(!targets[0].public_read);
     }
 
     #[test]

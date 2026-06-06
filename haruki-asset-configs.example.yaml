@@ -76,6 +76,7 @@ storage:
   #     scheme: s3
   #     root: "assets/{region}"
   #     public_base_url: "https://cdn.example.com/assets/{region}"
+  #     public_read: false # S3 only; true uploads objects with default_acl=public-read
   #     options:
   #       bucket: "sekai-{region}-assets"
   #       endpoint: "https://s3.example.com"
