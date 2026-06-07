@@ -6,9 +6,10 @@
 
 - 本仓库已经整理为 Rust 主项目。
 - 旧 Go 主程序已经移除，不要再按 Go 项目结构新增代码。
-- 当前根 crate 为：
+- 当前仓库为 Cargo workspace：
   - `Cargo.toml`
   - `src/`
+  - `crates/assetstudio-ffi/`
   - `tests/`
 - 对外 HTTP 接口目前使用 v2 路径：
   - `GET /healthz`
@@ -20,8 +21,8 @@
 
 - `src/`
   Rust 主服务代码。
-- `src/bin/`
-  辅助 CLI，例如 `usmexport`、`usmmeta`、`assetinfo_dump`、`s3ls`。
+- `crates/assetstudio-ffi/`
+  AssetStudio FFI ABI 与 `assetstudio_ffi_worker`。
 - `src/core/`
   核心业务逻辑，例如配置、下载、导出、上传、git 同步。
 - `src/service/`
@@ -29,11 +30,10 @@
 - `tests/`
   集成测试。
 - `tests/files/`
-  测试样本文件，目前保留：
-  - `0703.usm`
-  - `se_0126_01.acb`
+  不提交大体积 codec 样本；如需运行真实样本 baseline，将 `0703.usm` 与
+  `se_0126_01.acb` 放在外部目录，并设置 `HARUKI_CODEC_SAMPLE_DIR`。
 - `docs/migration/`
-  迁移背景与兼容性说明。
+  当前保留 `v2-api.md`，用于记录 HTTP v2 API 说明。
 
 ## 3. 配置文件约定
 
@@ -49,6 +49,7 @@
 - `HARUKI_CONFIG_PATH`
 - `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`
 - `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`
+- `HARUKI_MEDIA_BACKEND`
 - `HARUKI_SHARED_AES_KEY_HEX`
 - `HARUKI_SHARED_AES_IV_HEX`
 - `HARUKI_EN_AES_KEY_HEX`
@@ -79,8 +80,8 @@
 
 ```bash
 cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
 ```
 
 如果改动涉及以下内容，还需要额外关注：
@@ -89,8 +90,8 @@ cargo test
   检查 `src/core/config.rs` 相关测试是否覆盖。
 - 样本导出：
   确认 `tests/codec_smoke.rs` 通过。
-- CLI：
-  确认 `tests/cli.rs` 通过。
+- AssetStudio worker：
+  确认 workspace 构建仍生成 `assetstudio_ffi_worker`。
 - HTTP/任务流：
   确认 `tests/api.rs` 通过。
 - 日志：
@@ -104,8 +105,8 @@ cargo test
 - 不要把一次性调试输出、手工 smoke 配置、临时导出目录提交进仓库。
 - 不要在仓库里写入真实密钥、真实 token、真实云存储凭据。
 - 如果修改 CI，请确保：
-  - `cargo clippy --all-targets --all-features -- -D warnings`
-  - `cargo test`
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  - `cargo test --workspace`
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
 

@@ -14,20 +14,18 @@
 - Exposes `GET /v2/jobs/{id}`
 - Exposes `POST /v2/jobs/{id}/cancel`
 - Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend
-- Includes `usmexport`, `usmmeta`, `assetinfo_dump`, and `s3ls` helper CLIs
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
 - Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
 - Uses the double-FFI production path by default: AssetStudio FFI worker
-  pool plus FFmpeg/rsmpeg FFI. FFmpeg CLI remains available as a media
-  fallback/test path.
+  pool plus FFmpeg/rsmpeg FFI. FFmpeg CLI remains available as a media fallback
+  for platforms where FFI is unavailable.
 
 ## Layout
 
 - `src/`: application code
-- `src/bin/`: helper CLIs
+- `crates/assetstudio-ffi/`: AssetStudio FFI ABI and worker binary
 - `tests/`: integration tests
-- `docs/assetstudio-ffi.md`: NativeAOT FFI API and object-flow details
-- `docs/migration/`: preserved migration and parity notes
+- `docs/migration/v2-api.md`: current HTTP API notes
 
 ## Secret Config
 
@@ -46,7 +44,6 @@
 - Tracked config templates expect values such as:
   `HARUKI_MEDIA_BACKEND`,
   `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`,
-  `HARUKI_ASSET_STUDIO_FFI_CALL_MODE`,
   `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`,
   `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
   `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`,
@@ -76,7 +73,6 @@ cp .env.example .env
 export HARUKI_MEDIA_BACKEND=ffi
 export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
 export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/path/to/assetstudio_ffi_worker
-export HARUKI_ASSET_STUDIO_FFI_CALL_MODE=pool
 export HARUKI_SHARED_AES_KEY_HEX=...
 export HARUKI_SHARED_AES_IV_HEX=...
 export HARUKI_EN_AES_KEY_HEX=...
@@ -111,15 +107,14 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
   -d '{"region":"jp","asset_version":"6.0.0","asset_hash":"deadbeef","dry_run":true}'
 ```
 
-## Helper CLIs
-
-```bash
-cargo run --bin usmexport -- --input ./tests/files/0703.usm --output-dir ./exports
-cargo run --bin usmmeta -- --input ./tests/files/0703.usm
-```
-
 ## Runtime Tuning
 
+- AssetStudio exports use the `assetstudio_ffi_worker` pool. Set
+  `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` and, when the worker cannot be inferred
+  from the service binary directory, `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`.
+  `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
+  `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`, and
+  `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE` tune worker pool throughput.
 - `resources.memory.max_in_flight_bundle_bytes` is a soft memory guard. The default
   `0` disables it. On small Linux hosts, set it to the amount of bundle work the
   process may keep in memory, for example
@@ -141,5 +136,8 @@ cargo run --bin usmmeta -- --input ./tests/files/0703.usm
 
 ## Verification
 
-- Run the Rust test suite with `cargo test`.
-- Sample output hashes for `tests/files/0703.usm` and `tests/files/se_0126_01.acb` are enforced directly in `tests/codec_smoke.rs`.
+- Run the Rust test suite with `cargo test --workspace`.
+- Real codec sample baselines are opt-in. Put `0703.usm` and
+  `se_0126_01.acb` in an external directory and run with
+  `HARUKI_CODEC_SAMPLE_DIR=/path/to/codec-samples`; otherwise those sample
+  checks skip while the rest of the suite still runs.

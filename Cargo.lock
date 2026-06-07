@@ -1105,6 +1105,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "haruki-assetstudio-ffi"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "libloading",
+ "serde",
+ "sonic-rs",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "haruki-sekai-asset-updater"
 version = "0.1.0"
 dependencies = [
@@ -1114,10 +1129,10 @@ dependencies = [
  "chrono",
  "clap",
  "cridecoder",
+ "haruki-assetstudio-ffi",
  "hex",
  "image",
  "libc",
- "libloading",
  "mime_guess",
  "opendal",
  "regex",

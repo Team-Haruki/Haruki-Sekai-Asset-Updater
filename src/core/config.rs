@@ -176,7 +176,7 @@ impl AppConfig {
             validate_audio_export_config(region_name, &region.export.audio)?;
         }
         validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
-        warn_legacy_backend_options(&self.backends.media);
+        warn_media_fallback_backend_options(&self.backends.media);
 
         Ok(())
     }
@@ -228,9 +228,6 @@ impl AppConfig {
         }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH") {
             self.backends.asset_studio.library_path = non_empty_option(value);
-        }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE") {
-            self.backends.asset_studio.call_mode = value.parse()?;
         }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH") {
             self.backends.asset_studio.worker_path = non_empty_option(value);
@@ -811,14 +808,14 @@ fn validate_asset_studio_ffi_read_kinds(
     Ok(())
 }
 
-fn warn_legacy_backend_options(media: &MediaBackendConfig) {
+fn warn_media_fallback_backend_options(media: &MediaBackendConfig) {
     match media.backend {
         MediaBackend::Ffi => {}
         MediaBackend::Cli => {
-            tracing::warn!("backends.media.backend=cli is legacy; production should use ffi")
+            tracing::warn!("backends.media.backend=cli is a fallback mode; production Linux builds should prefer ffi")
         }
         MediaBackend::Auto => tracing::warn!(
-            "backends.media.backend=auto is legacy fallback mode; production should use ffi"
+            "backends.media.backend=auto is a fallback mode; production Linux builds should prefer ffi"
         ),
     }
 }
@@ -983,7 +980,6 @@ pub struct BackendsConfig {
 #[serde(default)]
 pub struct AssetStudioBackendConfig {
     pub library_path: Option<String>,
-    pub call_mode: AssetStudioFfiCallMode,
     pub worker_path: Option<String>,
     pub process_concurrency: usize,
     pub worker_max_calls: usize,
@@ -1155,38 +1151,11 @@ impl FromStr for MediaBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AssetStudioFfiCallMode {
-    Direct,
-    Process,
-    #[default]
-    Pool,
-}
-
-impl FromStr for AssetStudioFfiCallMode {
-    type Err = ConfigError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_lowercase().as_str() {
-            "direct" => Ok(Self::Direct),
-            "process" => Ok(Self::Process),
-            "pool" => Ok(Self::Pool),
-            other => Err(ConfigError::InvalidValue {
-                field: "backends.asset_studio.call_mode".to_string(),
-                value: other.to_string(),
-                expected: "direct, process, or pool".to_string(),
-            }),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExecutionConfig {
     pub timeout_seconds: u64,
     pub allow_cancel: bool,
-    pub asset_bundle_cache_dir: Option<String>,
     /// Soft process memory guard for bundle work.  When non-zero, bundle
     /// downloads/native payloads acquire permits by estimated bundle size and
     /// keep them until export/post-process finishes.
@@ -1203,7 +1172,6 @@ impl Default for ExecutionConfig {
         Self {
             timeout_seconds: 300,
             allow_cancel: true,
-            asset_bundle_cache_dir: None,
             max_in_flight_bundle_bytes: 0,
             batch_save_size: 50,
             retry: RetryConfig::default(),
@@ -1233,7 +1201,6 @@ impl Default for AssetStudioBackendConfig {
     fn default() -> Self {
         Self {
             library_path: None,
-            call_mode: AssetStudioFfiCallMode::Pool,
             worker_path: None,
             process_concurrency: 0,
             worker_max_calls: 256,
@@ -1854,10 +1821,6 @@ regions:
         let asset_studio = &config.backends.asset_studio;
         assert_eq!(config.server.asset_http_version, AssetHttpVersion::Auto);
         assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
-        assert_eq!(
-            AssetStudioFfiCallMode::default(),
-            AssetStudioFfiCallMode::Pool
-        );
         assert_eq!(config.backends.media.backend, MediaBackend::Ffi);
         assert_eq!(config.backends.image.backend, ImageBackend::Rust);
         assert_eq!(
@@ -1866,7 +1829,6 @@ regions:
         );
         assert!(config.backends.image.webp_lossless);
         assert_eq!(config.backends.image.jpeg_quality, 95);
-        assert_eq!(asset_studio.call_mode, AssetStudioFfiCallMode::Pool);
         assert_eq!(asset_studio.process_concurrency, 0);
         assert_eq!(asset_studio.worker_max_calls, 256);
         assert_eq!(asset_studio.read_batch_size, 32);
@@ -1895,7 +1857,6 @@ image:
   jpeg_quality: 88
 asset_studio:
   library_path: /tmp/libHarukiAssetStudioFFI.so
-  call_mode: process
   worker_path: /tmp/assetstudio-ffi-worker
   process_concurrency: 6
   worker_max_calls: 128
@@ -1916,7 +1877,6 @@ asset_studio:
             asset_studio.library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
         );
-        assert_eq!(asset_studio.call_mode, AssetStudioFfiCallMode::Process);
         assert_eq!(
             asset_studio.worker_path.as_deref(),
             Some("/tmp/assetstudio-ffi-worker")
@@ -2033,16 +1993,6 @@ asset_studio:
             err,
             ConfigError::InvalidValue { field, .. }
                 if field == "backends.image.jpeg_quality"
-        ));
-    }
-
-    #[test]
-    fn rejects_invalid_asset_studio_ffi_call_mode() {
-        let err = "threaded".parse::<AssetStudioFfiCallMode>().unwrap_err();
-        assert!(matches!(
-            err,
-            ConfigError::InvalidValue { ref field, ref value, .. }
-                if field == "backends.asset_studio.call_mode" && value == "threaded"
         ));
     }
 
@@ -2219,7 +2169,6 @@ regions:
         let _env_lock = env_lock();
         let old_media_backend = std::env::var("HARUKI_MEDIA_BACKEND").ok();
         let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH").ok();
-        let old_call_mode = std::env::var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE").ok();
         let old_worker_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH").ok();
         let old_process_concurrency =
             std::env::var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY").ok();
@@ -2242,7 +2191,6 @@ regions:
             "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
             "/tmp/override-native.so",
         );
-        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE", "process");
         std::env::set_var(
             "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
             "/tmp/override-native-worker",
@@ -2270,7 +2218,6 @@ config_version: 3
 backends:
   asset_studio:
     library_path: /tmp/config-native.so
-    call_mode: direct
     worker_path: /tmp/config-native-worker
     process_concurrency: 2
     worker_max_calls: 128
@@ -2285,10 +2232,6 @@ backends:
         assert_eq!(
             config.backends.asset_studio.library_path.as_deref(),
             Some("/tmp/override-native.so")
-        );
-        assert_eq!(
-            config.backends.asset_studio.call_mode,
-            AssetStudioFfiCallMode::Process
         );
         assert_eq!(
             config.backends.asset_studio.worker_path.as_deref(),
@@ -2322,10 +2265,6 @@ backends:
         match old_native_path {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", value),
             None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH"),
-        }
-        match old_call_mode {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE"),
         }
         match old_worker_path {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH", value),
@@ -2386,63 +2325,6 @@ backends:
         match old_max_in_flight_bundle_bytes {
             Some(value) => std::env::set_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES", value),
             None => std::env::remove_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES"),
-        }
-    }
-
-    #[test]
-    fn load_from_path_ignores_legacy_asset_studio_native_env_overrides() {
-        let _env_lock = env_lock();
-        let old_current_library = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH").ok();
-        let old_current_mode = std::env::var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE").ok();
-        let old_legacy_library = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH").ok();
-        let old_legacy_mode = std::env::var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE").ok();
-
-        std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH");
-        std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE");
-        std::env::set_var(
-            "HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH",
-            "/tmp/legacy-native.so",
-        );
-        std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", "process");
-
-        let mut file = NamedTempFile::new().unwrap();
-        write!(
-            file,
-            r#"
-config_version: 3
-backends:
-  asset_studio:
-    library_path: /tmp/config-ffi.so
-    call_mode: direct
-"#
-        )
-        .unwrap();
-
-        let config = AppConfig::load_from_path(file.path()).unwrap();
-        assert_eq!(
-            config.backends.asset_studio.library_path.as_deref(),
-            Some("/tmp/config-ffi.so")
-        );
-        assert_eq!(
-            config.backends.asset_studio.call_mode,
-            AssetStudioFfiCallMode::Direct
-        );
-
-        match old_current_library {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH"),
-        }
-        match old_current_mode {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_CALL_MODE"),
-        }
-        match old_legacy_library {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH"),
-        }
-        match old_legacy_mode {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_NATIVE_CALL_MODE"),
         }
     }
 

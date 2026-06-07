@@ -49,7 +49,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: cargo build --release --locked -p haruki-sekai-asset-updater -p haruki-assetstudio-ffi
 
       - name: Package archive (Unix)
         if: runner.os != 'Windows'

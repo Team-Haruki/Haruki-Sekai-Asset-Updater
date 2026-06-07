@@ -6,12 +6,10 @@ use haruki_sekai_asset_updater::core::codec::{
 };
 use tempfile::tempdir;
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn sample_path(name: &str) -> PathBuf {
-    repo_root().join("tests").join("files").join(name)
+fn sample_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os("HARUKI_CODEC_SAMPLE_DIR")
+        .map(PathBuf::from)
+        .map(|dir| dir.join(name))
 }
 
 fn sha256_hex(path: &Path) -> String {
@@ -56,7 +54,9 @@ fn codec_summary_reports_published_backend() {
 
 #[test]
 fn sample_usm_matches_frozen_baseline_if_present() {
-    let input = sample_path("0703.usm");
+    let Some(input) = sample_path("0703.usm") else {
+        return;
+    };
     if !input.exists() {
         return;
     }
@@ -75,7 +75,9 @@ fn sample_usm_matches_frozen_baseline_if_present() {
 
 #[test]
 fn sample_acb_matches_frozen_baseline_if_present() {
-    let input = sample_path("se_0126_01.acb");
+    let Some(input) = sample_path("se_0126_01.acb") else {
+        return;
+    };
     if !input.exists() {
         return;
     }
@@ -98,7 +100,9 @@ fn sample_acb_matches_frozen_baseline_if_present() {
 
 #[test]
 fn sample_hca_can_decode_to_wav_if_present() {
-    let input = sample_path("se_0126_01.acb");
+    let Some(input) = sample_path("se_0126_01.acb") else {
+        return;
+    };
     if !input.exists() {
         return;
     }

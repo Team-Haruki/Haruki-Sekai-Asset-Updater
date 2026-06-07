@@ -22,6 +22,7 @@ haruki-asset-configs.yaml
 Data/
 logs/
 target/
+tests/files/
 go_test_output/
 exports_0703_resend/
 exports_direct_0703/

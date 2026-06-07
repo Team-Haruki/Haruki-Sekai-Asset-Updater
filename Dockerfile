@@ -20,9 +20,13 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --profile minimal --default-toolchain stable
 COPY Cargo.toml Cargo.toml
 COPY Cargo.lock Cargo.lock
+COPY crates crates
 COPY src src
 COPY tests tests
-RUN cargo build --release --locked --features media-ffi
+RUN cargo build --release --locked \
+    -p haruki-sekai-asset-updater \
+    -p haruki-assetstudio-ffi \
+    --features haruki-sekai-asset-updater/media-ffi
 
 FROM mcr.microsoft.com/dotnet/sdk:9.0-bookworm-slim AS assetstudio-builder
 ARG TARGETARCH
@@ -82,7 +86,6 @@ ENV TZ=Asia/Shanghai \
     HARUKI_MEDIA_BACKEND=ffi \
     HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so \
     HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/app/assetstudio_ffi_worker \
-    HARUKI_ASSET_STUDIO_FFI_CALL_MODE=pool \
     HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY=0 \
     HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS=256 \
     HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE=32 \

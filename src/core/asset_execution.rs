@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1213,25 +1213,14 @@ impl AssetExecutionContext {
         })?;
         let bundle_url = self.render_bundle_url(task)?;
         let download_started = Instant::now();
-        let fetch = if let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) {
-            self.get_bundle_with_cache(&bundle_url, task, &cache_dir)
-                .await?
-        } else {
-            let network_started = Instant::now();
-            let body = self.get_with_retry(&bundle_url).await?;
-            BundleFetch {
-                body,
-                source: BundleFetchSource::Network,
-                cache_read_ms: None,
-                network_download_ms: Some(network_started.elapsed().as_millis()),
-                cache_write_ms: None,
-            }
-        };
+        let network_started = Instant::now();
+        let body = self.get_with_retry(&bundle_url).await?;
+        let network_download_ms = Some(network_started.elapsed().as_millis());
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDownloaded {
                 bundle: task.bundle_path.clone(),
-                bytes: fetch.body.len(),
+                bytes: body.len(),
                 elapsed_ms: download_started.elapsed().as_millis(),
             },
         );
@@ -1239,15 +1228,15 @@ impl AssetExecutionContext {
             progress,
             ExecutionProgressUpdate::BundleFetchDetails {
                 bundle: task.bundle_path.clone(),
-                source: fetch.source.as_str().to_string(),
-                cache_read_ms: fetch.cache_read_ms,
-                network_download_ms: fetch.network_download_ms,
-                cache_write_ms: fetch.cache_write_ms,
+                source: "network".to_string(),
+                cache_read_ms: None,
+                network_download_ms,
+                cache_write_ms: None,
             },
         );
 
         let deobfuscate_started = Instant::now();
-        let deobfuscated = deobfuscate(&fetch.body);
+        let deobfuscated = deobfuscate(&body);
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDeobfuscated {
@@ -1312,31 +1301,20 @@ impl AssetExecutionContext {
 
     async fn prefetch_bundle(
         &self,
-        app_config: &AppConfig,
+        _app_config: &AppConfig,
         task: &DownloadTask,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
     ) -> Result<(), AssetExecutionError> {
         let bundle_url = self.render_bundle_url(task)?;
         let download_started = Instant::now();
-        let fetch = if let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) {
-            self.get_bundle_with_cache(&bundle_url, task, &cache_dir)
-                .await?
-        } else {
-            let network_started = Instant::now();
-            let body = self.get_with_retry(&bundle_url).await?;
-            BundleFetch {
-                body,
-                source: BundleFetchSource::Network,
-                cache_read_ms: None,
-                network_download_ms: Some(network_started.elapsed().as_millis()),
-                cache_write_ms: None,
-            }
-        };
+        let network_started = Instant::now();
+        let body = self.get_with_retry(&bundle_url).await?;
+        let network_download_ms = Some(network_started.elapsed().as_millis());
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDownloaded {
                 bundle: task.bundle_path.clone(),
-                bytes: fetch.body.len(),
+                bytes: body.len(),
                 elapsed_ms: download_started.elapsed().as_millis(),
             },
         );
@@ -1344,89 +1322,13 @@ impl AssetExecutionContext {
             progress,
             ExecutionProgressUpdate::BundleFetchDetails {
                 bundle: task.bundle_path.clone(),
-                source: fetch.source.as_str().to_string(),
-                cache_read_ms: fetch.cache_read_ms,
-                network_download_ms: fetch.network_download_ms,
-                cache_write_ms: fetch.cache_write_ms,
+                source: "network".to_string(),
+                cache_read_ms: None,
+                network_download_ms,
+                cache_write_ms: None,
             },
         );
         Ok(())
-    }
-
-    async fn get_bundle_with_cache(
-        &self,
-        bundle_url: &str,
-        task: &DownloadTask,
-        cache_dir: &Path,
-    ) -> Result<BundleFetch, AssetExecutionError> {
-        let cache_file = cache_dir.join(&self.region_name).join(&task.bundle_path);
-        if cache_file.exists() {
-            let cache_read_started = Instant::now();
-            let body =
-                std::fs::read(&cache_file).map_err(|source| AssetExecutionError::ReadTempFile {
-                    path: cache_file,
-                    source,
-                })?;
-            return Ok(BundleFetch {
-                body,
-                source: BundleFetchSource::CacheHit,
-                cache_read_ms: Some(cache_read_started.elapsed().as_millis()),
-                network_download_ms: None,
-                cache_write_ms: None,
-            });
-        }
-
-        let network_started = Instant::now();
-        let body = self.get_with_retry(bundle_url).await?;
-        let network_download_ms = network_started.elapsed().as_millis();
-        if let Some(parent) = cache_file.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| {
-                AssetExecutionError::CreateTempDir {
-                    path: parent.to_path_buf(),
-                    source,
-                }
-            })?;
-        }
-        let cache_write_started = Instant::now();
-        std::fs::write(&cache_file, &body).map_err(|source| {
-            AssetExecutionError::WriteTempFile {
-                path: cache_file,
-                source,
-            }
-        })?;
-        Ok(BundleFetch {
-            body,
-            source: BundleFetchSource::CacheMiss,
-            cache_read_ms: None,
-            network_download_ms: Some(network_download_ms),
-            cache_write_ms: Some(cache_write_started.elapsed().as_millis()),
-        })
-    }
-}
-
-#[derive(Debug)]
-struct BundleFetch {
-    body: Vec<u8>,
-    source: BundleFetchSource,
-    cache_read_ms: Option<u128>,
-    network_download_ms: Option<u128>,
-    cache_write_ms: Option<u128>,
-}
-
-#[derive(Debug)]
-enum BundleFetchSource {
-    CacheHit,
-    CacheMiss,
-    Network,
-}
-
-impl BundleFetchSource {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::CacheHit => "cache_hit",
-            Self::CacheMiss => "cache_miss",
-            Self::Network => "network",
-        }
     }
 }
 
@@ -1472,16 +1374,6 @@ impl BundleMemoryLimiter {
 
 fn bytes_to_units(bytes: usize) -> usize {
     bytes.div_ceil(BundleMemoryLimiter::UNIT_BYTES).max(1)
-}
-
-fn configured_asset_bundle_cache_dir(app_config: &AppConfig) -> Option<PathBuf> {
-    app_config
-        .execution
-        .asset_bundle_cache_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
 }
 
 pub async fn fetch_live_asset_bundle_info(

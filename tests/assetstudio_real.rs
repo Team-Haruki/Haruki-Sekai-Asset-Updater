@@ -7,9 +7,6 @@ use haruki_sekai_asset_updater::core::config::{
     RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::extract_unity_asset_bundle;
-use haruki_sekai_asset_updater::{
-    AssetStudioFfiClient, AssetStudioInspectOptions, AssetStudioObjectReadOptions,
-};
 use tempfile::tempdir;
 
 fn required_env(name: &str) -> Option<String> {
@@ -28,67 +25,6 @@ fn real_assetstudio_ffi_exports_expected_file_when_configured() {
         return;
     };
     run_real_assetstudio_export(asset_studio_ffi_library_path);
-}
-
-#[test]
-fn real_assetstudio_ffi_client_reads_object_when_configured() {
-    let Some(asset_studio_ffi_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
-        return;
-    };
-    let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
-        return;
-    };
-
-    let unity_version =
-        required_env("ASSET_STUDIO_UNITY_VERSION").unwrap_or_else(|| "2022.3.21f1".to_string());
-    let asset_types = required_env("ASSET_STUDIO_ASSET_TYPES")
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| vec!["tex2d".to_string()]);
-    let filter_by_path_ids: Vec<i64> = required_env("ASSET_STUDIO_FILTER_BY_PATH_IDS")
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::parse::<i64>)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap()
-        })
-        .unwrap_or_default();
-
-    let mut options = AssetStudioInspectOptions::new(&bundle_path)
-        .asset_types(asset_types)
-        .unity_version(unity_version);
-    if !filter_by_path_ids.is_empty() {
-        options = options.filter_by_path_ids(filter_by_path_ids);
-    }
-    let mut context = AssetStudioFfiClient::new(asset_studio_ffi_library_path)
-        .open_context(&options)
-        .unwrap();
-    assert!(
-        !context.open_response().assets.is_empty(),
-        "FFI client context_open returned no assets"
-    );
-    let path_id = required_env("ASSET_STUDIO_READ_PATH_ID")
-        .map(|value| value.parse::<i64>().unwrap())
-        .unwrap_or_else(|| context.open_response().assets[0].path_id);
-    let read = context
-        .read_object(&AssetStudioObjectReadOptions::new(path_id))
-        .unwrap();
-    assert!(read.response.success);
-    assert!(
-        read.response.payload_len >= 0,
-        "FFI client object read returned an invalid payload length"
-    );
-    context.close().unwrap();
 }
 
 fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
@@ -158,6 +94,8 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
             },
             asset_studio: haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig {
                 library_path: Some(asset_studio_ffi_library_path),
+                worker_path: required_env("ASSET_STUDIO_FFI_WORKER_PATH")
+                    .or_else(|| required_env("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH")),
                 ..haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default()
             },
             ..haruki_sekai_asset_updater::core::config::BackendsConfig::default()
