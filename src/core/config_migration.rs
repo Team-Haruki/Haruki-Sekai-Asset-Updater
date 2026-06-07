@@ -162,6 +162,8 @@ fn migrate_export_config(root: &mut Mapping) {
             let export = mapping_child(region, "export");
             let images = mapping_child(export, "images");
             migrate_image_export_formats(images);
+            let video = mapping_child(export, "video");
+            migrate_video_export_formats(video);
             let audio = mapping_child(export, "audio");
             migrate_audio_export_formats(audio);
         }
@@ -189,6 +191,50 @@ fn migrate_image_export_formats(images: &mut Mapping) {
     }
     images.remove(Value::String("convert_to_webp".to_string()));
     images.remove(Value::String("remove_png".to_string()));
+}
+
+fn migrate_video_export_formats(video: &mut Mapping) {
+    if !video.contains_key(Value::String("formats".to_string())) {
+        let has_legacy_video = video.contains_key(Value::String("convert_to_mp4".to_string()))
+            || video.contains_key(Value::String("convert_video_to_mp4".to_string()))
+            || video.contains_key(Value::String("remove_m2v".to_string()));
+        if !has_legacy_video {
+            video.insert(
+                Value::String("formats".to_string()),
+                Value::Sequence(vec![Value::String("mp4".to_string())]),
+            );
+        } else {
+            let convert_to_mp4 = bool_mapping_value(video, "convert_to_mp4")
+                || bool_mapping_value(video, "convert_video_to_mp4");
+            let remove_m2v = bool_mapping_value(video, "remove_m2v");
+            let mut formats = Vec::new();
+            if !convert_to_mp4 || !remove_m2v {
+                formats.push(Value::String("m2v".to_string()));
+            }
+            if convert_to_mp4 {
+                formats.push(Value::String("mp4".to_string()));
+            }
+            if formats.is_empty() {
+                formats.push(Value::String("mp4".to_string()));
+            }
+            video.insert(
+                Value::String("formats".to_string()),
+                Value::Sequence(formats),
+            );
+        }
+    }
+    if !video.contains_key(Value::String("direct_mp4".to_string())) {
+        if let Some(value) =
+            video.remove(Value::String("direct_usm_to_mp4_with_ffmpeg".to_string()))
+        {
+            video.insert(Value::String("direct_mp4".to_string()), value);
+        }
+    } else {
+        video.remove(Value::String("direct_usm_to_mp4_with_ffmpeg".to_string()));
+    }
+    video.remove(Value::String("convert_to_mp4".to_string()));
+    video.remove(Value::String("convert_video_to_mp4".to_string()));
+    video.remove(Value::String("remove_m2v".to_string()));
 }
 
 fn migrate_audio_export_formats(audio: &mut Mapping) {
@@ -363,6 +409,10 @@ regions:
       images:
         convert_to_webp: true
         remove_png: true
+      video:
+        convert_video_to_mp4: true
+        direct_usm_to_mp4_with_ffmpeg: true
+        remove_m2v: false
       audio:
         convert_audio_to_mp3: true
         convert_wav_to_flac: true
@@ -388,11 +438,16 @@ regions:
         assert!(migrated.contains("png_compression: fast"));
         assert!(migrated.contains("formats:"));
         assert!(migrated.contains("- webp"));
+        assert!(migrated.contains("- m2v"));
         assert!(migrated.contains("- wav"));
         assert!(migrated.contains("- flac"));
         assert!(migrated.contains("- mp3"));
+        assert!(migrated.contains("direct_mp4: true"));
         assert!(!migrated.contains("convert_to_webp"));
         assert!(!migrated.contains("remove_png"));
+        assert!(!migrated.contains("convert_video_to_mp4"));
+        assert!(!migrated.contains("direct_usm_to_mp4_with_ffmpeg"));
+        assert!(!migrated.contains("remove_m2v"));
         assert!(!migrated.contains("convert_audio_to_mp3"));
         assert!(!migrated.contains("convert_wav_to_flac"));
         assert!(!migrated.contains("remove_wav"));

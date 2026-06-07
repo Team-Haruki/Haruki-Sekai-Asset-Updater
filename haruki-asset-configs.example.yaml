@@ -157,9 +157,8 @@ regions:
       images:
         formats: ["png"] # png | jpg | webp
       video:
-        convert_to_mp4: true
-        direct_usm_to_mp4_with_ffmpeg: true
-        remove_m2v: true
+        formats: ["mp4"] # m2v | mp4
+        direct_mp4: true
       audio:
         formats: ["mp3"] # wav | flac | mp3
     upload:
@@ -208,9 +207,8 @@ regions:
       images:
         formats: ["png"] # png | jpg | webp
       video:
-        convert_to_mp4: true
-        direct_usm_to_mp4_with_ffmpeg: false
-        remove_m2v: true
+        formats: ["mp4"] # m2v | mp4
+        direct_mp4: false
       audio:
         formats: ["mp3"] # wav | flac | mp3
     upload:

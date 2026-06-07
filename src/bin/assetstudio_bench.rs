@@ -6,7 +6,7 @@ use haruki_sekai_asset_updater::core::config::{
     AppConfig, AssetStudioBackendConfig, AssetStudioFfiCallMode, AudioOutputFormat, BackendsConfig,
     ChartHashConfig, ExecutionConfig, GitSyncConfig, ImageExportConfig, ImageOutputFormat,
     MediaBackendConfig, RegionConfig, RegionExportConfig, RegionPathsConfig, RegionProviderConfig,
-    RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
+    RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig, VideoOutputFormat,
 };
 use haruki_sekai_asset_updater::core::export_pipeline::{
     extract_unity_asset_bundle, query_assetstudio_ffi_version, query_assetstudio_ffi_version_worker,
@@ -315,9 +315,8 @@ fn benchmark_region(args: &Args) -> RegionConfig {
         export: RegionExportConfig {
             by_category: args.by_category,
             video: haruki_sekai_asset_updater::core::config::VideoExportConfig {
-                convert_to_mp4: false,
-                direct_usm_to_mp4_with_ffmpeg: false,
-                remove_m2v: false,
+                formats: vec![VideoOutputFormat::M2v],
+                direct_mp4: false,
             },
             audio: haruki_sekai_asset_updater::core::config::AudioExportConfig {
                 formats: vec![AudioOutputFormat::Wav],

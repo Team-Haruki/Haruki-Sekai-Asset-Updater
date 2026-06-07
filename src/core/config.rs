@@ -172,6 +172,7 @@ impl AppConfig {
         validate_image_backend(&self.backends.image)?;
         for (region_name, region) in &self.regions {
             validate_image_export_config(region_name, &region.export.images)?;
+            validate_video_export_config(region_name, &region.export.video)?;
             validate_audio_export_config(region_name, &region.export.audio)?;
         }
         validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
@@ -735,6 +736,21 @@ fn validate_image_export_config(
     Ok(())
 }
 
+fn validate_video_export_config(
+    region_name: &str,
+    video: &VideoExportConfig,
+) -> Result<(), ConfigError> {
+    let formats = video.output_formats();
+    if formats.is_empty() {
+        return Err(ConfigError::InvalidValue {
+            field: format!("regions.{region_name}.export.video.formats"),
+            value: "[]".to_string(),
+            expected: "at least one of m2v or mp4".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_audio_export_config(
     region_name: &str,
     audio: &AudioExportConfig,
@@ -751,6 +767,16 @@ fn validate_audio_export_config(
 }
 
 fn dedupe_image_formats(formats: Vec<ImageOutputFormat>) -> Vec<ImageOutputFormat> {
+    let mut output = Vec::new();
+    for format in formats {
+        if !output.contains(&format) {
+            output.push(format);
+        }
+    }
+    output
+}
+
+fn dedupe_video_formats(formats: Vec<VideoOutputFormat>) -> Vec<VideoOutputFormat> {
     let mut output = Vec::new();
     for format in formats {
         if !output.contains(&format) {
@@ -1055,6 +1081,29 @@ impl FromStr for ImageOutputFormat {
                 field: "export.images.formats".to_string(),
                 value: other.to_string(),
                 expected: "png, jpg, or webp".to_string(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoOutputFormat {
+    M2v,
+    Mp4,
+}
+
+impl FromStr for VideoOutputFormat {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_lowercase().as_str() {
+            "m2v" => Ok(Self::M2v),
+            "mp4" => Ok(Self::Mp4),
+            other => Err(ConfigError::InvalidValue {
+                field: "export.video.formats".to_string(),
+                value: other.to_string(),
+                expected: "m2v or mp4".to_string(),
             }),
         }
     }
@@ -1673,20 +1722,32 @@ impl ImageExportConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct VideoExportConfig {
-    pub convert_to_mp4: bool,
-    pub direct_usm_to_mp4_with_ffmpeg: bool,
-    pub remove_m2v: bool,
+    pub formats: Vec<VideoOutputFormat>,
+    pub direct_mp4: bool,
 }
 
 impl Default for VideoExportConfig {
     fn default() -> Self {
         Self {
-            convert_to_mp4: true,
-            direct_usm_to_mp4_with_ffmpeg: false,
-            remove_m2v: true,
+            formats: vec![VideoOutputFormat::Mp4],
+            direct_mp4: false,
         }
+    }
+}
+
+impl VideoExportConfig {
+    pub fn output_formats(&self) -> Vec<VideoOutputFormat> {
+        dedupe_video_formats(self.formats.clone())
+    }
+
+    pub fn writes_m2v(&self) -> bool {
+        self.output_formats().contains(&VideoOutputFormat::M2v)
+    }
+
+    pub fn writes_mp4(&self) -> bool {
+        self.output_formats().contains(&VideoOutputFormat::Mp4)
     }
 }
 
@@ -1914,6 +1975,29 @@ asset_studio:
     }
 
     #[test]
+    fn video_export_formats_default_to_mp4_and_dedupe() {
+        assert_eq!(
+            VideoExportConfig::default().output_formats(),
+            vec![VideoOutputFormat::Mp4]
+        );
+
+        let video = VideoExportConfig {
+            formats: vec![
+                VideoOutputFormat::M2v,
+                VideoOutputFormat::Mp4,
+                VideoOutputFormat::M2v,
+            ],
+            direct_mp4: true,
+        };
+        assert_eq!(
+            video.output_formats(),
+            vec![VideoOutputFormat::M2v, VideoOutputFormat::Mp4]
+        );
+        assert!(video.writes_m2v());
+        assert!(video.writes_mp4());
+    }
+
+    #[test]
     fn audio_export_formats_default_to_mp3_and_dedupe() {
         assert_eq!(
             AudioExportConfig::default().output_formats(),
@@ -1941,6 +2025,7 @@ asset_studio:
     #[test]
     fn rejects_legacy_runtime_export_format_fields() {
         assert!(yaml_serde::from_str::<ImageExportConfig>("convert_to_webp: true").is_err());
+        assert!(yaml_serde::from_str::<VideoExportConfig>("convert_to_mp4: true").is_err());
         assert!(yaml_serde::from_str::<AudioExportConfig>("convert_to_mp3: true").is_err());
     }
 

@@ -6731,9 +6731,11 @@ async fn process_usm_input_with_metrics(
 ) -> Result<UsmPostProcessOutput, ExportPipelineError> {
     let mut output = UsmPostProcessOutput::default();
     let output_name = usm_input.output_name()?;
+    let writes_mp4 = region.export.video.writes_mp4();
+    let writes_m2v = region.export.video.writes_m2v();
 
     if let Some(usm_file) = usm_input.path() {
-        if region.export.video.convert_to_mp4 && region.export.video.direct_usm_to_mp4_with_ffmpeg {
+        if writes_mp4 && !writes_m2v && region.export.video.direct_mp4 {
             let mp4 = export_path.join(format!("{output_name}.mp4"));
             let phase_started = Instant::now();
             convert_usm_to_mp4_with_backend(usm_file, &mp4, ffmpeg_path, media_backend, retry)
@@ -6759,7 +6761,7 @@ async fn process_usm_input_with_metrics(
         UsmProcessingInput::Bytes { .. } => None,
     };
 
-    if region.export.video.convert_to_mp4 && region.export.video.remove_m2v {
+    if writes_mp4 && !writes_m2v {
         let phase_started = Instant::now();
         let streams = export_usm_input_to_memory(usm_input, false)?;
         add_elapsed_phase_ms(
@@ -6803,7 +6805,7 @@ async fn process_usm_input_with_metrics(
             phase_started,
         );
 
-        if region.export.video.convert_to_mp4 {
+        if writes_mp4 {
             if let Some(video) = streams
                 .iter()
                 .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
@@ -6825,7 +6827,7 @@ async fn process_usm_input_with_metrics(
                     phase_started,
                 );
                 generated.push(mp4);
-                if region.export.video.remove_m2v {
+                if !writes_m2v {
                     generated.retain(|path| {
                         !path
                             .extension()
@@ -6860,7 +6862,7 @@ async fn process_usm_input_with_metrics(
     );
     let mut generated = extracted.clone();
 
-    if region.export.video.convert_to_mp4 {
+    if writes_mp4 {
         for extracted_file in extracted {
             if extracted_file
                 .extension()
@@ -6873,7 +6875,7 @@ async fn process_usm_input_with_metrics(
                 convert_m2v_to_mp4_with_backend(
                     &extracted_file,
                     &mp4,
-                    region.export.video.remove_m2v,
+                    !writes_m2v,
                     ffmpeg_path,
                     media_backend,
                     frame_rate,
@@ -6886,7 +6888,7 @@ async fn process_usm_input_with_metrics(
                     phase_started,
                 );
                 generated.push(mp4);
-                if region.export.video.remove_m2v {
+                if !writes_m2v {
                     generated.retain(|path| path != &extracted_file);
                 }
             }
@@ -9249,9 +9251,8 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
                     formats: vec![crate::core::config::AudioOutputFormat::Wav],
                 },
                 video: crate::core::config::VideoExportConfig {
-                    convert_to_mp4: false,
-                    direct_usm_to_mp4_with_ffmpeg: false,
-                    remove_m2v: true,
+                    formats: vec![crate::core::config::VideoOutputFormat::M2v],
+                    direct_mp4: false,
                 },
                 ..RegionExportConfig::default()
             },
@@ -9638,8 +9639,8 @@ pub unsafe extern "C" fn haruki_assetstudio_free_string(value: *mut c_char) {
                 }
 
                 let (_config, mut region) = processing_config();
-                region.export.video.convert_to_mp4 = true;
-                region.export.video.direct_usm_to_mp4_with_ffmpeg = true;
+                region.export.video.formats = vec![crate::core::config::VideoOutputFormat::Mp4];
+                region.export.video.direct_mp4 = true;
 
                 let runtime = tokio::runtime::Runtime::new().unwrap();
                 let generated = runtime

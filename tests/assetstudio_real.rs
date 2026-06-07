@@ -155,9 +155,8 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
         export: RegionExportConfig {
             by_category,
             video: haruki_sekai_asset_updater::core::config::VideoExportConfig {
-                convert_to_mp4: false,
-                direct_usm_to_mp4_with_ffmpeg: false,
-                remove_m2v: false,
+                formats: vec![haruki_sekai_asset_updater::core::config::VideoOutputFormat::M2v],
+                direct_mp4: false,
             },
             audio: haruki_sekai_asset_updater::core::config::AudioExportConfig {
                 formats: vec![haruki_sekai_asset_updater::core::config::AudioOutputFormat::Wav],

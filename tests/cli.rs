@@ -144,6 +144,10 @@ regions:
       images:
         convert_to_webp: true
         remove_png: false
+      video:
+        convert_video_to_mp4: true
+        direct_usm_to_mp4_with_ffmpeg: true
+        remove_m2v: false
       audio:
         convert_audio_to_mp3: true
         convert_wav_to_flac: true
@@ -170,9 +174,11 @@ regions:
     assert!(migrated.contains("formats:"));
     assert!(migrated.contains("- png"));
     assert!(migrated.contains("- webp"));
+    assert!(migrated.contains("- m2v"));
     assert!(migrated.contains("- wav"));
     assert!(migrated.contains("- flac"));
     assert!(migrated.contains("- mp3"));
+    assert!(migrated.contains("direct_mp4: true"));
     assert!(migrated.contains("library_path: /tmp/libHarukiAssetStudioFFI.dylib"));
     assert!(migrated.contains("resources:"));
     assert!(migrated.contains("budget_ratio: 0.5"));
@@ -181,6 +187,9 @@ regions:
     assert!(!migrated.contains("asset_studio_native_"));
     assert!(!migrated.contains("convert_to_webp"));
     assert!(!migrated.contains("remove_png"));
+    assert!(!migrated.contains("convert_video_to_mp4"));
+    assert!(!migrated.contains("direct_usm_to_mp4_with_ffmpeg"));
+    assert!(!migrated.contains("remove_m2v"));
     assert!(!migrated.contains("convert_audio_to_mp3"));
     assert!(!migrated.contains("convert_wav_to_flac"));
     assert!(!migrated.contains("remove_wav"));

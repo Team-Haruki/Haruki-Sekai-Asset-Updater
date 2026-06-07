@@ -130,9 +130,9 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 | `decode_hca_files` | `export.hca.decode` |
 | `convert_photo_to_webp` | `export.images.formats` | Migrated to `["png", "webp"]` or `["webp"]` depending on `remove_png`. |
 | `remove_png` | `export.images.formats` | Only meaningful with `convert_photo_to_webp`; migrated into the final format list. |
-| `convert_video_to_mp4` | `export.video.convert_to_mp4` |
-| `direct_usm_to_mp4_with_ffmpeg` | `export.video.direct_usm_to_mp4_with_ffmpeg` |
-| `remove_m2v` | `export.video.remove_m2v` |
+| `convert_video_to_mp4` | `export.video.formats` | Adds `mp4` to the final format list. |
+| `direct_usm_to_mp4_with_ffmpeg` | `export.video.direct_mp4` |
+| `remove_m2v` | `export.video.formats` | Omitting/removing m2v is represented by the final format list. |
 | `convert_audio_to_mp3` | `export.audio.formats` | Adds `mp3` to the final format list. |
 | `convert_wav_to_flac` | `export.audio.formats` | Adds `flac` to the final format list. |
 | `remove_wav` | `export.audio.formats` | Omitting/removing wav is represented by the final format list. |
@@ -159,6 +159,8 @@ Every former `servers.<region>` entry becomes `regions.<region>` with nested gro
 - `backends.image.png_compression` defaults to `fast`.
 - `backends.asset_studio.call_mode` defaults to `pool`.
 - `export.images.formats` defaults to `["png"]`.
+- `export.video.formats` defaults to `["mp4"]`.
+- `export.video.direct_mp4` defaults to `false`.
 - `export.audio.formats` defaults to `["mp3"]`.
 - `resources.cpu.budget_auto` defaults to `true`.
 - `resources.cpu.budget_ratio` defaults to `0.75`.
