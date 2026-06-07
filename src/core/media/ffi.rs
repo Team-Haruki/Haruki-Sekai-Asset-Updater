@@ -136,6 +136,9 @@ fn ensure_ffmpeg_loaded() -> Result<(), ExportPipelineError> {
             message: "FFmpeg libraries are unavailable".to_string(),
         });
     }
+    unsafe {
+        ffi::av_log_set_level(ffi::AV_LOG_ERROR as i32);
+    }
     Ok(())
 }
 

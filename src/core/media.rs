@@ -478,6 +478,7 @@ fn run_ffmpeg<'a>(ffmpeg_path: &'a str, args: &'a [&'a str]) -> FfmpegCommand<'a
 
 fn run_ffmpeg_sync(ffmpeg_path: &str, args: &[&str]) -> Result<(), ExportPipelineError> {
     let output = std::process::Command::new(ffmpeg_path)
+        .args(ffmpeg_quiet_args())
         .args(args)
         .output()
         .map_err(|source| ExportPipelineError::Spawn {
@@ -495,6 +496,7 @@ struct FfmpegCommand<'a> {
 impl<'a> FfmpegCommand<'a> {
     async fn run_async(self) -> Result<(), ExportPipelineError> {
         let output = Command::new(self.ffmpeg_path)
+            .args(ffmpeg_quiet_args())
             .args(self.args)
             .output()
             .await
@@ -504,6 +506,10 @@ impl<'a> FfmpegCommand<'a> {
             })?;
         map_command_output(self.ffmpeg_path, output)
     }
+}
+
+fn ffmpeg_quiet_args() -> [&'static str; 3] {
+    ["-hide_banner", "-loglevel", "error"]
 }
 
 fn is_retryable_command_error(err: &ExportPipelineError) -> bool {
