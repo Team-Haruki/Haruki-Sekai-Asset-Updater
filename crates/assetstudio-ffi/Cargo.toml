@@ -1,6 +1,6 @@
 [package]
 name = "haruki-assetstudio-ffi"
-version = "6.0.2"
+version = "6.0.3"
 edition = "2021"
 description = "AssetStudio FFI worker and typed ABI support for Haruki Sekai Asset Updater"
 license = "MIT"

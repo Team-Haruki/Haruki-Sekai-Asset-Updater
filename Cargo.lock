@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "haruki-assetstudio-ffi"
-version = "6.0.2"
+version = "6.0.3"
 dependencies = [
  "clap",
  "libc",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "haruki-sekai-asset-updater"
-version = "6.0.2"
+version = "6.0.3"
 dependencies = [
  "aes 0.9.1",
  "axum",
