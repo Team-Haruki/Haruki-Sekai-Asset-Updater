@@ -131,14 +131,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p assetstudio-cache
-          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName -q '.[0].tagName // ""')"
+          previous_tag="$(
+            gh release list \
+              --repo "${GITHUB_REPOSITORY}" \
+              --exclude-drafts \
+              --exclude-pre-releases \
+              --limit 20 \
+              --json tagName \
+              -q '[.[] | select(.tagName != "${{ github.ref_name }}")][0].tagName // ""'
+          )"
           if [ -z "${previous_tag}" ]; then
             echo "hit=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           package_file="$(basename "${FFI_ARCHIVE_PATH}")"
-          if gh release download "${previous_tag}" --pattern "${package_file}" --dir assetstudio-cache --clobber; then
+          if gh release download "${previous_tag}" --repo "${GITHUB_REPOSITORY}" --pattern "${package_file}" --dir assetstudio-cache --clobber; then
             echo "Reused ${package_file} from release ${previous_tag}"
             echo "hit=true" >> "$GITHUB_OUTPUT"
           else
