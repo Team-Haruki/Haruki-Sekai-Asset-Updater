@@ -488,7 +488,6 @@ struct NativeObjectExportOptions<'a> {
     read_kinds: &'a BTreeMap<String, String>,
     image_format: &'a str,
     read_batch_size: usize,
-    cli_parity_mode: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -709,7 +708,6 @@ async fn run_assetstudio_ffi_object_export(
                 .as_deref()
                 .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
             read_batch_size: app_config.backends.asset_studio.read_batch_size,
-            cli_parity_mode: app_config.backends.asset_studio.cli_parity_mode,
         };
         let mut worker = NativeDirectWorker::load(native_library_path)?;
         return call_assetstudio_ffi_object_export_with_target(
@@ -763,7 +761,6 @@ async fn run_assetstudio_ffi_object_export(
             .as_deref()
             .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
         read_batch_size: app_config.backends.asset_studio.read_batch_size,
-        cli_parity_mode: app_config.backends.asset_studio.cli_parity_mode,
     };
     let result = pool.object_export(&inspect_request, unpack_options).await;
 
@@ -3465,15 +3462,6 @@ fn write_native_object_payload(
         read_output.response.payload_kind.as_deref(),
         read_output.response.suggested_extension.as_deref(),
     );
-    let target = if options.cli_parity_mode {
-        assetstudio_cli_parity_output_path(
-            &target,
-            asset,
-            read_output.response.suggested_extension.as_deref(),
-        )
-    } else {
-        target
-    };
     let target = text_asset_public_bytes_target(&target, asset).unwrap_or(target);
     let target = assetbundle_typetree_output_path(
         options.output_dir,
@@ -3521,7 +3509,7 @@ fn write_native_object_payload(
             options.region,
         )
     } else {
-        write_native_payload_file(&target, &read_output.payload, options.cli_parity_mode)?;
+        write_native_payload_file(&target, &read_output.payload)?;
         vec![target.clone()]
     };
     let manifest_target = if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
@@ -3638,7 +3626,7 @@ fn write_assetstudio_playable_payloads(
                 source,
             })?;
         }
-        write_native_payload_file(&target, &payload, options.cli_parity_mode)?;
+        write_native_payload_file(&target, &payload)?;
         path_state.written_files.push(target.clone());
         write_assetstudio_export_manifest_entry(
             options.output_dir,
@@ -3853,21 +3841,9 @@ fn is_text_asset_acb_target(asset: &AssetStudioFfiAssetInfo, target: &Path) -> b
             .is_some_and(|extension| extension.eq_ignore_ascii_case("acb"))
 }
 
-fn write_native_payload_file(
-    target: &Path,
-    payload: &[u8],
-    cli_parity_mode: bool,
-) -> Result<(), ExportPipelineError> {
+fn write_native_payload_file(target: &Path, payload: &[u8]) -> Result<(), ExportPipelineError> {
     match std::fs::write(target, payload) {
         Ok(()) => Ok(()),
-        Err(source) if cli_parity_mode && is_assetstudio_cli_skippable_write_error(&source) => {
-            warn!(
-                path = %target.display(),
-                error = %source,
-                "assetstudio ffi CLI parity skipped an object output that AssetStudio CLI cannot write either"
-            );
-            Ok(())
-        }
         Err(source) => Err(ExportPipelineError::Io {
             path: target.to_path_buf(),
             source,
@@ -4173,10 +4149,6 @@ fn native_rgba_ir_contiguous_pixels<'a>(raw_rgba: &'a NativeRgbaIr<'a>) -> Cow<'
         pixels.extend_from_slice(&raw_rgba.pixels[start..start + raw_rgba.row_bytes]);
     }
     Cow::Owned(pixels)
-}
-
-fn is_assetstudio_cli_skippable_write_error(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(63) | Some(36))
 }
 
 fn write_payload_bundle(
@@ -4855,60 +4827,6 @@ fn static_known_payload_extension(extension: &str) -> Option<&'static str> {
         "fbx" => Some("fbx"),
         "bin" => Some("bin"),
         _ => None,
-    }
-}
-
-fn assetstudio_cli_parity_output_path(
-    default_path: &Path,
-    asset: &AssetStudioFfiAssetInfo,
-    suggested_extension: Option<&str>,
-) -> PathBuf {
-    let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
-    let file_name = asset
-        .name
-        .as_deref()
-        .map(assetstudio_fix_file_name)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| assetstudio_semantic_file_stem(asset));
-    let extension = assetstudio_cli_parity_extension(asset, suggested_extension);
-    parent.join(format!("{file_name}{extension}"))
-}
-
-fn assetstudio_cli_parity_extension(
-    asset: &AssetStudioFfiAssetInfo,
-    suggested_extension: Option<&str>,
-) -> String {
-    if asset
-        .asset_type
-        .as_deref()
-        .is_some_and(|asset_type| assetstudio_type_selector_matches("textAsset", asset_type))
-    {
-        if asset
-            .name
-            .as_deref()
-            .is_some_and(|name| Path::new(name).extension().is_some())
-        {
-            return String::new();
-        }
-        if let Some(extension) = asset
-            .container
-            .as_deref()
-            .and_then(|container| Path::new(container).extension())
-            .and_then(|extension| extension.to_str())
-            .filter(|extension| !extension.is_empty())
-        {
-            return format!(".{extension}");
-        }
-        return ".txt".to_string();
-    }
-
-    let extension = suggested_extension
-        .and_then(static_known_payload_extension)
-        .unwrap_or_else(|| default_extension_for_asset(asset));
-    if extension.is_empty() {
-        String::new()
-    } else {
-        format!(".{}", extension.trim_start_matches('.'))
     }
 }
 
@@ -9319,7 +9237,6 @@ mod tests {
             read_kinds: &read_kinds,
             image_format: "raw_rgba",
             read_batch_size: 16,
-            cli_parity_mode: false,
         };
         let mut path_state = NativeSemanticExportPathState::default();
         let asset = AssetStudioFfiAssetInfo {
@@ -9385,7 +9302,6 @@ mod tests {
             read_kinds: &read_kinds,
             image_format: "bmp",
             read_batch_size: 16,
-            cli_parity_mode: false,
         };
         let mut path_state = NativeSemanticExportPathState::default();
         let asset = AssetStudioFfiAssetInfo {
@@ -9446,7 +9362,6 @@ mod tests {
             read_kinds: &read_kinds,
             image_format: "bmp",
             read_batch_size: 16,
-            cli_parity_mode: false,
         };
         let mut path_state = NativeSemanticExportPathState::default();
         let asset = AssetStudioFfiAssetInfo {
@@ -9513,7 +9428,6 @@ mod tests {
             read_kinds: &read_kinds,
             image_format: "bmp",
             read_batch_size: 16,
-            cli_parity_mode: false,
         };
         let mut path_state = NativeSemanticExportPathState::default();
         let asset = AssetStudioFfiAssetInfo {
@@ -9585,7 +9499,6 @@ mod tests {
             read_kinds: &read_kinds,
             image_format: "bmp",
             read_batch_size: 16,
-            cli_parity_mode: false,
         };
         let mut path_state = NativeSemanticExportPathState::default();
         let asset = AssetStudioFfiAssetInfo {

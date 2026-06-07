@@ -251,10 +251,6 @@ impl AppConfig {
             self.backends.asset_studio.image_format =
                 non_empty_option(normalize_asset_studio_ffi_image_format(&value)?);
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_CLI_PARITY_MODE") {
-            self.backends.asset_studio.cli_parity_mode =
-                parse_bool_env("backends.asset_studio.cli_parity_mode", &value)?;
-        }
         if let Ok(value) = env::var("HARUKI_ASSET_HTTP_VERSION") {
             self.server.asset_http_version = value.parse()?;
         }
@@ -994,7 +990,6 @@ pub struct AssetStudioBackendConfig {
     pub read_batch_size: usize,
     pub image_format: Option<String>,
     pub read_kinds: BTreeMap<String, String>,
-    pub cli_parity_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1245,7 +1240,6 @@ impl Default for AssetStudioBackendConfig {
             read_batch_size: 32,
             image_format: None,
             read_kinds: BTreeMap::new(),
-            cli_parity_mode: false,
         }
     }
 }
