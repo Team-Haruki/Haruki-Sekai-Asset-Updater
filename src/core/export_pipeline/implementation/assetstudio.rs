@@ -640,7 +640,7 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
         Vec::new()
     };
 
-    if !(output.status_success && response.success) {
+    if !(output.status_success && response.success) && response.reads.len() != assets.len() {
         let message = response.error.clone().unwrap_or_else(|| {
             format!(
                 "native context_read_objects failed with status {}: {}",
