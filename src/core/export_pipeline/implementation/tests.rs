@@ -856,6 +856,131 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
 }
 
 #[test]
+fn music_score_text_asset_manifest_uses_public_txt_extension() {
+    let dir = tempdir().unwrap();
+    let (_config, mut region) = processing_config();
+    region.export.by_category = true;
+    let read_kinds = BTreeMap::new();
+    let options = NativeObjectExportOptions {
+        output_dir: dir.path(),
+        export_path: "music/music_score/0002_01",
+        strip_path_prefix: "assets/sekai/assetbundle/resources",
+        region: &region,
+        read_kinds: &read_kinds,
+        image_format: "raw_rgba",
+        read_batch_size: 16,
+    };
+    let mut path_state = NativeSemanticExportPathState::default();
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("append".to_string()),
+        container: Some(
+            "assets/sekai/assetbundle/resources/startapp/music/music_score/0002_01/append.bytes"
+                .to_string(),
+        ),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 123,
+        unique_id: None,
+        size: 4,
+        source_file: None,
+    };
+    let read_output = AssetStudioFfiObjectReadOutput {
+        response: AssetStudioFfiObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("text_bytes".to_string()),
+            payload_len: 4,
+            suggested_extension: Some(".bytes".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: b"score".to_vec(),
+    };
+
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+    let expected = dir
+        .path()
+        .join("startapp/music/music_score/0002_01/append.txt");
+    assert!(expected.exists());
+    let manifest =
+        fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+    let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
+    assert_eq!(
+        entry.get("path").and_then(|value| value.as_str()),
+        Some("startapp/music/music_score/0002_01/append.txt")
+    );
+    assert_eq!(
+        entry
+            .get("suggested_extension")
+            .and_then(|value| value.as_str()),
+        Some(".txt")
+    );
+}
+
+#[test]
+fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
+    let dir = tempdir().unwrap();
+    let (_config, mut region) = processing_config();
+    region.export.by_category = true;
+    region.export.usm.export = true;
+    region.export.usm.decode = true;
+    let read_kinds = BTreeMap::new();
+    let options = NativeObjectExportOptions {
+        output_dir: dir.path(),
+        export_path: "event/opening",
+        strip_path_prefix: "assets/sekai/assetbundle/resources",
+        region: &region,
+        read_kinds: &read_kinds,
+        image_format: "raw_rgba",
+        read_batch_size: 16,
+    };
+    let mut path_state = NativeSemanticExportPathState::default();
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("opening-001.usm".to_string()),
+        container: Some(
+            "assets/sekai/assetbundle/resources/ondemand/event/opening/opening-001.usm.bytes"
+                .to_string(),
+        ),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 123,
+        unique_id: None,
+        size: 4,
+        source_file: None,
+    };
+    let read_output = AssetStudioFfiObjectReadOutput {
+        response: AssetStudioFfiObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("text_bytes".to_string()),
+            payload_len: 4,
+            suggested_extension: Some(".bytes".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: b"usm!".to_vec(),
+    };
+
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+    assert!(dir
+        .path()
+        .join("ondemand/event/opening/opening-001.usm")
+        .exists());
+    assert!(!dir
+        .path()
+        .join(".assetstudio-export-manifest.jsonl")
+        .exists());
+}
+
+#[test]
 fn assetbundle_typetree_routes_to_container_bundle_record_path() {
     let dir = tempdir().unwrap();
     let (_config, mut region) = processing_config();
@@ -1553,6 +1678,12 @@ fn manifest_records_native_surrogate_image_public_png_path() {
         entry.get("path").and_then(|value| value.as_str()),
         Some("startapp/foo/normal.png")
     );
+    assert_eq!(
+        entry
+            .get("suggested_extension")
+            .and_then(|value| value.as_str()),
+        Some(".png")
+    );
 }
 
 #[test]
@@ -1603,6 +1734,12 @@ fn manifest_records_animator_bundle_public_fbx_path() {
     assert_eq!(
         entry.get("path").and_then(|value| value.as_str()),
         Some("ondemand/foo/foo.assets/animator/model/FBX_Animator/model/model.fbx")
+    );
+    assert_eq!(
+        entry
+            .get("suggested_extension")
+            .and_then(|value| value.as_str()),
+        Some(".fbx")
     );
 }
 
@@ -1732,6 +1869,131 @@ fn semantic_export_path_state_disambiguates_without_path_id() {
         PathBuf::from("/tmp/out/shared.assets/monobehaviour/shared__dup2.json")
     );
     assert!(!second.to_string_lossy().contains("12345"));
+}
+
+#[test]
+fn native_object_export_skips_byte_identical_semantic_duplicates() {
+    let dir = tempdir().unwrap();
+    let (_config, mut region) = processing_config();
+    region.export.by_category = true;
+    let read_kinds = BTreeMap::new();
+    let options = NativeObjectExportOptions {
+        output_dir: dir.path(),
+        export_path: "character/member/res004_no026",
+        strip_path_prefix: "assets/sekai/assetbundle/resources",
+        region: &region,
+        read_kinds: &read_kinds,
+        image_format: "raw_rgba",
+        read_batch_size: 16,
+    };
+    let mut path_state = NativeSemanticExportPathState::default();
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("004026_shiho01".to_string()),
+        container: Some(
+            "assets/sekai/assetbundle/resources/startapp/character/member/res004_no026/004026_shiho01.asset"
+                .to_string(),
+        ),
+        asset_type: Some("MonoBehaviour".to_string()),
+        type_id: 114,
+        path_id: 1,
+        unique_id: None,
+        size: 16,
+        source_file: None,
+    };
+    let read_output = AssetStudioFfiObjectReadOutput {
+        response: AssetStudioFfiObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("typetree_json".to_string()),
+            payload_len: 16,
+            suggested_extension: Some(".json".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: br#"{"m_Name":"004026_shiho01"}"#.to_vec(),
+    };
+
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+    let expected = dir
+        .path()
+        .join("startapp/character/member/res004_no026/004026_shiho01.json");
+    assert!(expected.exists());
+    assert!(!dir
+        .path()
+        .join("startapp/character/member/res004_no026/004026_shiho01__dup2.json")
+        .exists());
+    assert_eq!(path_state.written_files, vec![expected]);
+    let manifest =
+        fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+    assert_eq!(manifest.lines().count(), 1);
+}
+
+#[test]
+fn native_object_export_keeps_distinct_semantic_duplicates() {
+    let dir = tempdir().unwrap();
+    let (_config, mut region) = processing_config();
+    region.export.by_category = true;
+    let read_kinds = BTreeMap::new();
+    let options = NativeObjectExportOptions {
+        output_dir: dir.path(),
+        export_path: "mysekai/site/field/grasslands",
+        strip_path_prefix: "assets/sekai/assetbundle/resources",
+        region: &region,
+        read_kinds: &read_kinds,
+        image_format: "raw_rgba",
+        read_batch_size: 16,
+    };
+    let mut path_state = NativeSemanticExportPathState::default();
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("SiteObjectView".to_string()),
+        container: Some(
+            "assets/sekai/assetbundle/resources/ondemand/mysekai/site/field/grasslands/grasslands.prefab"
+                .to_string(),
+        ),
+        asset_type: Some("MonoBehaviour".to_string()),
+        type_id: 114,
+        path_id: 1,
+        unique_id: None,
+        size: 16,
+        source_file: None,
+    };
+    let mut read_output = AssetStudioFfiObjectReadOutput {
+        response: AssetStudioFfiObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("typetree_json".to_string()),
+            payload_len: 16,
+            suggested_extension: Some(".json".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: br#"{"m_GameObject":1}"#.to_vec(),
+    };
+
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+    read_output.payload = br#"{"m_GameObject":2}"#.to_vec();
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+    let first = dir
+        .path()
+        .join("ondemand/mysekai/site/field/grasslands/grasslands.assets/monobehaviour/SiteObjectView.json");
+    let second = dir
+        .path()
+        .join("ondemand/mysekai/site/field/grasslands/grasslands.assets/monobehaviour/SiteObjectView__dup2.json");
+    assert!(first.exists());
+    assert!(second.exists());
+    assert_eq!(path_state.written_files, vec![first, second]);
+    let manifest =
+        fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+    assert_eq!(manifest.lines().count(), 2);
 }
 
 #[test]

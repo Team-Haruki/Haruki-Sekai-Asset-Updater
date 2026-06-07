@@ -32,7 +32,19 @@ pub(super) fn write_native_object_payload(
         &read_output.payload,
     )?
     .unwrap_or(target);
-    let target = path_state.claim(target, asset);
+    let target = match path_state.claim_payload(target, asset, read_output) {
+        NativeSemanticPathClaim::Claimed(target) => target,
+        NativeSemanticPathClaim::Duplicate { existing } => {
+            debug!(
+                asset_type = asset.asset_type.as_deref().unwrap_or(""),
+                name = asset.name.as_deref().unwrap_or(""),
+                container = asset.container.as_deref().unwrap_or(""),
+                output_path = %existing.display(),
+                "skipping byte-identical duplicate native assetstudio object"
+            );
+            return Ok(());
+        }
+    };
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ExportPipelineError::Io {
             path: parent.to_path_buf(),
@@ -78,6 +90,9 @@ pub(super) fn write_native_object_payload(
     };
     let manifest_written_files = written_files.clone();
     path_state.written_files.extend(written_files);
+    if is_text_asset_decoded_usm_target(asset, &target, options.region) {
+        return Ok(());
+    }
     if payload_kind.starts_with("image_array_bundle_") {
         for written_file in manifest_written_files {
             let manifest_target =
@@ -220,13 +235,50 @@ pub(super) fn playable_container_output_path(
 
 impl NativeSemanticExportPathState {
     pub(super) fn claim(&mut self, path: PathBuf, asset: &AssetStudioFfiAssetInfo) -> PathBuf {
+        match self.claim_with_signature(path, asset, None) {
+            NativeSemanticPathClaim::Claimed(path)
+            | NativeSemanticPathClaim::Duplicate { existing: path } => path,
+        }
+    }
+
+    pub(super) fn claim_payload(
+        &mut self,
+        path: PathBuf,
+        asset: &AssetStudioFfiAssetInfo,
+        read_output: &AssetStudioFfiObjectReadOutput,
+    ) -> NativeSemanticPathClaim {
+        self.claim_with_signature(
+            path,
+            asset,
+            Some(native_payload_signature(asset, read_output)),
+        )
+    }
+
+    fn claim_with_signature(
+        &mut self,
+        path: PathBuf,
+        asset: &AssetStudioFfiAssetInfo,
+        signature: Option<NativePayloadSignature>,
+    ) -> NativeSemanticPathClaim {
         let mut ordinal = 1usize;
         loop {
             let candidate = semantic_duplicate_path(&path, ordinal);
+            if let Some(existing_claim) = self.claims.get(&candidate) {
+                if signature
+                    .as_ref()
+                    .zip(existing_claim.signature.as_ref())
+                    .is_some_and(|(left, right)| left == right)
+                {
+                    return NativeSemanticPathClaim::Duplicate {
+                        existing: candidate,
+                    };
+                }
+            }
             if !candidate.exists() && !self.claims.contains_key(&candidate) {
-                self.claims.insert(candidate.clone(), ordinal);
+                self.claims
+                    .insert(candidate.clone(), NativeSemanticExportClaim { signature });
                 if ordinal > 1 {
-                    warn!(
+                    debug!(
                         asset_type = asset.asset_type.as_deref().unwrap_or(""),
                         name = asset.name.as_deref().unwrap_or(""),
                         container = asset.container.as_deref().unwrap_or(""),
@@ -234,11 +286,39 @@ impl NativeSemanticExportPathState {
                         "semantic export path collision; using deterministic duplicate suffix"
                     );
                 }
-                return candidate;
+                return NativeSemanticPathClaim::Claimed(candidate);
             }
             ordinal += 1;
         }
     }
+}
+
+pub(super) fn native_payload_signature(
+    asset: &AssetStudioFfiAssetInfo,
+    read_output: &AssetStudioFfiObjectReadOutput,
+) -> NativePayloadSignature {
+    NativePayloadSignature {
+        asset_type: asset.asset_type.clone(),
+        name: asset.name.clone(),
+        container: asset.container.clone(),
+        payload_kind: read_output.response.payload_kind.clone(),
+        suggested_extension: read_output.response.suggested_extension.clone(),
+        payload_len: read_output.payload.len(),
+        payload_fingerprint: native_payload_fingerprint(&read_output.payload),
+    }
+}
+
+pub(super) fn native_payload_fingerprint(payload: &[u8]) -> [u64; 2] {
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut left = 0xcbf2_9ce4_8422_2325u64;
+    let mut right = 0x8422_2325_cbf2_9ce4u64;
+    for (index, byte) in payload.iter().copied().enumerate() {
+        left ^= byte as u64;
+        left = left.wrapping_mul(FNV_PRIME);
+        right ^= ((byte as u64) << ((index & 7) * 8)) ^ index as u64;
+        right = right.rotate_left(5).wrapping_mul(FNV_PRIME);
+    }
+    [left, right]
 }
 
 pub(super) fn semantic_duplicate_path(path: &Path, ordinal: usize) -> PathBuf {
@@ -284,7 +364,7 @@ pub(super) fn write_assetstudio_export_manifest_entry(
         name: asset.name.clone(),
         container: asset.container.clone(),
         payload_kind: read_output.response.payload_kind.clone(),
-        suggested_extension: read_output.response.suggested_extension.clone(),
+        suggested_extension: manifest_suggested_extension(&public_target, read_output),
     };
     let line = sonic_rs::to_string(&entry)
         .map_err(|source| ExportPipelineError::FfiSerialize { source })?;
@@ -350,6 +430,18 @@ pub(super) fn assetstudio_manifest_public_target(
     }
 }
 
+pub(super) fn manifest_suggested_extension(
+    public_target: &Path,
+    read_output: &AssetStudioFfiObjectReadOutput,
+) -> Option<String> {
+    public_target
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.trim().is_empty())
+        .map(|extension| format!(".{extension}"))
+        .or_else(|| read_output.response.suggested_extension.clone())
+}
+
 pub(super) fn manifest_lock_index(path: &Path) -> usize {
     let mut hash = 0usize;
     for byte in path.to_string_lossy().bytes() {
@@ -398,6 +490,20 @@ pub(super) fn is_text_asset_acb_target(asset: &AssetStudioFfiAssetInfo, target: 
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("acb"))
+}
+
+pub(super) fn is_text_asset_decoded_usm_target(
+    asset: &AssetStudioFfiAssetInfo,
+    target: &Path,
+    region: &RegionConfig,
+) -> bool {
+    region.export.usm.export
+        && region.export.usm.decode
+        && asset.asset_type.as_deref() == Some("TextAsset")
+        && target
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("usm"))
 }
 
 pub(super) fn write_native_payload_file(

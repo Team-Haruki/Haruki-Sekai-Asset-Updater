@@ -120,16 +120,17 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
   process may keep in memory, for example
   `HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES=4294967296`.
 - `resources.cpu.budget_auto` and `resources.cpu.budget_ratio` size the
-  CPU-heavy worker pools when auto tuning is enabled.
+  CPU-heavy worker pools. The default uses the available CPU budget for
+  full-throughput export runs; lower it on shared or memory-constrained hosts.
 - `resources.cpu.throttle.enabled` is optional and defaults to `false`. Enable
   it only when the process should actively wait based on sampled process-tree
   CPU usage; leave it disabled for full-throughput export runs.
 - `backends.image` controls Rust-side image encoding. Keep
   `png_compression: fast` for high-throughput exports unless smaller PNG output
   is more important than CPU time.
-- `concurrency.post_process` limits bundle post-processing. The default `0`
-  follows `concurrency.media_encode`; raise it for image-heavy full exports such
-  as `character/member`.
+- `concurrency.post_process` limits bundle post-processing. Keep it near the
+  CPU budget for production full exports, and raise `concurrency.images` for
+  image-heavy paths such as `character/member`.
 - Normal progress logging emits bundle-level start/completion/failure lines.
   Use debug logging for detailed download, native FFI, export, and post-process
   phase traces.

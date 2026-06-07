@@ -1204,7 +1204,7 @@ impl Default for AssetStudioBackendConfig {
             worker_path: None,
             process_concurrency: 0,
             worker_max_calls: 256,
-            read_batch_size: 32,
+            read_batch_size: 64,
             image_format: None,
             read_kinds: BTreeMap::new(),
         }
@@ -1249,14 +1249,14 @@ impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
             auto_tune: false,
-            download: 4,
+            download: 32,
             upload: 4,
-            post_process: 0,
-            acb: 8,
-            usm: 4,
+            post_process: 16,
+            acb: 12,
+            usm: 6,
             hca: 16,
             media_encode: 12,
-            images: 4,
+            images: 12,
         }
     }
 }
@@ -1282,28 +1282,25 @@ impl ConcurrencyConfig {
         }
         let cpus = cpus.max(1);
         let cpu_budget = cpu_budget.max(1);
+        let cpu_oversubscribe = cpu_budget.saturating_mul(2).max(cpu_budget);
         Self {
             auto_tune: true,
-            download: self.download.min(cpus.saturating_mul(2).max(2)).max(1),
+            download: self.download.min(cpus.saturating_mul(4).max(4)).max(1),
             upload: self.upload.min(cpus.max(2)).max(1),
             post_process: if self.post_process == 0 {
                 0
             } else {
                 self.post_process.min(cpus.saturating_mul(2).max(2)).max(1)
             },
-            acb: self.acb.min(cpus.max(2)).min(cpu_budget).max(1),
-            usm: self.usm.min((cpus / 2).max(1)).max(1),
+            acb: self.acb.min(cpu_oversubscribe).max(1),
+            usm: self.usm.min(cpus.max(2)).max(1),
             hca: self
                 .hca
                 .min(cpus.saturating_mul(2).max(2))
-                .min(cpu_budget)
+                .min(cpu_oversubscribe)
                 .max(1),
-            media_encode: self
-                .media_encode
-                .min(cpus.saturating_sub(1).max(1))
-                .min(cpu_budget)
-                .max(1),
-            images: self.images.min(cpus.max(2)).min(cpu_budget).max(1),
+            media_encode: self.media_encode.min(cpu_oversubscribe).max(1),
+            images: self.images.min(cpu_oversubscribe).max(1),
         }
     }
 }
@@ -1328,8 +1325,8 @@ impl Default for CpuResourceConfig {
     fn default() -> Self {
         Self {
             budget_auto: true,
-            budget_ratio: 0.75,
-            reserved: 1,
+            budget_ratio: 1.0,
+            reserved: 0,
             throttle: CpuThrottleConfig::default(),
         }
     }
@@ -1831,15 +1828,19 @@ regions:
         assert_eq!(config.backends.image.jpeg_quality, 95);
         assert_eq!(asset_studio.process_concurrency, 0);
         assert_eq!(asset_studio.worker_max_calls, 256);
-        assert_eq!(asset_studio.read_batch_size, 32);
+        assert_eq!(asset_studio.read_batch_size, 64);
         assert_eq!(asset_studio.image_format, None);
         assert!(asset_studio.read_kinds.is_empty());
-        assert_eq!(config.concurrency.images, 4);
+        assert_eq!(config.concurrency.download, 32);
+        assert_eq!(config.concurrency.post_process, 16);
+        assert_eq!(config.concurrency.acb, 12);
+        assert_eq!(config.concurrency.usm, 6);
+        assert_eq!(config.concurrency.images, 12);
         assert_eq!(config.concurrency.media_encode, 12);
         assert!(!config.concurrency.auto_tune);
         assert!(config.resources.cpu.budget_auto);
-        assert_eq!(config.resources.cpu.budget_ratio, 0.75);
-        assert_eq!(config.resources.cpu.reserved, 1);
+        assert_eq!(config.resources.cpu.budget_ratio, 1.0);
+        assert_eq!(config.resources.cpu.reserved, 0);
         assert!(!config.resources.cpu.throttle.enabled);
         assert_eq!(config.resources.cpu.throttle.sample_ms, 250);
     }
@@ -2472,25 +2473,25 @@ regions:
     #[test]
     fn effective_cpu_budget_and_native_auto_scale_by_cpu_count() {
         let config = AppConfig::default();
-        assert_eq!(config.resources.cpu.effective_budget_for_cpus(4), 2);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(4), 4);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(4),
-            2
+            4
         );
-        assert_eq!(config.resources.cpu.effective_budget_for_cpus(8), 5);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(8), 8);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(8),
-            5
+            8
         );
-        assert_eq!(config.resources.cpu.effective_budget_for_cpus(10), 6);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(10), 10);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(10),
-            6
+            10
         );
-        assert_eq!(config.resources.cpu.effective_budget_for_cpus(64), 47);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(64), 64);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(64),
-            47
+            64
         );
     }
 
@@ -2509,12 +2510,12 @@ regions:
         let mut config = AppConfig::default();
         config.resources.cpu.throttle.enabled = true;
 
-        assert_eq!(config.resources.cpu.effective_budget_for_cpus(10), 6);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(10), 10);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(10),
             10
         );
-        assert_eq!(config.resources.cpu.effective_budget_for_cpus(64), 47);
+        assert_eq!(config.resources.cpu.effective_budget_for_cpus(64), 64);
         assert_eq!(
             config.effective_asset_studio_ffi_process_concurrency_for_cpus(64),
             64

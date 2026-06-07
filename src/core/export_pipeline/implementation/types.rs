@@ -105,10 +105,32 @@ pub(super) struct NativeObjectExportSummary {
 
 #[derive(Debug, Default)]
 pub(super) struct NativeSemanticExportPathState {
-    pub(super) claims: HashMap<PathBuf, usize>,
+    pub(super) claims: HashMap<PathBuf, NativeSemanticExportClaim>,
     pub(super) written_files: Vec<PathBuf>,
     pub(super) acb_sources: Vec<NativeInMemoryMediaSource>,
     pub(super) pending_image_writes: Vec<PendingNativeImageWrite>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct NativeSemanticExportClaim {
+    pub(super) signature: Option<NativePayloadSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NativePayloadSignature {
+    pub(super) asset_type: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) container: Option<String>,
+    pub(super) payload_kind: Option<String>,
+    pub(super) suggested_extension: Option<String>,
+    pub(super) payload_len: usize,
+    pub(super) payload_fingerprint: [u64; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum NativeSemanticPathClaim {
+    Claimed(PathBuf),
+    Duplicate { existing: PathBuf },
 }
 
 #[derive(Debug, Clone)]
