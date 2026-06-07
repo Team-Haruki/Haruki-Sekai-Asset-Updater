@@ -1,5 +1,4 @@
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 use std::ptr;
@@ -8,7 +7,6 @@ use cridecoder::HcaDecoder;
 use rsmpeg::ffi;
 
 use super::FrameRate;
-use crate::core::codec;
 use crate::core::errors::ExportPipelineError;
 
 const AVERROR_EOF: i32 = -541_478_725;
@@ -16,42 +14,7 @@ const AVERROR_EAGAIN: i32 = -(ffi::EAGAIN as i32);
 
 pub fn convert_usm_to_mp4(usm_file: &Path, mp4_file: &Path) -> Result<(), ExportPipelineError> {
     ensure_ffmpeg_loaded()?;
-    let usm_bytes = fs::read(usm_file).map_err(|source| ExportPipelineError::Io {
-        path: usm_file.to_path_buf(),
-        source,
-    })?;
-    let fallback_name = usm_file
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("input.usm");
-    let streams = codec::export_usm_to_memory(&usm_bytes, fallback_name.as_bytes(), true)?;
-    let has_audio = streams
-        .iter()
-        .any(|stream| !stream.extension.eq_ignore_ascii_case("m2v"));
-    if has_audio {
-        return Err(ExportPipelineError::Media {
-            message: "USM contains audio streams; FFmpeg FFI USM muxing is not implemented yet"
-                .to_string(),
-        });
-    }
-    let video = streams
-        .into_iter()
-        .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
-        .ok_or_else(|| ExportPipelineError::Media {
-            message: format!(
-                "USM did not contain an M2V video stream: {}",
-                usm_file.display()
-            ),
-        })?;
-    unsafe {
-        transcode_memory_to_file(
-            &video.data,
-            Some("mpegvideo"),
-            mp4_file,
-            OutputCodec::H264,
-            None,
-        )
-    }
+    unsafe { transcode_usm_file_to_mp4(usm_file, mp4_file) }
 }
 
 pub fn convert_m2v_to_mp4(
@@ -183,6 +146,7 @@ fn convert_hca_bytes_to_audio(
 #[derive(Debug, Clone, Copy)]
 enum OutputCodec {
     H264,
+    Aac,
     Mp3,
     Flac,
 }
@@ -191,6 +155,7 @@ impl OutputCodec {
     fn codec_id(self) -> ffi::AVCodecID {
         match self {
             Self::H264 => ffi::AV_CODEC_ID_H264,
+            Self::Aac => ffi::AV_CODEC_ID_AAC,
             Self::Mp3 => ffi::AV_CODEC_ID_MP3,
             Self::Flac => ffi::AV_CODEC_ID_FLAC,
         }
@@ -199,9 +164,78 @@ impl OutputCodec {
     fn media_type(self) -> ffi::AVMediaType {
         match self {
             Self::H264 => ffi::AVMEDIA_TYPE_VIDEO,
-            Self::Mp3 | Self::Flac => ffi::AVMEDIA_TYPE_AUDIO,
+            Self::Aac | Self::Mp3 | Self::Flac => ffi::AVMEDIA_TYPE_AUDIO,
         }
     }
+}
+
+unsafe fn transcode_usm_file_to_mp4(
+    input: &Path,
+    output: &Path,
+) -> Result<(), ExportPipelineError> {
+    let input_url = path_cstring(input)?;
+    let input_ctx = InputContext::open_file(&input_url, None)?;
+    check(
+        unsafe { ffi::avformat_find_stream_info(input_ctx.ptr, ptr::null_mut()) },
+        "avformat_find_stream_info usm",
+    )?;
+
+    let video_stream_index = unsafe { find_best_stream(input_ctx.ptr, ffi::AVMEDIA_TYPE_VIDEO) }?;
+    let audio_stream_index =
+        unsafe { find_optional_best_stream(input_ctx.ptr, ffi::AVMEDIA_TYPE_AUDIO) };
+
+    let output_url = path_cstring(output)?;
+    let mut output_ctx = OutputContext::create(&output_url)?;
+    let mut video = unsafe {
+        TranscodeStream::new(
+            input_ctx.ptr,
+            output_ctx.ptr,
+            video_stream_index,
+            OutputCodec::H264,
+            None,
+        )
+    }?;
+    let mut audio = if let Some(index) = audio_stream_index {
+        Some(unsafe {
+            TranscodeStream::new(input_ctx.ptr, output_ctx.ptr, index, OutputCodec::Aac, None)
+        }?)
+    } else {
+        None
+    };
+
+    output_ctx.open_io(&output_url)?;
+    check(
+        unsafe { ffi::avformat_write_header(output_ctx.ptr, ptr::null_mut()) },
+        "avformat_write_header usm",
+    )?;
+
+    let packet = Packet::new()?;
+    loop {
+        let read = unsafe { ffi::av_read_frame(input_ctx.ptr, packet.ptr) };
+        if read == AVERROR_EOF {
+            break;
+        }
+        check(read, "av_read_frame usm")?;
+        let stream_index = unsafe { (*packet.ptr).stream_index };
+        if stream_index == video.input_stream_index {
+            unsafe { video.send_packet(output_ctx.ptr, packet.ptr) }?;
+        } else if let Some(audio) = audio.as_mut() {
+            if stream_index == audio.input_stream_index {
+                unsafe { audio.send_packet(output_ctx.ptr, packet.ptr) }?;
+            }
+        }
+        unsafe { ffi::av_packet_unref(packet.ptr) };
+    }
+
+    unsafe { video.flush(output_ctx.ptr) }?;
+    if let Some(audio) = audio.as_mut() {
+        unsafe { audio.flush(output_ctx.ptr) }?;
+    }
+    check(
+        unsafe { ffi::av_write_trailer(output_ctx.ptr) },
+        "av_write_trailer usm",
+    )?;
+    Ok(())
 }
 
 unsafe fn transcode_file_to_file(
@@ -360,6 +394,152 @@ unsafe fn transcode_open_input_to_file(
         "av_write_trailer",
     )?;
     Ok(())
+}
+
+struct TranscodeStream {
+    input_stream_index: i32,
+    decoder_ctx: CodecContext,
+    encoder_ctx: CodecContext,
+    output_stream: *mut ffi::AVStream,
+    decoded: Frame,
+    converted: Frame,
+    audio_fifo: Option<AudioFifo>,
+    frame_index: i64,
+}
+
+impl TranscodeStream {
+    unsafe fn new(
+        input_ctx: *mut ffi::AVFormatContext,
+        output_ctx: *mut ffi::AVFormatContext,
+        input_stream_index: i32,
+        output_codec: OutputCodec,
+        frame_rate: Option<FrameRate>,
+    ) -> Result<Self, ExportPipelineError> {
+        let input_stream = unsafe { *(*input_ctx).streams.add(input_stream_index as usize) };
+
+        let decoder = unsafe { ffi::avcodec_find_decoder((*(*input_stream).codecpar).codec_id) };
+        if decoder.is_null() {
+            return Err(media_error("could not find FFmpeg decoder"));
+        }
+        let decoder_ctx = CodecContext::new(decoder)?;
+        check(
+            unsafe {
+                ffi::avcodec_parameters_to_context(decoder_ctx.ptr, (*input_stream).codecpar)
+            },
+            "avcodec_parameters_to_context usm",
+        )?;
+        unsafe {
+            (*decoder_ctx.ptr).pkt_timebase = (*input_stream).time_base;
+        }
+        check(
+            unsafe { ffi::avcodec_open2(decoder_ctx.ptr, decoder, ptr::null_mut()) },
+            "avcodec_open2 decoder usm",
+        )?;
+
+        let encoder = unsafe { ffi::avcodec_find_encoder(output_codec.codec_id()) };
+        if encoder.is_null() {
+            return Err(media_error(&format!(
+                "could not find FFmpeg encoder for codec id {}",
+                output_codec.codec_id()
+            )));
+        }
+        let encoder_ctx = CodecContext::new(encoder)?;
+        configure_encoder(
+            encoder_ctx.ptr,
+            encoder,
+            decoder_ctx.ptr,
+            output_codec,
+            output_ctx,
+            frame_rate,
+            input_stream,
+        )?;
+        check(
+            unsafe { ffi::avcodec_open2(encoder_ctx.ptr, encoder, ptr::null_mut()) },
+            "avcodec_open2 encoder usm",
+        )?;
+
+        let output_stream = unsafe { ffi::avformat_new_stream(output_ctx, ptr::null()) };
+        if output_stream.is_null() {
+            return Err(media_error("avformat_new_stream usm failed"));
+        }
+        unsafe {
+            (*output_stream).time_base = (*encoder_ctx.ptr).time_base;
+        }
+        check(
+            unsafe {
+                ffi::avcodec_parameters_from_context((*output_stream).codecpar, encoder_ctx.ptr)
+            },
+            "avcodec_parameters_from_context usm",
+        )?;
+
+        let decoded = Frame::new()?;
+        let converted = Frame::new()?;
+        let audio_fifo = AudioFifo::new(encoder_ctx.ptr)?;
+
+        Ok(Self {
+            input_stream_index,
+            decoder_ctx,
+            encoder_ctx,
+            output_stream,
+            decoded,
+            converted,
+            audio_fifo,
+            frame_index: 0,
+        })
+    }
+
+    unsafe fn send_packet(
+        &mut self,
+        output_ctx: *mut ffi::AVFormatContext,
+        packet: *mut ffi::AVPacket,
+    ) -> Result<(), ExportPipelineError> {
+        send_packet_and_encode(
+            self.decoder_ctx.ptr,
+            self.encoder_ctx.ptr,
+            output_ctx,
+            self.output_stream,
+            packet,
+            self.decoded.ptr,
+            self.converted.ptr,
+            &mut self.audio_fifo,
+            &mut self.frame_index,
+        )
+    }
+
+    unsafe fn flush(
+        &mut self,
+        output_ctx: *mut ffi::AVFormatContext,
+    ) -> Result<(), ExportPipelineError> {
+        check(
+            unsafe { ffi::avcodec_send_packet(self.decoder_ctx.ptr, ptr::null()) },
+            "avcodec_send_packet flush usm",
+        )?;
+        drain_decoder_to_encoder(
+            self.decoder_ctx.ptr,
+            self.encoder_ctx.ptr,
+            output_ctx,
+            self.output_stream,
+            self.decoded.ptr,
+            self.converted.ptr,
+            &mut self.audio_fifo,
+            &mut self.frame_index,
+        )?;
+        if let Some(fifo) = self.audio_fifo.as_mut() {
+            fifo.encode_available(
+                self.encoder_ctx.ptr,
+                output_ctx,
+                self.output_stream,
+                &mut self.frame_index,
+                true,
+            )?;
+        }
+        check(
+            unsafe { ffi::avcodec_send_frame(self.encoder_ctx.ptr, ptr::null()) },
+            "avcodec_send_frame flush usm",
+        )?;
+        drain_encoder(self.encoder_ctx.ptr, output_ctx, self.output_stream)?;
+        Ok(())
+    }
 }
 
 unsafe fn encode_pcm16_to_file<F>(
@@ -612,7 +792,9 @@ unsafe fn configure_encoder(
                     num: 1,
                     den: (*encoder_ctx).sample_rate,
                 };
-                if matches!(output_codec, OutputCodec::Mp3) {
+                if matches!(output_codec, OutputCodec::Aac) {
+                    (*encoder_ctx).bit_rate = 192_000;
+                } else if matches!(output_codec, OutputCodec::Mp3) {
                     (*encoder_ctx).bit_rate = 320_000;
                 }
             }
@@ -859,6 +1041,14 @@ unsafe fn find_best_stream(
     } else {
         Ok(index)
     }
+}
+
+unsafe fn find_optional_best_stream(
+    ctx: *mut ffi::AVFormatContext,
+    media_type: ffi::AVMediaType,
+) -> Option<i32> {
+    let index = unsafe { ffi::av_find_best_stream(ctx, media_type, -1, -1, ptr::null_mut(), 0) };
+    (index >= 0).then_some(index)
 }
 
 unsafe fn choose_pixel_format(

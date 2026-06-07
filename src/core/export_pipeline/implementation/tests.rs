@@ -197,6 +197,31 @@ fn prepare_usm_processing_inputs_keeps_non_contiguous_segments() {
 }
 
 #[test]
+fn usm_post_process_skips_non_crid_inputs() {
+    let dir = tempdir().unwrap();
+    let usm = dir.path().join("not_really_usm.usm");
+    fs::write(&usm, b"not-crid").unwrap();
+
+    let (_, region) = processing_config();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let output = runtime
+        .block_on(process_usm_input_with_metrics(
+            &UsmProcessingInput::Path(usm.clone()),
+            dir.path(),
+            &region,
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &RetryConfig::default(),
+            1,
+            1,
+        ))
+        .unwrap();
+
+    assert!(usm.exists());
+    assert_eq!(output.generated_files, vec![usm]);
+}
+
+#[test]
 fn segmented_usm_post_process_uses_memory_without_merged_file() {
     std::thread::Builder::new()
         .name("segmented-usm-memory".to_string())

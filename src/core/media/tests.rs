@@ -199,6 +199,40 @@ fn auto_backend_falls_back_to_cli() {
     assert!(output.exists());
 }
 
+#[cfg(feature = "media-ffi")]
+#[test]
+fn ffi_usm_to_mp4_handles_real_sample_when_available() {
+    let Some(sample) = std::env::var_os("HARUKI_USM_SAMPLE").map(PathBuf::from) else {
+        return;
+    };
+    if !sample.exists() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let output = dir.path().join("sample.mp4");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime
+        .block_on(convert_usm_to_mp4_with_backend(
+            &sample,
+            &output,
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &RetryConfig {
+                attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_ms: 1,
+            },
+        ))
+        .unwrap();
+
+    assert!(output.exists());
+    assert!(fs::metadata(&output).unwrap().len() > 0);
+    if let Some(copy_to) = std::env::var_os("HARUKI_USM_OUTPUT").map(PathBuf::from) {
+        fs::copy(&output, copy_to).unwrap();
+    }
+}
+
 #[test]
 fn cli_bytes_input_uses_system_temp_dir() {
     let dir = tempdir().unwrap();

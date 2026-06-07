@@ -510,6 +510,20 @@ pub(super) async fn process_usm_input_with_metrics(
     let writes_mp4 = region.export.video.writes_mp4();
     let writes_m2v = region.export.video.writes_m2v();
 
+    if !usm_input_has_crid_magic(usm_input)? {
+        if let Some(usm_file) = usm_input.path() {
+            tracing::warn!(
+                path = %usm_file.display(),
+                "skipping .usm post-process input without CRID magic"
+            );
+            output.generated_files.push(usm_file.to_path_buf());
+        } else {
+            tracing::warn!("skipping in-memory .usm post-process input without CRID magic");
+            usm_input.cleanup_sources()?;
+        }
+        return Ok(output);
+    }
+
     if let Some(usm_file) = usm_input.path() {
         if writes_mp4 && !writes_m2v && region.export.video.direct_mp4 {
             let mp4 = export_path.join(format!("{output_name}.mp4"));
@@ -710,6 +724,17 @@ pub(super) async fn process_usm_input_with_metrics(
     usm_input.cleanup_sources()?;
     output.generated_files = generated;
     Ok(output)
+}
+
+pub(super) fn usm_input_has_crid_magic(
+    usm_input: &UsmProcessingInput,
+) -> Result<bool, ExportPipelineError> {
+    match usm_input {
+        UsmProcessingInput::Path(usm_file) => {
+            codec::file_has_usm_magic(usm_file).map_err(ExportPipelineError::from)
+        }
+        UsmProcessingInput::Bytes { data, .. } => Ok(codec::has_usm_magic(data)),
+    }
 }
 
 pub(super) fn export_usm_input_to_memory(

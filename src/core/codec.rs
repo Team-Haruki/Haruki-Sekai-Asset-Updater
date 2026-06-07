@@ -55,6 +55,26 @@ pub fn export_usm_to_memory(
         .map_err(|err| CodecError::Usm(err.to_string()))
 }
 
+pub fn has_usm_magic(input: &[u8]) -> bool {
+    input.len() >= 4 && &input[..4] == b"CRID"
+}
+
+pub fn file_has_usm_magic(input: &Path) -> Result<bool, CodecError> {
+    let mut file = File::open(input).map_err(|source| CodecError::Io {
+        path: input.to_path_buf(),
+        source,
+    })?;
+    let mut magic = [0u8; 4];
+    match file.read_exact(&mut magic) {
+        Ok(()) => Ok(magic == *b"CRID"),
+        Err(source) if source.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(source) => Err(CodecError::Io {
+            path: input.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 pub fn read_usm_metadata(input: &Path) -> Result<cridecoder::usm::Metadata, CodecError> {
     cridecoder::usm::read_metadata_file(input).map_err(|err| CodecError::Metadata(err.to_string()))
 }
