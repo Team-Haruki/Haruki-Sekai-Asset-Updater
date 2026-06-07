@@ -279,6 +279,8 @@ pub enum AssetExecutionError {
     Http(#[from] reqwest::Error),
     #[error("failed to initialize HTTP client: {0}")]
     HttpClient(String),
+    #[error("blocking asset execution task failed: {0}")]
+    BlockingTask(String),
     #[error("HTTP request to {url} returned status {status}")]
     HttpStatus { url: String, status: u16 },
     #[error("region `{region}` is missing asset_save_dir")]

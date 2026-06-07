@@ -73,7 +73,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavutil59 \
     libswresample5 \
     libswscale8 \
-    git && \
+    git \
+    openssh-client && \
     rm -rf \
     /var/lib/apt/lists/* \
     /var/cache/debconf/* \

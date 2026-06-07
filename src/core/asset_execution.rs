@@ -559,7 +559,8 @@ impl AssetExecutionContext {
                                 &self.region_name,
                                 bundle_path,
                                 bundle_hash,
-                            );
+                            )
+                            .await;
                         }
                         Err(AssetExecutionError::Cancelled) => {
                             return Err(AssetExecutionError::Cancelled);
@@ -593,7 +594,11 @@ impl AssetExecutionContext {
             },
         );
         self.ensure_not_cancelled(&cancel_flag)?;
-        save_download_record(&record_path, &downloaded_assets)?;
+        Self::save_download_record_on_blocking_thread(
+            record_path.clone(),
+            downloaded_assets.clone(),
+        )
+        .await?;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::RecordSaved {
@@ -802,7 +807,7 @@ impl AssetExecutionContext {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn record_completed_bundle(
+    async fn record_completed_bundle(
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
         record_path: &str,
         downloaded_assets: &mut DownloadRecord,
@@ -836,7 +841,12 @@ impl AssetExecutionContext {
                 batch = *pending_save_count,
                 "batch-flushing download record"
             );
-            match save_download_record(record_path, downloaded_assets) {
+            match Self::save_download_record_on_blocking_thread(
+                record_path.to_string(),
+                downloaded_assets.clone(),
+            )
+            .await
+            {
                 Ok(()) => Self::send_progress(
                     progress,
                     ExecutionProgressUpdate::RecordSaved {
@@ -851,6 +861,16 @@ impl AssetExecutionContext {
             }
             *pending_save_count = 0;
         }
+    }
+
+    async fn save_download_record_on_blocking_thread(
+        record_path: String,
+        downloaded_assets: DownloadRecord,
+    ) -> Result<(), AssetExecutionError> {
+        tokio::task::spawn_blocking(move || save_download_record(record_path, &downloaded_assets))
+            .await
+            .map_err(|source| AssetExecutionError::BlockingTask(source.to_string()))?
+            .map_err(AssetExecutionError::from)
     }
 
     async fn finish_native_bundle_post_process(
