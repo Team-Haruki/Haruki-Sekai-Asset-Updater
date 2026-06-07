@@ -29,7 +29,7 @@ Status legend:
 | Area | Go v1 | Rust v2 | Status | Notes |
 | --- | --- | --- | --- | --- |
 | YAML config loader | `haruki-asset-configs.yaml` | `haruki-asset-configs.yaml` | `intentional-diff` | Rust keeps the filename but uses the v3 schema internally. |
-| Config schema | flat v1 sections | reorganized v3 sections | `intentional-diff` | Mapping documented in `config-to-v3.md`. |
+| Config schema | flat v1 sections | reorganized v3 sections | `intentional-diff` | Use the v3 example config and current loader validation as the source of truth. |
 | Execution controls | none | `execution.timeout_seconds`, `execution.allow_cancel`, `execution.retry.*` | `intentional-diff` | Rust adds timeout, cancel, and retry policy controls. |
 | Main log file | supported | supported | `implemented` | Rust writes file-backed main logs. |
 | Access log file | supported | supported | `implemented` | Rust middleware writes formatted access logs. |

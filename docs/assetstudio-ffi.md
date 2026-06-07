@@ -281,60 +281,17 @@ Set `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` to the adapter library path. Rust
 also forwards that path to the adapter before calling it so the C# P/Invoke
 resolver can find the decoder library next to the adapter.
 
-## Benchmark Snapshot
+## Operations
 
-Measured on macOS arm64 with the Rust release test binary and the real
-`extract_unity_asset_bundle` path. Each row is one warmup run plus five measured
-runs; the table reports the measured mean.
+The production path normally uses the worker pool:
 
-| Sample | CLI mean | FFI mean | Result |
-| --- | ---: | ---: | --- |
-| `unityasset_long` | `0.738s` | `0.480s` | FFI used about `65%` of CLI time |
-| `jacket_s_712` | `0.628s` | `0.332s` | FFI used about `53%` of CLI time |
+- `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`: NativeAOT adapter library path.
+- `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`: `assetstudio_ffi_worker` executable.
+- `HARUKI_ASSET_STUDIO_FFI_CALL_MODE`: usually `pool`.
+- `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`: worker pool size; `0` means
+  auto.
+- `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`: recycle threshold per worker.
+- `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE`: object read batch size.
 
-The FFI backend helps most on small bundles where CLI process startup is a
-large part of total latency. Larger exports still benefit, but Rust-side
-post-processing reduces the visible backend delta.
-
-You can repeat a local FFI-backend run with the Rust benchmark helper. The
-helper defaults to the production NativeAOT FFI backend.
-
-```bash
-cargo run --release --bin assetstudio_bench -- \
-  --bundle /path/to/bundle.unityfs \
-  --ffi-library /path/to/HarukiAssetStudioFFI.dylib \
-  --warmup 1 \
-  --iterations 5 \
-  --expected-file music/jacket/jacket_s_712/jacket_s_712.png
-```
-
-The helper prints JSON with per-backend mean, median, min, max, exported file
-counts, FFI phase timings, skipped object-read details, and object-read plan
-diagnostics. It also queries typed capabilities before FFI
-benchmarking so ABI loading failures are separated from export failures.
-
-For full region-rule benchmarks, use `asset_region_bench`. Keep the production
-default `backends.asset_studio.process_concurrency=0` for shared hosts, but
-`music/short` has recently benchmarked best with `ffi_process=16` and
-`media_encode=12`; `ffi_process=20` showed over-concurrency on the same
-machine. The benchmark summary reports effective FFI process concurrency,
-CPU budget, and CPU throttle target percent.
-
-```bash
-cargo run --release --features media-ffi --bin asset_region_bench -- \
-  --config haruki-asset-configs.yaml \
-  --region cn \
-  --start-app-rule '^music/short' \
-  --media-backend ffi \
-  --ffi-process-concurrency 16 \
-  --media-encode-concurrency 12 \
-  --jsonl-output /tmp/haruki-music-short-ffi16-media12.jsonl \
-  --progress-every 500
-```
-
-When reading benchmark output, separate bundle active time from queueing:
-`worker_pool.wait` is time spent waiting for a AssetStudio FFI worker,
-`post_process.queue_wait` is time spent waiting for the bundle post-process
-slot, `post_process.hca.media_pool_wait` is time spent waiting for media encode
-capacity, and `post_process.acb.hca_tracks_wall` is the wall time for the
-bundle-level ACB/HCA track queue.
+Use `assetstudio_inspect` for local diagnosis, and keep local benchmark
+snapshots outside the repository unless they become stable acceptance data.

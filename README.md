@@ -27,17 +27,13 @@
 - `src/bin/`: helper CLIs
 - `tests/`: integration tests
 - `docs/assetstudio-ffi.md`: NativeAOT FFI API and object-flow details
-- `docs/double-ffi-change-log.md`: recorded double-FFI implementation changes
-- `docs/double-ffi-benchmarks.md`: benchmark snapshots and interpretation
-- `docs/double-ffi-operations.md`: runtime tuning, Docker, and debugging notes
 - `docs/migration/`: preserved migration and parity notes
 
 ## Secret Config
 
 - Sensitive config fields support `${env:VAR_NAME}` references instead of checked-in plaintext.
-- The main service only accepts the current v3 config shape. Migrate older
-  config files explicitly with:
-  `cargo run --bin config_migrate -- --input old.yaml --output haruki-asset-configs.yaml --check`.
+- The main service only accepts the current v3 config shape. Use
+  `haruki-asset-configs.example.yaml` as the current config template.
 - The loader resolves this syntax for:
   `server.auth.bearer_token`,
   `backends.asset_studio.library_path`,

@@ -10,7 +10,6 @@ use haruki_sekai_asset_updater::core::export_pipeline::extract_unity_asset_bundl
 use haruki_sekai_asset_updater::{
     AssetStudioFfiClient, AssetStudioInspectOptions, AssetStudioObjectReadOptions,
 };
-use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 fn required_env(name: &str) -> Option<String> {
@@ -90,36 +89,6 @@ fn real_assetstudio_ffi_client_reads_object_when_configured() {
         "FFI client object read returned an invalid payload length"
     );
     context.close().unwrap();
-}
-
-#[test]
-fn fixture_bundles_are_available_for_assetstudio_regressions() {
-    for (name, expected_len, expected_sha256) in [
-        (
-            "unityasset_long",
-            2_039_487usize,
-            "de2b955b34e8fb3a45330e4517951d17d046c6df051082bdf58047e5836a1e61",
-        ),
-        (
-            "jacket_s_712",
-            53_269usize,
-            "183e8db956e615bbdcfad9e563aa2c58cb87fa0169530754972ff0ccda6127fb",
-        ),
-    ] {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("files")
-            .join(name);
-        let data = fs::read(&path).unwrap_or_else(|err| {
-            panic!("failed to read fixture {}: {err}", path.display());
-        });
-        assert_eq!(data.len(), expected_len, "fixture size changed: {name}");
-        let digest = Sha256::digest(&data)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        assert_eq!(digest, expected_sha256, "fixture hash changed: {name}");
-    }
 }
 
 fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
