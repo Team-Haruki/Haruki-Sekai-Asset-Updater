@@ -48,6 +48,24 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Apply tag package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 - <<'PY' "${version}"
+          from pathlib import Path
+          import re
+          import sys
+
+          version = sys.argv[1]
+          for manifest in (Path("Cargo.toml"), Path("crates/assetstudio-ffi/Cargo.toml")):
+              text = manifest.read_text()
+              text = re.sub(r'(?m)^(version = )"[^"]+"', rf'\1"{version}"', text, count=1)
+              manifest.write_text(text)
+          PY
+          cargo generate-lockfile
+
       - name: Build release binary
         run: cargo build --release --locked -p haruki-sekai-asset-updater -p haruki-assetstudio-ffi
 

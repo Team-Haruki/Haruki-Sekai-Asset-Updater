@@ -23,6 +23,13 @@ COPY Cargo.lock Cargo.lock
 COPY crates crates
 COPY src src
 COPY tests tests
+ARG HARUKI_PACKAGE_VERSION=""
+RUN if [ -n "${HARUKI_PACKAGE_VERSION}" ]; then \
+        package_version="${HARUKI_PACKAGE_VERSION#v}"; \
+        sed -i "0,/^version = /s//version = \"${package_version}\"/" Cargo.toml; \
+        sed -i "0,/^version = /s//version = \"${package_version}\"/" crates/assetstudio-ffi/Cargo.toml; \
+        cargo generate-lockfile; \
+    fi
 RUN cargo build --release --locked \
     -p haruki-sekai-asset-updater \
     -p haruki-assetstudio-ffi \
