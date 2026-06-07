@@ -166,6 +166,20 @@ impl AppConfig {
                 expected: "a positive integer".to_string(),
             });
         }
+        if self.concurrency.audio_encode == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "concurrency.audio_encode".to_string(),
+                value: "0".to_string(),
+                expected: "a positive integer".to_string(),
+            });
+        }
+        if self.concurrency.video_encode == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "concurrency.video_encode".to_string(),
+                value: "0".to_string(),
+                expected: "a positive integer".to_string(),
+            });
+        }
         if let Some(image_format) = &self.backends.asset_studio.image_format {
             validate_asset_studio_ffi_image_format(image_format)?;
         }
@@ -252,8 +266,18 @@ impl AppConfig {
             self.server.asset_http_version = value.parse()?;
         }
         if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
-            self.concurrency.media_encode =
-                parse_positive_usize("concurrency.media_encode", &value)?;
+            let parsed = parse_positive_usize("concurrency.media_encode", &value)?;
+            self.concurrency.media_encode = parsed;
+            self.concurrency.audio_encode = parsed;
+            self.concurrency.video_encode = parsed;
+        }
+        if let Ok(value) = env::var("HARUKI_AUDIO_ENCODE_CONCURRENCY") {
+            self.concurrency.audio_encode =
+                parse_positive_usize("concurrency.audio_encode", &value)?;
+        }
+        if let Ok(value) = env::var("HARUKI_VIDEO_ENCODE_CONCURRENCY") {
+            self.concurrency.video_encode =
+                parse_positive_usize("concurrency.video_encode", &value)?;
         }
         if let Ok(value) = env::var("HARUKI_DOWNLOAD_CONCURRENCY") {
             self.concurrency.download = parse_positive_usize("concurrency.download", &value)?;
@@ -1241,7 +1265,11 @@ pub struct ConcurrencyConfig {
     pub acb: usize,
     pub usm: usize,
     pub hca: usize,
+    /// Legacy aggregate media encode cap. New configs should prefer
+    /// audio_encode and video_encode.
     pub media_encode: usize,
+    pub audio_encode: usize,
+    pub video_encode: usize,
     pub images: usize,
 }
 
@@ -1256,6 +1284,8 @@ impl Default for ConcurrencyConfig {
             usm: 6,
             hca: 16,
             media_encode: 12,
+            audio_encode: 12,
+            video_encode: 4,
             images: 12,
         }
     }
@@ -1300,6 +1330,8 @@ impl ConcurrencyConfig {
                 .min(cpu_oversubscribe)
                 .max(1),
             media_encode: self.media_encode.min(cpu_oversubscribe).max(1),
+            audio_encode: self.audio_encode.min(cpu_oversubscribe).max(1),
+            video_encode: self.video_encode.min(cpus.div_ceil(4).max(1)).max(1),
             images: self.images.min(cpu_oversubscribe).max(1),
         }
     }
@@ -1837,6 +1869,8 @@ regions:
         assert_eq!(config.concurrency.usm, 6);
         assert_eq!(config.concurrency.images, 12);
         assert_eq!(config.concurrency.media_encode, 12);
+        assert_eq!(config.concurrency.audio_encode, 12);
+        assert_eq!(config.concurrency.video_encode, 4);
         assert!(!config.concurrency.auto_tune);
         assert!(config.resources.cpu.budget_auto);
         assert_eq!(config.resources.cpu.budget_ratio, 1.0);
@@ -2027,6 +2061,24 @@ asset_studio:
             ConfigError::InvalidValue { ref field, ref value, .. }
                 if field == "concurrency.media_encode" && value == "0"
         ));
+    }
+
+    #[test]
+    fn rejects_zero_split_media_encode_concurrency() {
+        for field in ["audio_encode", "video_encode"] {
+            let mut config = AppConfig::default();
+            match field {
+                "audio_encode" => config.concurrency.audio_encode = 0,
+                "video_encode" => config.concurrency.video_encode = 0,
+                _ => unreachable!(),
+            }
+            let err = config.validate().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidValue { field: ref actual, ref value, .. }
+                    if actual == &format!("concurrency.{field}") && value == "0"
+            ));
+        }
     }
 
     #[test]
@@ -2246,6 +2298,8 @@ backends:
             Some("raw_rgba")
         );
         assert_eq!(config.concurrency.media_encode, 9);
+        assert_eq!(config.concurrency.audio_encode, 9);
+        assert_eq!(config.concurrency.video_encode, 9);
         assert_eq!(config.concurrency.download, 11);
         assert_eq!(config.concurrency.post_process, 13);
         assert!(config.concurrency.auto_tune);
@@ -2440,6 +2494,8 @@ regions:
             usm: 999,
             hca: 999,
             media_encode: 999,
+            audio_encode: 999,
+            video_encode: 999,
             images: 999,
         };
 
@@ -2453,10 +2509,14 @@ regions:
         assert!(effective.usm <= config.usm);
         assert!(effective.hca <= config.hca);
         assert!(effective.media_encode <= config.media_encode);
+        assert!(effective.audio_encode <= config.audio_encode);
+        assert!(effective.video_encode <= config.video_encode);
         assert!(effective.images <= config.images);
         assert!(effective.download >= 1);
         assert!(effective.post_process >= 1);
         assert!(effective.media_encode >= 1);
+        assert!(effective.audio_encode >= 1);
+        assert!(effective.video_encode >= 1);
     }
 
     #[test]

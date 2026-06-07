@@ -131,6 +131,9 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
 - `concurrency.post_process` limits bundle post-processing. Keep it near the
   CPU budget for production full exports, and raise `concurrency.images` for
   image-heavy paths such as `character/member`.
+- `concurrency.audio_encode` and `concurrency.video_encode` are separate.
+  Keep video encoding lower on memory-constrained hosts because x264 keeps
+  per-encoder frame queues; audio encoding can usually run much wider.
 - Normal progress logging emits bundle-level start/completion/failure lines.
   Use debug logging for detailed download, native FFI, export, and post-process
   phase traces.

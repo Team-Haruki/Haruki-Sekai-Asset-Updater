@@ -19,13 +19,14 @@ use crate::core::config::{
 use crate::core::errors::ExportPipelineError;
 
 use super::{
-    acquire_cpu_budget_permit_blocking, assetstudio_export_type_selector,
-    assetstudio_fix_file_name, assetstudio_object_mode_supported_type,
-    assetstudio_type_selector_matches, convert_native_surrogate_images_to_png,
-    extract_unity_asset_bundle, flush_pending_native_image_writes, get_export_group,
-    handle_png_conversion, native_object_output_extension, native_object_output_path,
-    native_read_batch_size_for_assets, native_read_kind_for_asset,
-    native_skipped_unsupported_asset, parse_assetstudio_ffi_context_list_objects_worker_output,
+    acquire_cpu_budget_permit_blocking, acquire_media_encode_permit,
+    assetstudio_export_type_selector, assetstudio_fix_file_name,
+    assetstudio_object_mode_supported_type, assetstudio_type_selector_matches,
+    convert_native_surrogate_images_to_png, extract_unity_asset_bundle,
+    flush_pending_native_image_writes, get_export_group, handle_png_conversion,
+    native_object_output_extension, native_object_output_path, native_read_batch_size_for_assets,
+    native_read_kind_for_asset, native_skipped_unsupported_asset,
+    parse_assetstudio_ffi_context_list_objects_worker_output,
     parse_assetstudio_ffi_object_read_batch_worker_output_recoverable,
     parse_assetstudio_ffi_object_read_worker_output_recoverable, parse_payload_bundle,
     parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
@@ -35,12 +36,12 @@ use super::{
     text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
     write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
     write_native_object_payload, AssetStudioFfiAssetInfo, AssetStudioFfiObjectReadOutput,
-    AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse, NativeBatchPhaseStats,
-    NativeObjectExportOptions, NativeObjectExportSummary, NativeObjectReadBatchParseOutput,
-    NativeObjectReadParseResult, NativeObjectReadPlanStats, NativeSemanticExportPathState,
-    UsmProcessingInput, WorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
-    NATIVE_AOT_DEFAULT_IMAGE_FORMAT, NATIVE_AOT_FAST_IMAGE_FORMAT,
-    NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+    AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse, MediaEncodeKind,
+    NativeBatchPhaseStats, NativeObjectExportOptions, NativeObjectExportSummary,
+    NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
+    NativeSemanticExportPathState, UsmProcessingInput, WorkerOutput,
+    ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, NATIVE_AOT_DEFAULT_IMAGE_FORMAT,
+    NATIVE_AOT_FAST_IMAGE_FORMAT, NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
 };
 
 fn sample_path(name: &str) -> Option<PathBuf> {
@@ -234,6 +235,8 @@ fn segmented_usm_post_process_uses_memory_without_merged_file() {
                     "ffmpeg",
                     MediaBackend::Auto,
                     &RetryConfig::default(),
+                    1,
+                    1,
                 ))
                 .unwrap();
 
@@ -408,6 +411,8 @@ fn direct_usm_to_mp4_uses_input_stem_for_output_name() {
                             initial_backoff_ms: 1,
                             max_backoff_ms: 1,
                         },
+                        1,
+                        1,
                     ))
                     .unwrap();
 
@@ -1237,6 +1242,15 @@ fn cpu_budget_permit_limits_blocking_work() {
     drop(permits);
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
     handle.join().unwrap();
+}
+
+#[test]
+fn media_encode_limiters_are_split_by_audio_and_video() {
+    let audio = acquire_media_encode_permit(MediaEncodeKind::Audio, 1, 100).unwrap();
+    let video = acquire_media_encode_permit(MediaEncodeKind::Video, 1, 100).unwrap();
+
+    assert_eq!(audio.active, 1);
+    assert_eq!(video.active, 1);
 }
 
 #[cfg(unix)]

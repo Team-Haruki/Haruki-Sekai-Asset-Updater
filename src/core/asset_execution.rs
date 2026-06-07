@@ -339,7 +339,11 @@ impl AssetExecutionContext {
         let batch_save_size = app_config.execution.batch_save_size;
         let concurrency = app_config.effective_concurrency();
         let download_concurrency = concurrency.download.max(1);
-        let media_encode_concurrency = concurrency.media_encode.max(1);
+        let media_encode_concurrency = concurrency
+            .audio_encode
+            .max(concurrency.video_encode)
+            .max(concurrency.media_encode)
+            .max(1);
         let post_process_concurrency = if concurrency.post_process == 0 {
             media_encode_concurrency
         } else {
@@ -369,7 +373,8 @@ impl AssetExecutionContext {
             region = %self.region_name,
             queued = tasks.len(),
             download_concurrency,
-            media_encode_concurrency,
+            audio_encode_concurrency = concurrency.audio_encode,
+            video_encode_concurrency = concurrency.video_encode,
             post_process_concurrency,
             memory_limit_bytes = memory_limiter.limit_bytes(),
             "starting asset bundle processing"

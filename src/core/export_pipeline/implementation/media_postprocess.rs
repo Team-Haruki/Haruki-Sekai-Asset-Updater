@@ -50,6 +50,14 @@ pub async fn post_process_exported_files(
         concurrency.media_encode as u64,
     );
     summary.post_process_phase_ms.insert(
+        "media_scheduler.audio_encode_concurrency".to_string(),
+        concurrency.audio_encode as u64,
+    );
+    summary.post_process_phase_ms.insert(
+        "media_scheduler.video_encode_concurrency".to_string(),
+        concurrency.video_encode as u64,
+    );
+    summary.post_process_phase_ms.insert(
         "media_scheduler.image_concurrency".to_string(),
         concurrency.images as u64,
     );
@@ -87,7 +95,7 @@ pub async fn post_process_exported_files(
         media_backend: app_config.backends.media.backend,
         retry: app_config.execution.retry.clone(),
         hca_concurrency: concurrency.hca,
-        media_encode_concurrency: concurrency.media_encode,
+        audio_encode_concurrency: concurrency.audio_encode,
         cpu_budget,
     };
     let acb_concurrency = concurrency.acb;
@@ -101,6 +109,8 @@ pub async fn post_process_exported_files(
             app_config.backends.media.backend,
             &app_config.execution.retry,
             concurrency.usm,
+            concurrency.video_encode,
+            cpu_budget,
             scoped_post_process,
             scoped_files,
         )
@@ -217,6 +227,9 @@ pub(super) struct MediaEncodeLimiter {
     pub(super) available: Condvar,
 }
 
+type MediaEncodeLimiterKey = (MediaEncodeKind, usize);
+type MediaEncodeLimiterMap = HashMap<MediaEncodeLimiterKey, Arc<MediaEncodeLimiter>>;
+
 pub(super) struct MediaEncodePermit {
     pub(super) limiter: Arc<MediaEncodeLimiter>,
 }
@@ -232,16 +245,33 @@ impl Drop for MediaEncodePermit {
 pub(super) struct MediaEncodeAcquire {
     pub(super) permit: MediaEncodePermit,
     pub(super) cpu_permit: CpuBudgetPermit,
+    pub(super) kind: MediaEncodeKind,
     pub(super) wait_ms: u64,
     pub(super) cpu_budget_wait_ms: u64,
     pub(super) active: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum MediaEncodeKind {
+    Audio,
+    Video,
+}
+
+impl MediaEncodeKind {
+    fn as_metric_prefix(self) -> &'static str {
+        match self {
+            Self::Audio => "audio_encode",
+            Self::Video => "video_encode",
+        }
+    }
+}
+
 pub(super) fn acquire_media_encode_permit(
+    kind: MediaEncodeKind,
     concurrency: usize,
     cpu_budget: usize,
 ) -> Result<MediaEncodeAcquire, ExportPipelineError> {
-    let limiter = media_encode_limiter(concurrency);
+    let limiter = media_encode_limiter(kind, concurrency);
     let wait_started = Instant::now();
     let mut active = limiter.state.lock().unwrap();
     while *active >= limiter.max {
@@ -254,19 +284,36 @@ pub(super) fn acquire_media_encode_permit(
     Ok(MediaEncodeAcquire {
         permit: MediaEncodePermit { limiter },
         cpu_permit: cpu_slot.permit,
+        kind,
         wait_ms: wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         cpu_budget_wait_ms: cpu_slot.wait_ms,
         active: active_count,
     })
 }
 
-pub(super) fn media_encode_limiter(concurrency: usize) -> Arc<MediaEncodeLimiter> {
+pub(super) async fn acquire_media_encode_permit_async(
+    kind: MediaEncodeKind,
+    concurrency: usize,
+    cpu_budget: usize,
+) -> Result<MediaEncodeAcquire, ExportPipelineError> {
+    tokio::task::spawn_blocking(move || acquire_media_encode_permit(kind, concurrency, cpu_budget))
+        .await
+        .map_err(|source| ExportPipelineError::WorkerPanic {
+            worker: format!("{} limiter", kind.as_metric_prefix()),
+            message: source.to_string(),
+        })?
+}
+
+pub(super) fn media_encode_limiter(
+    kind: MediaEncodeKind,
+    concurrency: usize,
+) -> Arc<MediaEncodeLimiter> {
     let concurrency = concurrency.max(1);
-    static LIMITERS: OnceLock<Mutex<HashMap<usize, Arc<MediaEncodeLimiter>>>> = OnceLock::new();
+    static LIMITERS: OnceLock<Mutex<MediaEncodeLimiterMap>> = OnceLock::new();
     let limiters = LIMITERS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut limiters = limiters.lock().unwrap();
     limiters
-        .entry(concurrency)
+        .entry((kind, concurrency))
         .or_insert_with(|| {
             Arc::new(MediaEncodeLimiter {
                 max: concurrency,
@@ -285,6 +332,8 @@ pub(super) async fn handle_usm_files(
     media_backend: MediaBackend,
     retry: &crate::core::config::RetryConfig,
     usm_concurrency: usize,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
     scoped_post_process: bool,
     scoped_files: &[PathBuf],
 ) -> Result<UsmPostProcessOutput, ExportPipelineError> {
@@ -336,6 +385,8 @@ pub(super) async fn handle_usm_files(
                 ffmpeg_path,
                 media_backend,
                 retry,
+                video_encode_concurrency,
+                cpu_budget,
             )
             .await?;
             output.generated_files.extend(file_output.generated_files);
@@ -360,6 +411,8 @@ pub(super) async fn handle_usm_files(
                 &ffmpeg_path,
                 media_backend,
                 &retry,
+                video_encode_concurrency,
+                cpu_budget,
             ))
         })?;
         for file_output in outputs {
@@ -400,6 +453,8 @@ pub(super) async fn handle_usm_files(
         ffmpeg_path,
         media_backend,
         retry,
+        video_encode_concurrency,
+        cpu_budget,
     )
     .await?;
     output.generated_files.extend(file_output.generated_files);
@@ -408,6 +463,7 @@ pub(super) async fn handle_usm_files(
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn process_usm_file(
     usm_file: &Path,
     export_path: &Path,
@@ -415,6 +471,8 @@ pub(super) async fn process_usm_file(
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     Ok(process_usm_input_with_metrics(
         &UsmProcessingInput::Path(usm_file.to_path_buf()),
@@ -423,6 +481,8 @@ pub(super) async fn process_usm_file(
         ffmpeg_path,
         media_backend,
         retry,
+        video_encode_concurrency,
+        cpu_budget,
     )
     .await?
     .generated_files)
@@ -434,6 +494,7 @@ pub(super) struct UsmPostProcessOutput {
     pub(super) phase_ms: HashMap<String, u64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn process_usm_input_with_metrics(
     usm_input: &UsmProcessingInput,
     export_path: &Path,
@@ -441,6 +502,8 @@ pub(super) async fn process_usm_input_with_metrics(
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
 ) -> Result<UsmPostProcessOutput, ExportPipelineError> {
     let mut output = UsmPostProcessOutput::default();
     let output_name = usm_input.output_name()?;
@@ -450,9 +513,18 @@ pub(super) async fn process_usm_input_with_metrics(
     if let Some(usm_file) = usm_input.path() {
         if writes_mp4 && !writes_m2v && region.export.video.direct_mp4 {
             let mp4 = export_path.join(format!("{output_name}.mp4"));
+            let encode_slot = acquire_media_encode_permit_async(
+                MediaEncodeKind::Video,
+                video_encode_concurrency,
+                cpu_budget,
+            )
+            .await?;
+            record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
             let phase_started = Instant::now();
             convert_usm_to_mp4_with_backend(usm_file, &mp4, ffmpeg_path, media_backend, retry)
                 .await?;
+            drop(encode_slot.cpu_permit);
+            drop(encode_slot.permit);
             add_elapsed_phase_ms(
                 &mut output.phase_ms,
                 "post_process.usm.convert_mp4",
@@ -487,6 +559,13 @@ pub(super) async fn process_usm_input_with_metrics(
             .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
         {
             let mp4 = export_path.join(format!("{output_name}.mp4"));
+            let encode_slot = acquire_media_encode_permit_async(
+                MediaEncodeKind::Video,
+                video_encode_concurrency,
+                cpu_budget,
+            )
+            .await?;
+            record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
             let phase_started = Instant::now();
             convert_m2v_bytes_to_mp4_with_backend(
                 &video.data,
@@ -497,6 +576,8 @@ pub(super) async fn process_usm_input_with_metrics(
                 retry,
             )
             .await?;
+            drop(encode_slot.cpu_permit);
+            drop(encode_slot.permit);
             add_elapsed_phase_ms(
                 &mut output.phase_ms,
                 "post_process.usm.convert_mp4",
@@ -524,6 +605,13 @@ pub(super) async fn process_usm_input_with_metrics(
                 .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
             {
                 let mp4 = export_path.join(format!("{output_name}.mp4"));
+                let encode_slot = acquire_media_encode_permit_async(
+                    MediaEncodeKind::Video,
+                    video_encode_concurrency,
+                    cpu_budget,
+                )
+                .await?;
+                record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
                 let phase_started = Instant::now();
                 convert_m2v_bytes_to_mp4_with_backend(
                     &video.data,
@@ -534,6 +622,8 @@ pub(super) async fn process_usm_input_with_metrics(
                     retry,
                 )
                 .await?;
+                drop(encode_slot.cpu_permit);
+                drop(encode_slot.permit);
                 add_elapsed_phase_ms(
                     &mut output.phase_ms,
                     "post_process.usm.convert_mp4",
@@ -584,6 +674,13 @@ pub(super) async fn process_usm_input_with_metrics(
                 .unwrap_or(false)
             {
                 let mp4 = export_path.join(format!("{output_name}.mp4"));
+                let encode_slot = acquire_media_encode_permit_async(
+                    MediaEncodeKind::Video,
+                    video_encode_concurrency,
+                    cpu_budget,
+                )
+                .await?;
+                record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
                 let phase_started = Instant::now();
                 convert_m2v_to_mp4_with_backend(
                     &extracted_file,
@@ -595,6 +692,8 @@ pub(super) async fn process_usm_input_with_metrics(
                     retry,
                 )
                 .await?;
+                drop(encode_slot.cpu_permit);
+                drop(encode_slot.permit);
                 add_elapsed_phase_ms(
                     &mut output.phase_ms,
                     "post_process.usm.convert_mp4",
@@ -671,6 +770,8 @@ pub(super) async fn process_usm_file_with_metrics(
         ffmpeg_path,
         media_backend,
         retry,
+        1,
+        1,
     )
     .await
 }
@@ -689,7 +790,7 @@ pub(super) fn handle_acb_files_owned(
         media_backend: options.media_backend,
         retry: &options.retry,
         hca_concurrency: options.hca_concurrency,
-        media_encode_concurrency: options.media_encode_concurrency,
+        audio_encode_concurrency: options.audio_encode_concurrency,
         cpu_budget: options.cpu_budget,
     };
     handle_acb_files(
@@ -741,7 +842,7 @@ pub(super) fn handle_acb_files_batched(
     let retry = options.retry.clone();
     let media_backend = options.media_backend;
     let hca_concurrency = options.hca_concurrency;
-    let media_encode_concurrency = options.media_encode_concurrency;
+    let audio_encode_concurrency = options.audio_encode_concurrency;
     let cpu_budget = options.cpu_budget;
     let extracted = run_tasks(acb_inputs, acb_concurrency, move |acb_input| {
         let options = AcbPostProcessOptions {
@@ -751,7 +852,7 @@ pub(super) fn handle_acb_files_batched(
             media_backend,
             retry: &retry,
             hca_concurrency,
-            media_encode_concurrency,
+            audio_encode_concurrency,
             cpu_budget,
         };
         extract_acb_tracks_from_input(acb_input, &options)
@@ -839,7 +940,7 @@ pub(super) fn handle_acb_files_streaming(
         let ffmpeg_path = options.ffmpeg_path.to_string();
         let media_backend = options.media_backend;
         let retry = options.retry.clone();
-        let media_encode_concurrency = options.media_encode_concurrency;
+        let audio_encode_concurrency = options.audio_encode_concurrency;
         let cpu_budget = options.cpu_budget;
         let handle = std::thread::Builder::new()
             .name("hca-memory-export".to_string())
@@ -860,7 +961,7 @@ pub(super) fn handle_acb_files_streaming(
                     ffmpeg_path: &ffmpeg_path,
                     media_backend,
                     retry: &retry,
-                    media_encode_concurrency,
+                    audio_encode_concurrency,
                     cpu_budget,
                 };
                 match process_hca_track(track_job.track, &track_options) {
@@ -898,7 +999,7 @@ pub(super) fn handle_acb_files_streaming(
         let media_backend = options.media_backend;
         let retry = options.retry.clone();
         let hca_concurrency = options.hca_concurrency;
-        let media_encode_concurrency = options.media_encode_concurrency;
+        let audio_encode_concurrency = options.audio_encode_concurrency;
         let cpu_budget = options.cpu_budget;
         let handle = std::thread::Builder::new()
             .name("acb-track-extract".to_string())
@@ -920,7 +1021,7 @@ pub(super) fn handle_acb_files_streaming(
                     media_backend,
                     retry: &retry,
                     hca_concurrency,
-                    media_encode_concurrency,
+                    audio_encode_concurrency,
                     cpu_budget,
                 };
                 match extract_acb_tracks_from_input(acb_input, &worker_options) {
@@ -1070,7 +1171,7 @@ pub(super) struct OwnedAcbPostProcessOptions {
     pub(super) media_backend: MediaBackend,
     pub(super) retry: crate::core::config::RetryConfig,
     pub(super) hca_concurrency: usize,
-    pub(super) media_encode_concurrency: usize,
+    pub(super) audio_encode_concurrency: usize,
     pub(super) cpu_budget: usize,
 }
 
@@ -1082,7 +1183,7 @@ pub(super) struct AcbPostProcessOptions<'a> {
     pub(super) media_backend: MediaBackend,
     pub(super) retry: &'a crate::core::config::RetryConfig,
     pub(super) hca_concurrency: usize,
-    pub(super) media_encode_concurrency: usize,
+    pub(super) audio_encode_concurrency: usize,
     pub(super) cpu_budget: usize,
 }
 
@@ -1251,7 +1352,7 @@ pub(super) fn process_hca_tracks(
         let ffmpeg_path = options.ffmpeg_path.to_string();
         let media_backend = options.media_backend;
         let retry = options.retry.clone();
-        let media_encode_concurrency = options.media_encode_concurrency;
+        let audio_encode_concurrency = options.audio_encode_concurrency;
         let cpu_budget = options.cpu_budget;
         let handle = std::thread::Builder::new()
             .name("hca-memory-export".to_string())
@@ -1272,7 +1373,7 @@ pub(super) fn process_hca_tracks(
                     ffmpeg_path: &ffmpeg_path,
                     media_backend,
                     retry: &retry,
-                    media_encode_concurrency,
+                    audio_encode_concurrency,
                     cpu_budget,
                 };
                 match process_hca_track(track_job.track, &track_options) {
@@ -1325,7 +1426,7 @@ pub(super) fn process_hca_track_job_on_large_stack(
     let ffmpeg_path = options.ffmpeg_path.to_string();
     let media_backend = options.media_backend;
     let retry = options.retry.clone();
-    let media_encode_concurrency = options.media_encode_concurrency;
+    let audio_encode_concurrency = options.audio_encode_concurrency;
     let cpu_budget = options.cpu_budget;
     let handle = std::thread::Builder::new()
         .name("hca-memory-export".to_string())
@@ -1337,7 +1438,7 @@ pub(super) fn process_hca_track_job_on_large_stack(
                 ffmpeg_path: &ffmpeg_path,
                 media_backend,
                 retry: &retry,
-                media_encode_concurrency,
+                audio_encode_concurrency,
                 cpu_budget,
             };
             process_hca_track(track.track, &track_options)
@@ -1360,7 +1461,7 @@ pub(super) struct HcaTrackProcessOptions<'a> {
     pub(super) ffmpeg_path: &'a str,
     pub(super) media_backend: MediaBackend,
     pub(super) retry: &'a crate::core::config::RetryConfig,
-    pub(super) media_encode_concurrency: usize,
+    pub(super) audio_encode_concurrency: usize,
     pub(super) cpu_budget: usize,
 }
 
@@ -1368,19 +1469,59 @@ pub(super) fn record_hca_media_encode_acquire(
     phase_ms: &mut HashMap<String, u64>,
     encode_slot: &MediaEncodeAcquire,
 ) {
+    debug_assert_eq!(encode_slot.kind, MediaEncodeKind::Audio);
     add_phase_ms(
         phase_ms,
-        "post_process.hca.media_pool_wait",
+        "post_process.hca.audio_pool_wait",
         encode_slot.wait_ms,
     );
     add_phase_ms(
         phase_ms,
+        "media_scheduler.audio_encode_wait",
+        encode_slot.wait_ms,
+    );
+    record_max_phase_ms(
+        phase_ms,
+        "media_scheduler.audio_encode_active_peak",
+        encode_slot.active as u64,
+    );
+    add_phase_ms(
+        phase_ms,
+        // Compatibility metric for older bench readers.
         "media_scheduler.media_encode_wait",
         encode_slot.wait_ms,
     );
     record_max_phase_ms(
         phase_ms,
         "media_scheduler.media_encode_active_peak",
+        encode_slot.active as u64,
+    );
+    add_phase_ms(
+        phase_ms,
+        "media_scheduler.cpu_budget_wait",
+        encode_slot.cpu_budget_wait_ms,
+    );
+    add_phase_ms(phase_ms, "cpu_budget.wait", encode_slot.cpu_budget_wait_ms);
+}
+
+pub(super) fn record_usm_video_encode_acquire(
+    phase_ms: &mut HashMap<String, u64>,
+    encode_slot: &MediaEncodeAcquire,
+) {
+    debug_assert_eq!(encode_slot.kind, MediaEncodeKind::Video);
+    add_phase_ms(
+        phase_ms,
+        "post_process.usm.video_pool_wait",
+        encode_slot.wait_ms,
+    );
+    add_phase_ms(
+        phase_ms,
+        "media_scheduler.video_encode_wait",
+        encode_slot.wait_ms,
+    );
+    record_max_phase_ms(
+        phase_ms,
+        "media_scheduler.video_encode_active_peak",
         encode_slot.active as u64,
     );
     add_phase_ms(
@@ -1484,8 +1625,11 @@ pub(super) fn process_hca_track(
 
     if encode_mp3 {
         let mp3 = options.output_dir.join(format!("{}.mp3", track.name));
-        let encode_slot =
-            acquire_media_encode_permit(options.media_encode_concurrency, options.cpu_budget)?;
+        let encode_slot = acquire_media_encode_permit(
+            MediaEncodeKind::Audio,
+            options.audio_encode_concurrency,
+            options.cpu_budget,
+        )?;
         record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
         let phase_started = Instant::now();
         if let Some(wav_bytes) = wav_bytes.as_deref() {
@@ -1517,8 +1661,11 @@ pub(super) fn process_hca_track(
 
     if encode_flac {
         let flac = options.output_dir.join(format!("{}.flac", track.name));
-        let encode_slot =
-            acquire_media_encode_permit(options.media_encode_concurrency, options.cpu_budget)?;
+        let encode_slot = acquire_media_encode_permit(
+            MediaEncodeKind::Audio,
+            options.audio_encode_concurrency,
+            options.cpu_budget,
+        )?;
         record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
         let phase_started = Instant::now();
         if let Some(wav_bytes) = wav_bytes.as_deref() {

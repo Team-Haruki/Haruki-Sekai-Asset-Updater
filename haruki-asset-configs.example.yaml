@@ -72,11 +72,13 @@ concurrency:
   auto_tune: false # when true, values below are throughput-oriented caps scaled to CPU count
   download: 32
   upload: 4
-  post_process: 16 # 0 = use media_encode; raise for image/typetree-heavy full exports
+  post_process: 16 # 0 = use max(audio_encode, video_encode); raise for image/typetree-heavy full exports
   acb: 12
   usm: 6
   hca: 16
-  media_encode: 12 # global FFmpeg/rsmpeg encode limit
+  media_encode: 12 # legacy aggregate FFmpeg/rsmpeg cap; prefer audio_encode/video_encode
+  audio_encode: 12 # HCA -> wav/flac/mp3 encode limit
+  video_encode: 4 # USM/M2V -> mp4 encode limit; keep lower to avoid x264 memory spikes
   images: 12
 
 storage:
