@@ -5,26 +5,32 @@ edition = "2021"
 description = "Rust service for Haruki Sekai Asset Updater"
 license = "MIT"
 
+[workspace]
+members = [".", "crates/assetstudio-ffi"]
+resolver = "2"
+
 [dependencies]
 aes = "0.9"
 axum = { version = "0.8", features = ["macros", "json"] }
-aws-config = "1.8"
-aws-sdk-s3 = { version = "1", default-features = false, features = [
-    "default-https-client",
-    "http-1x",
-    "rt-tokio",
-    "sigv4a",
-] }
 cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.6", features = ["derive"] }
-cridecoder = "0.1"
+cridecoder = "0.2.3"
+haruki-assetstudio-ffi = { path = "crates/assetstudio-ffi" }
 hex = "0.4"
-image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
+libc = "0.2"
 mime_guess = "2.0"
+opendal = { version = "0.56.0", default-features = false, features = [
+    "executors-tokio",
+    "reqwest-rustls-tls",
+    "services-fs",
+    "services-s3",
+] }
 regex = "1.12"
 reqwest = { version = "0.13", default-features = false, features = ["brotli", "deflate", "gzip", "http2", "json", "rustls"] }
 rmp-serde = "1.3"
+rsmpeg = { version = "0.18.0", default-features = false, features = ["ffmpeg7_1", "link_system_ffmpeg"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 sonic-rs = "0.5"
 tempfile = "3.27"
@@ -39,6 +45,10 @@ yaml_serde = "0.10"
 [dev-dependencies]
 sha2 = "0.11.0"
 tower = { version = "0.5.3", features = ["util"] }
+
+[features]
+default = []
+media-ffi = ["dep:rsmpeg"]
 
 [profile.release]
 lto = "thin"

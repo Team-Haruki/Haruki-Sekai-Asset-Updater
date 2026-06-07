@@ -10,7 +10,7 @@ Example response:
 {
   "status": "ok",
   "service": "haruki-sekai-asset-updater",
-  "config_version": 2,
+  "config_version": 3,
   "enabled_regions": ["jp"]
 }
 ```

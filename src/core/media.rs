@@ -3,7 +3,8 @@ use std::path::Path;
 
 use tokio::process::Command;
 
-use crate::core::config::RetryConfig;
+use crate::core::cleanup::remove_file_if_exists;
+use crate::core::config::{MediaBackend, RetryConfig};
 use crate::core::errors::ExportPipelineError;
 use crate::core::retry::{retry_async, retry_sync};
 
@@ -32,7 +33,24 @@ impl Display for FrameRate {
     }
 }
 
-pub async fn convert_usm_to_mp4(
+pub async fn convert_usm_to_mp4_with_backend(
+    usm_file: &Path,
+    mp4_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend(
+        backend,
+        retry,
+        "usm->mp4",
+        || media_ffi::convert_usm_to_mp4(usm_file, mp4_file),
+        || async { convert_usm_to_mp4_cli(usm_file, mp4_file, ffmpeg_path, retry).await },
+    )
+    .await
+}
+
+async fn convert_usm_to_mp4_cli(
     usm_file: &Path,
     mp4_file: &Path,
     ffmpeg_path: &str,
@@ -67,7 +85,69 @@ pub async fn convert_usm_to_mp4(
     .await
 }
 
-pub async fn convert_m2v_to_mp4(
+pub async fn convert_m2v_to_mp4_with_backend(
+    m2v_file: &Path,
+    mp4_file: &Path,
+    delete_original: bool,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    frame_rate: Option<FrameRate>,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend(
+        backend,
+        retry,
+        "m2v->mp4",
+        || media_ffi::convert_m2v_to_mp4(m2v_file, mp4_file, frame_rate),
+        || async {
+            convert_m2v_to_mp4_cli(
+                m2v_file,
+                mp4_file,
+                delete_original,
+                ffmpeg_path,
+                frame_rate,
+                retry,
+            )
+            .await
+        },
+    )
+    .await?;
+    if delete_original {
+        remove_file_if_exists(m2v_file).map_err(|source| ExportPipelineError::Io {
+            path: m2v_file.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+pub async fn convert_m2v_bytes_to_mp4_with_backend(
+    m2v_bytes: &[u8],
+    mp4_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    frame_rate: Option<FrameRate>,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend(
+        backend,
+        retry,
+        "m2v-bytes->mp4",
+        || media_ffi::convert_m2v_bytes_to_mp4(m2v_bytes, mp4_file, frame_rate),
+        || async {
+            let temp_path = write_cli_input_temp_file(".m2v", m2v_bytes)?;
+            convert_m2v_to_mp4_cli(&temp_path, mp4_file, false, ffmpeg_path, frame_rate, retry)
+                .await?;
+            remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
+                path: temp_path,
+                source,
+            })
+        },
+    )
+    .await
+}
+
+async fn convert_m2v_to_mp4_cli(
     m2v_file: &Path,
     mp4_file: &Path,
     delete_original: bool,
@@ -101,8 +181,8 @@ pub async fn convert_m2v_to_mp4(
         is_retryable_command_error,
     )
     .await?;
-    if delete_original && m2v_file.exists() {
-        std::fs::remove_file(m2v_file).map_err(|source| ExportPipelineError::Io {
+    if delete_original {
+        remove_file_if_exists(m2v_file).map_err(|source| ExportPipelineError::Io {
             path: m2v_file.to_path_buf(),
             source,
         })?;
@@ -110,7 +190,58 @@ pub async fn convert_m2v_to_mp4(
     Ok(())
 }
 
-pub fn convert_wav_to_mp3(
+pub fn convert_wav_to_mp3_with_backend(
+    wav_file: &Path,
+    mp3_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend_sync(
+        backend,
+        retry,
+        "wav->mp3",
+        || media_ffi::convert_wav_to_mp3(wav_file, mp3_file),
+        || convert_wav_to_mp3_cli(wav_file, mp3_file, ffmpeg_path, retry),
+    )
+}
+
+pub fn convert_wav_bytes_to_mp3_with_backend(
+    wav_bytes: &[u8],
+    mp3_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend_sync(
+        backend,
+        retry,
+        "wav-bytes->mp3",
+        || media_ffi::convert_wav_bytes_to_mp3(wav_bytes, mp3_file),
+        || convert_wav_bytes_to_mp3_cli(wav_bytes, mp3_file, ffmpeg_path, retry),
+    )
+}
+
+pub fn convert_hca_bytes_to_mp3_with_backend(
+    hca_bytes: &[u8],
+    mp3_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend_sync(
+        backend,
+        retry,
+        "hca-bytes->mp3",
+        || media_ffi::convert_hca_bytes_to_mp3(hca_bytes, mp3_file),
+        || {
+            let wav_bytes = crate::core::codec::decode_hca_bytes_to_wav_bytes(hca_bytes)?;
+            convert_wav_bytes_to_mp3_cli(&wav_bytes, mp3_file, ffmpeg_path, retry)
+        },
+    )
+}
+
+fn convert_wav_to_mp3_cli(
     wav_file: &Path,
     mp3_file: &Path,
     ffmpeg_path: &str,
@@ -136,7 +267,72 @@ pub fn convert_wav_to_mp3(
     )
 }
 
-pub fn convert_wav_to_flac(
+fn convert_wav_bytes_to_mp3_cli(
+    wav_bytes: &[u8],
+    mp3_file: &Path,
+    ffmpeg_path: &str,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    let temp_path = write_cli_input_temp_file(".wav", wav_bytes)?;
+    convert_wav_to_mp3_cli(&temp_path, mp3_file, ffmpeg_path, retry)?;
+    remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
+        path: temp_path,
+        source,
+    })
+}
+
+pub fn convert_wav_to_flac_with_backend(
+    wav_file: &Path,
+    flac_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend_sync(
+        backend,
+        retry,
+        "wav->flac",
+        || media_ffi::convert_wav_to_flac(wav_file, flac_file),
+        || convert_wav_to_flac_cli(wav_file, flac_file, ffmpeg_path, retry),
+    )
+}
+
+pub fn convert_wav_bytes_to_flac_with_backend(
+    wav_bytes: &[u8],
+    flac_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend_sync(
+        backend,
+        retry,
+        "wav-bytes->flac",
+        || media_ffi::convert_wav_bytes_to_flac(wav_bytes, flac_file),
+        || convert_wav_bytes_to_flac_cli(wav_bytes, flac_file, ffmpeg_path, retry),
+    )
+}
+
+pub fn convert_hca_bytes_to_flac_with_backend(
+    hca_bytes: &[u8],
+    flac_file: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    run_media_backend_sync(
+        backend,
+        retry,
+        "hca-bytes->flac",
+        || media_ffi::convert_hca_bytes_to_flac(hca_bytes, flac_file),
+        || {
+            let wav_bytes = crate::core::codec::decode_hca_bytes_to_wav_bytes(hca_bytes)?;
+            convert_wav_bytes_to_flac_cli(&wav_bytes, flac_file, ffmpeg_path, retry)
+        },
+    )
+}
+
+fn convert_wav_to_flac_cli(
     wav_file: &Path,
     flac_file: &Path,
     ffmpeg_path: &str,
@@ -160,6 +356,120 @@ pub fn convert_wav_to_flac(
         },
         is_retryable_command_error,
     )
+}
+
+fn convert_wav_bytes_to_flac_cli(
+    wav_bytes: &[u8],
+    flac_file: &Path,
+    ffmpeg_path: &str,
+    retry: &RetryConfig,
+) -> Result<(), ExportPipelineError> {
+    let temp_path = write_cli_input_temp_file(".wav", wav_bytes)?;
+    convert_wav_to_flac_cli(&temp_path, flac_file, ffmpeg_path, retry)?;
+    remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
+        path: temp_path,
+        source,
+    })
+}
+
+fn write_cli_input_temp_file(
+    suffix: &str,
+    bytes: &[u8],
+) -> Result<std::path::PathBuf, ExportPipelineError> {
+    let temp_root = std::env::temp_dir();
+    let mut temp_file = tempfile::Builder::new()
+        .suffix(suffix)
+        .tempfile_in(&temp_root)
+        .map_err(|source| ExportPipelineError::Io {
+            path: temp_root.clone(),
+            source,
+        })?;
+    std::io::Write::write_all(&mut temp_file, bytes).map_err(|source| ExportPipelineError::Io {
+        path: temp_file.path().to_path_buf(),
+        source,
+    })?;
+    temp_file
+        .into_temp_path()
+        .keep()
+        .map_err(|error| ExportPipelineError::Io {
+            path: error.path.to_path_buf(),
+            source: error.error,
+        })
+}
+
+async fn run_media_backend<Ffi, Cli, CliFuture>(
+    backend: MediaBackend,
+    retry: &RetryConfig,
+    operation: &str,
+    mut ffi: Ffi,
+    cli: Cli,
+) -> Result<(), ExportPipelineError>
+where
+    Ffi: FnMut() -> Result<(), ExportPipelineError>,
+    Cli: FnOnce() -> CliFuture,
+    CliFuture: std::future::Future<Output = Result<(), ExportPipelineError>>,
+{
+    match backend {
+        MediaBackend::Cli => cli().await,
+        MediaBackend::Ffi => retry_sync(
+            retry,
+            &format!("ffmpeg ffi {operation}"),
+            |_| ffi(),
+            is_retryable_command_error,
+        ),
+        MediaBackend::Auto => match retry_sync(
+            retry,
+            &format!("ffmpeg ffi {operation}"),
+            |_| ffi(),
+            is_retryable_command_error,
+        ) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "FFmpeg FFI media backend failed; falling back to CLI"
+                );
+                cli().await
+            }
+        },
+    }
+}
+
+fn run_media_backend_sync<Ffi, Cli>(
+    backend: MediaBackend,
+    retry: &RetryConfig,
+    operation: &str,
+    mut ffi: Ffi,
+    cli: Cli,
+) -> Result<(), ExportPipelineError>
+where
+    Ffi: FnMut() -> Result<(), ExportPipelineError>,
+    Cli: FnOnce() -> Result<(), ExportPipelineError>,
+{
+    match backend {
+        MediaBackend::Cli => cli(),
+        MediaBackend::Ffi => retry_sync(
+            retry,
+            &format!("ffmpeg ffi {operation}"),
+            |_| ffi(),
+            is_retryable_command_error,
+        ),
+        MediaBackend::Auto => match retry_sync(
+            retry,
+            &format!("ffmpeg ffi {operation}"),
+            |_| ffi(),
+            is_retryable_command_error,
+        ) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "FFmpeg FFI media backend failed; falling back to CLI"
+                );
+                cli()
+            }
+        },
+    }
 }
 
 fn run_ffmpeg<'a>(ffmpeg_path: &'a str, args: &'a [&'a str]) -> FfmpegCommand<'a> {
@@ -228,157 +538,15 @@ fn map_command_output(
     }
 }
 
+#[cfg(feature = "media-ffi")]
+mod ffi;
+#[cfg(feature = "media-ffi")]
+use ffi as media_ffi;
+
+#[cfg(not(feature = "media-ffi"))]
+mod ffi_disabled;
+#[cfg(not(feature = "media-ffi"))]
+use ffi_disabled as media_ffi;
+
 #[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use tempfile::tempdir;
-
-    use super::{convert_m2v_to_mp4, convert_usm_to_mp4, FrameRate};
-    use crate::core::config::RetryConfig;
-
-    #[test]
-    fn frame_rate_formats_like_go_helper() {
-        assert_eq!(
-            FrameRate {
-                numerator: 30000,
-                denominator: 1001
-            }
-            .to_string(),
-            "30000/1001"
-        );
-        assert_eq!(
-            FrameRate {
-                numerator: 60,
-                denominator: 1
-            }
-            .to_string(),
-            "60"
-        );
-    }
-
-    #[test]
-    fn convert_usm_to_mp4_builds_ffmpeg_command() {
-        let dir = tempdir().unwrap();
-        let input = dir.path().join("sample.usm");
-        let output = dir.path().join("sample.mp4");
-        let script_path = dir.path().join("fake_ffmpeg.sh");
-        fs::write(&input, b"dummy").unwrap();
-        fs::write(
-            &script_path,
-            "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
-        )
-        .unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime
-            .block_on(convert_usm_to_mp4(
-                &input,
-                &output,
-                &script_path.to_string_lossy(),
-                &RetryConfig {
-                    attempts: 1,
-                    initial_backoff_ms: 1,
-                    max_backoff_ms: 1,
-                },
-            ))
-            .unwrap();
-
-        assert!(output.exists());
-    }
-
-    #[test]
-    fn convert_m2v_to_mp4_removes_original_when_requested() {
-        let dir = tempdir().unwrap();
-        let input = dir.path().join("sample.m2v");
-        let output = dir.path().join("sample.mp4");
-        let script_path = dir.path().join("fake_ffmpeg.sh");
-        fs::write(&input, b"dummy").unwrap();
-        fs::write(
-            &script_path,
-            "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
-        )
-        .unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime
-            .block_on(convert_m2v_to_mp4(
-                &input,
-                &output,
-                true,
-                &script_path.to_string_lossy(),
-                Some(FrameRate {
-                    numerator: 30000,
-                    denominator: 1001,
-                }),
-                &RetryConfig {
-                    attempts: 1,
-                    initial_backoff_ms: 1,
-                    max_backoff_ms: 1,
-                },
-            ))
-            .unwrap();
-
-        assert!(!input.exists());
-        assert!(output.exists());
-    }
-
-    #[test]
-    fn convert_usm_to_mp4_retries_after_command_failure() {
-        let dir = tempdir().unwrap();
-        let input = dir.path().join("sample.usm");
-        let output = dir.path().join("sample.mp4");
-        let script_path = dir.path().join("fake_ffmpeg_retry.sh");
-        let marker_path = dir.path().join("attempts.txt");
-        fs::write(&input, b"dummy").unwrap();
-        fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\nset -eu\nMARKER=\"{}\"\nif [ ! -f \"$MARKER\" ]; then\n  echo first > \"$MARKER\"\n  echo transient >&2\n  exit 1\nfi\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
-                marker_path.display()
-            ),
-        )
-        .unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime
-            .block_on(convert_usm_to_mp4(
-                &input,
-                &output,
-                &script_path.to_string_lossy(),
-                &RetryConfig {
-                    attempts: 2,
-                    initial_backoff_ms: 1,
-                    max_backoff_ms: 1,
-                },
-            ))
-            .unwrap();
-
-        assert!(marker_path.exists());
-        assert!(output.exists());
-    }
-}
+mod tests;

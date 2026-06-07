@@ -28,6 +28,14 @@ const COLOR_BLUE: &str = "\x1b[34m";
 const COLOR_MAGENTA: &str = "\x1b[35m";
 const COLOR_YELLOW: &str = "\x1b[33m";
 const COLOR_RED: &str = "\x1b[31m";
+const COLOR_CYAN: &str = "\x1b[36m";
+const COLOR_WHITE: &str = "\x1b[37m";
+const COLOR_DARK_ORANGE: &str = "\x1b[38;5;208m";
+const COLOR_CYAN1: &str = "\x1b[38;5;51m";
+const COLOR_DARK_SLATE_GRAY1: &str = "\x1b[38;5;123m";
+const COLOR_BRIGHT_BLUE: &str = "\x1b[94m";
+const COLOR_BRIGHT_MAGENTA: &str = "\x1b[95m";
+const COLOR_BRIGHT_CYAN: &str = "\x1b[96m";
 const COLOR_RESET: &str = "\x1b[0m";
 
 pub struct LoggingGuards {
@@ -82,8 +90,30 @@ pub fn init_logging(config: &AppConfig) -> io::Result<LoggingGuards> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(env_filter_directive(&config.logging.level)));
 
-    let (writer, ansi_enabled) = main_log_writer(config)?;
-    let layer = match config.logging.format {
+    let mut layers = Vec::new();
+    layers.push(main_log_layer(
+        config.logging.format,
+        BoxMakeWriter::new(io::stdout),
+        true,
+    ));
+    if let Some(writer) = main_log_file_writer(config)? {
+        layers.push(main_log_layer(config.logging.format, writer, false));
+    }
+
+    tracing_subscriber::registry()
+        .with(layers)
+        .with(filter)
+        .init();
+
+    Ok(LoggingGuards { _noop: () })
+}
+
+fn main_log_layer(
+    format: LogFormat,
+    writer: BoxMakeWriter,
+    ansi_enabled: bool,
+) -> Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync + 'static> {
+    match format {
         LogFormat::Json => tsfmt::layer()
             .json()
             .with_writer(writer)
@@ -95,14 +125,7 @@ pub fn init_logging(config: &AppConfig) -> io::Result<LoggingGuards> {
             .with_ansi(ansi_enabled)
             .event_format(ColoredFormatter { ansi: ansi_enabled })
             .boxed(),
-    };
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(layer)
-        .init();
-
-    Ok(LoggingGuards { _noop: () })
+    }
 }
 
 fn env_filter_directive(level: &str) -> String {
@@ -126,7 +149,7 @@ fn env_filter_directive(level: &str) -> String {
     }
 }
 
-fn main_log_writer(config: &AppConfig) -> io::Result<(BoxMakeWriter, bool)> {
+fn main_log_file_writer(config: &AppConfig) -> io::Result<Option<BoxMakeWriter>> {
     let file_path = config
         .logging
         .file
@@ -147,9 +170,9 @@ fn main_log_writer(config: &AppConfig) -> io::Result<(BoxMakeWriter, bool)> {
             .unwrap_or("service.log")
             .to_string();
         let path = parent.join(file_name);
-        Ok((BoxMakeWriter::new(SharedFileMakeWriter::new(&path)?), false))
+        Ok(Some(BoxMakeWriter::new(SharedFileMakeWriter::new(&path)?)))
     } else {
-        Ok((BoxMakeWriter::new(io::stdout), true))
+        Ok(None)
     }
 }
 
@@ -268,6 +291,7 @@ where
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         let level = level_name(metadata.level());
         let component = component_name(metadata.target());
+        let component_color = component_color(component);
         let mut visitor = EventVisitor::default();
         event.record(&mut visitor);
 
@@ -279,20 +303,30 @@ where
         } else {
             format!(" {}", visitor.fields.join(" "))
         };
-        let message = format!("{}{}", visitor.message.unwrap_or_default(), fields);
+        let message = if self.ansi {
+            format!(
+                "{}{}{}{}",
+                COLOR_WHITE,
+                visitor.message.unwrap_or_default(),
+                fields,
+                COLOR_RESET
+            )
+        } else {
+            format!("{}{}", visitor.message.unwrap_or_default(), fields)
+        };
 
         if self.ansi {
             let level_color = level_color(metadata.level());
             writeln!(
                 writer,
                 "{}[{}]{}[{}{}{}][{}{}{}]{}{}{}{}",
-                COLOR_GREEN,
+                COLOR_DARK_SLATE_GRAY1,
                 now,
                 COLOR_RESET,
                 level_color,
                 level,
                 COLOR_RESET,
-                COLOR_MAGENTA,
+                component_color,
                 component,
                 COLOR_RESET,
                 after_component,
@@ -350,7 +384,7 @@ impl EventVisitor {
         }
         if let Some(job_id) = &self.job_id {
             if ansi {
-                tags.push_str(&format!("[{}Job-{}{}]", COLOR_BLUE, job_id, COLOR_RESET));
+                tags.push_str(&format!("[{}Job-{}{}]", COLOR_CYAN1, job_id, COLOR_RESET));
             } else {
                 tags.push_str(&format!("[Job-{job_id}]"));
             }
@@ -411,7 +445,7 @@ fn level_color(level: &Level) -> &'static str {
         Level::TRACE => COLOR_MAGENTA,
         Level::DEBUG => COLOR_BLUE,
         Level::INFO => COLOR_GREEN,
-        Level::WARN => COLOR_YELLOW,
+        Level::WARN => COLOR_DARK_ORANGE,
         Level::ERROR => COLOR_RED,
     }
 }
@@ -429,6 +463,20 @@ fn component_name(target: &str) -> &str {
         Some("haruki_sekai_asset_updater_bin") => "main",
         Some(component) => component,
         None => "main",
+    }
+}
+
+fn component_color(component: &str) -> &'static str {
+    match component {
+        "main" => COLOR_BRIGHT_CYAN,
+        "core" | "config" => COLOR_BRIGHT_MAGENTA,
+        "service" | "http" => COLOR_GREEN,
+        "updater" | "asset" | "assets" => COLOR_MAGENTA,
+        "storage" | "database" | "db" => COLOR_BLUE,
+        "bin" => COLOR_YELLOW,
+        "job" | "worker" => COLOR_BRIGHT_BLUE,
+        "access" => COLOR_CYAN,
+        _ => COLOR_BRIGHT_CYAN,
     }
 }
 

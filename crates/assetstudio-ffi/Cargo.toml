@@ -1,0 +1,17 @@
+[package]
+name = "haruki-assetstudio-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "AssetStudio FFI worker and typed ABI support for Haruki Sekai Asset Updater"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+libc = "0.2"
+libloading = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+sonic-rs = "0.5"
+tempfile = "3.27"
+thiserror = "2.0"
+tokio = { version = "1.52", features = ["io-util", "process", "sync"] }
+tracing = "0.1"

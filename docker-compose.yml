@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   haruki-updater:
     image: haruki-sekai-asset-updater:latest
@@ -16,7 +14,6 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - HARUKI_CONFIG_PATH=/app/haruki-asset-configs.yaml
-      - HARUKI_ASSET_STUDIO_CLI_PATH=/app/assetstudio/AssetStudioCLI
       - HARUKI_SHARED_AES_KEY_HEX=${HARUKI_SHARED_AES_KEY_HEX}
       - HARUKI_SHARED_AES_IV_HEX=${HARUKI_SHARED_AES_IV_HEX}
       - HARUKI_EN_AES_KEY_HEX=${HARUKI_EN_AES_KEY_HEX}

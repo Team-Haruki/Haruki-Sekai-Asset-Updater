@@ -7,8 +7,13 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Arc::new(AppConfig::load_default()?);
+    let config = Arc::new(AppConfig::load_default().await?);
     let _logging_guards = init_logging(&config)?;
+    info!(
+        "========================= Haruki Sekai Asset Updater v{} =========================",
+        env!("CARGO_PKG_VERSION")
+    );
+    info!("Powered by Haruki Dev Team");
 
     let bind_addr = format!("{}:{}", config.server.host, config.server.port);
     info!(

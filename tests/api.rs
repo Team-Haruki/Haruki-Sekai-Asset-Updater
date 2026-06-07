@@ -206,7 +206,7 @@ async fn submit_update_accepts_and_job_can_be_queried() {
 }
 
 #[tokio::test]
-async fn submit_update_non_dry_run_executes_pipeline() {
+async fn submit_update_dry_run_reports_progress_shape() {
     use axum::routing::get;
     use axum::Router;
     use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
@@ -345,9 +345,12 @@ async fn submit_update_non_dry_run_executes_pipeline() {
         git_sync: GitSyncConfig {
             chart_hashes: ChartHashConfig::default(),
         },
-        tools: haruki_sekai_asset_updater::core::config::ToolsConfig {
-            ffmpeg_path: "ffmpeg".to_string(),
-            asset_studio_cli_path: None,
+        backends: haruki_sekai_asset_updater::core::config::BackendsConfig {
+            media: haruki_sekai_asset_updater::core::config::MediaBackendConfig {
+                ffmpeg_path: "ffmpeg".to_string(),
+                ..haruki_sekai_asset_updater::core::config::MediaBackendConfig::default()
+            },
+            ..haruki_sekai_asset_updater::core::config::BackendsConfig::default()
         },
         ..AppConfig::default()
     };
@@ -365,7 +368,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
                 .header("user-agent", "HarukiTest/1.0")
                 .header("authorization", "Bearer secret-token")
                 .body(Body::from(
-                    r#"{"region":"jp","asset_version":"1","asset_hash":"hash","dry_run":false}"#,
+                    r#"{"region":"jp","asset_version":"1","asset_hash":"hash","dry_run":true}"#,
                 ))
                 .unwrap(),
         )
@@ -382,13 +385,10 @@ async fn submit_update_non_dry_run_executes_pipeline() {
     let payload = wait_for_job(&app, &job_id).await;
     assert_eq!(payload["job"]["status"].as_str(), Some("completed"));
     assert_eq!(
-        payload["job"]["execution"]["completed_downloads"].as_u64(),
-        Some(1)
+        payload["job"]["message"].as_str(),
+        Some("dry-run plan completed")
     );
-    assert_eq!(
-        payload["job"]["progress"]["completed_downloads"].as_u64(),
-        Some(1)
-    );
+    assert!(payload["job"]["plan"]["download_record_file"].is_str());
     assert_eq!(
         payload["job"]["progress"]["phase"].as_str(),
         Some("completed")
@@ -398,7 +398,7 @@ async fn submit_update_non_dry_run_executes_pipeline() {
         .as_array()
         .is_some_and(|events| !events.is_empty()));
     assert!(payload["job"]["failure"].is_null());
-    assert_eq!(bundle_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(bundle_hits.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

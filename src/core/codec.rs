@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{BufWriter, Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use cridecoder::{extract_acb_from_file, extract_usm_file, HcaDecoder};
@@ -6,7 +7,7 @@ use serde::Serialize;
 
 use crate::core::errors::CodecError;
 
-pub const CODEC_BACKEND: &str = "crates.io:cridecoder@0.1.1";
+pub const CODEC_BACKEND: &str = "crates.io:cridecoder@0.2.3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CodecSummary {
@@ -31,10 +32,27 @@ pub fn export_acb(input: &Path, output_dir: &Path) -> Result<Option<Vec<String>>
     extract_acb_from_file(input, output_dir).map_err(|err| CodecError::Acb(err.to_string()))
 }
 
+pub fn export_acb_to_memory<R: Read + Seek>(
+    input: R,
+    input_path: Option<&Path>,
+) -> Result<Vec<cridecoder::ExtractedAcbTrack>, CodecError> {
+    cridecoder::extract_acb_to_memory(input, input_path)
+        .map_err(|err| CodecError::Acb(err.to_string()))
+}
+
 pub fn export_usm(input: &Path, output_dir: &Path) -> Result<Vec<PathBuf>, CodecError> {
     let outputs = extract_usm_file(input, output_dir, None, false)
         .map_err(|err| CodecError::Usm(err.to_string()))?;
     normalize_usm_output_names(input, outputs)
+}
+
+pub fn export_usm_to_memory(
+    input: &[u8],
+    fallback_name: &[u8],
+    export_audio: bool,
+) -> Result<Vec<cridecoder::ExtractedUsmStream>, CodecError> {
+    cridecoder::extract_usm_to_memory(Cursor::new(input), fallback_name, None, export_audio)
+        .map_err(|err| CodecError::Usm(err.to_string()))
 }
 
 pub fn read_usm_metadata(input: &Path) -> Result<cridecoder::usm::Metadata, CodecError> {
@@ -48,13 +66,43 @@ pub fn decode_hca_to_wav(input: &Path, output: &Path) -> Result<(), CodecError> 
 
     let mut decoder =
         HcaDecoder::from_file(input_path).map_err(|err| CodecError::Hca(err.to_string()))?;
-    let mut file = File::create(output).map_err(|source| CodecError::Io {
+    let file = File::create(output).map_err(|source| CodecError::Io {
         path: output.to_path_buf(),
         source,
     })?;
+    let mut file = BufWriter::new(file);
     decoder
         .decode_to_wav(&mut file)
         .map_err(|err| CodecError::Hca(err.to_string()))
+}
+
+pub fn decode_hca_bytes_to_wav(input: &[u8], output: &Path) -> Result<(), CodecError> {
+    let mut decoder = HcaDecoder::from_reader(Cursor::new(input))
+        .map_err(|err| CodecError::Hca(err.to_string()))?;
+    let file = File::create(output).map_err(|source| CodecError::Io {
+        path: output.to_path_buf(),
+        source,
+    })?;
+    let mut file = BufWriter::new(file);
+    decoder
+        .decode_to_wav(&mut file)
+        .map_err(|err| CodecError::Hca(err.to_string()))
+}
+
+pub fn decode_hca_bytes_to_wav_bytes(input: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut decoder = HcaDecoder::from_reader(Cursor::new(input))
+        .map_err(|err| CodecError::Hca(err.to_string()))?;
+    let mut wav = Vec::with_capacity(hca_wav_output_capacity(decoder.info()));
+    decoder
+        .decode_to_wav(&mut wav)
+        .map_err(|err| CodecError::Hca(err.to_string()))?;
+    Ok(wav)
+}
+
+fn hca_wav_output_capacity(info: &cridecoder::HcaInfo) -> usize {
+    let total_samples = (info.block_count * info.samples_per_block as u32)
+        .saturating_sub(info.encoder_delay) as usize;
+    44 + total_samples * info.channel_count as usize * 2
 }
 
 fn normalize_usm_output_names(

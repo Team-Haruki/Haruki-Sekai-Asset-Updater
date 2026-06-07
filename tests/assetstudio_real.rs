@@ -20,10 +20,14 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 }
 
 #[test]
-fn real_assetstudio_cli_exports_expected_file_when_configured() {
-    let Some(asset_studio_cli_path) = required_env("ASSET_STUDIO_CLI_PATH") else {
+fn real_assetstudio_ffi_exports_expected_file_when_configured() {
+    let Some(asset_studio_ffi_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
         return;
     };
+    run_real_assetstudio_export(asset_studio_ffi_library_path);
+}
+
+fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
         return;
     };
@@ -56,23 +60,22 @@ fn real_assetstudio_cli_exports_expected_file_when_configured() {
         export: RegionExportConfig {
             by_category,
             video: haruki_sekai_asset_updater::core::config::VideoExportConfig {
-                convert_to_mp4: false,
-                direct_usm_to_mp4_with_ffmpeg: false,
-                remove_m2v: false,
+                formats: vec![haruki_sekai_asset_updater::core::config::VideoOutputFormat::M2v],
+                direct_mp4: false,
             },
             audio: haruki_sekai_asset_updater::core::config::AudioExportConfig {
-                convert_to_mp3: false,
-                convert_to_flac: false,
-                remove_wav: false,
+                formats: vec![haruki_sekai_asset_updater::core::config::AudioOutputFormat::Wav],
             },
             images: haruki_sekai_asset_updater::core::config::ImageExportConfig {
-                convert_to_webp: false,
-                remove_png: false,
+                formats: vec![haruki_sekai_asset_updater::core::config::ImageOutputFormat::Png],
             },
             ..RegionExportConfig::default()
         },
         upload: RegionUploadConfig {
             enabled: false,
+            providers: Vec::new(),
+            public_read: haruki_sekai_asset_updater::core::config::UploadPublicReadConfig::default(
+            ),
             remove_local_after_upload: false,
         },
         ..RegionConfig::default()
@@ -84,9 +87,18 @@ fn real_assetstudio_cli_exports_expected_file_when_configured() {
     region.export.hca.decode = true;
 
     let config = AppConfig {
-        tools: haruki_sekai_asset_updater::core::config::ToolsConfig {
-            ffmpeg_path: "ffmpeg".to_string(),
-            asset_studio_cli_path: Some(asset_studio_cli_path),
+        backends: haruki_sekai_asset_updater::core::config::BackendsConfig {
+            media: haruki_sekai_asset_updater::core::config::MediaBackendConfig {
+                ffmpeg_path: "ffmpeg".to_string(),
+                ..haruki_sekai_asset_updater::core::config::MediaBackendConfig::default()
+            },
+            asset_studio: haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig {
+                library_path: Some(asset_studio_ffi_library_path),
+                worker_path: required_env("ASSET_STUDIO_FFI_WORKER_PATH")
+                    .or_else(|| required_env("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH")),
+                ..haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default()
+            },
+            ..haruki_sekai_asset_updater::core::config::BackendsConfig::default()
         },
         storage: StorageConfig {
             providers: Vec::new(),

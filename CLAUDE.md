@@ -16,7 +16,7 @@ cargo build
 cargo run
 
 # Run all tests
-cargo test
+cargo test --workspace
 
 # Run a single test
 cargo test <test_name>
@@ -24,16 +24,11 @@ cargo test <test_name>
 # Run a specific integration test file
 cargo test --test codec_smoke
 cargo test --test api
-cargo test --test cli
 
 # Pre-commit checks (must all pass)
 cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-
-# Helper CLIs
-cargo run --bin usmexport -- --input ./tests/files/0703.usm --output-dir ./exports
-cargo run --bin usmmeta -- --input ./tests/files/0703.usm
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
 
 # Docker
 docker compose up --build
@@ -49,11 +44,11 @@ docker compose up --build
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
   - `asset_execution.rs` -- runs the plan (download, decrypt, export, upload)
-  - `export_pipeline.rs` -- post-processing: AssetStudioModCLI invocation, PNG-to-WebP (pure Rust), media conversion
+  - `export_pipeline` module -- AssetStudio FFI export, PNG/WebP encoding, media conversion
   - `codec.rs` -- wraps the `cridecoder` crate for USM/ACB decoding
   - `media.rs` -- ffmpeg-based conversions (USM/M2V to MP4, WAV to FLAC/MP3)
-  - `storage.rs` -- S3-compatible upload via `aws-sdk-s3`
-  - `git_sync.rs` -- chart hash sync via `git2-rs`
+  - `storage.rs` -- S3-compatible upload via OpenDAL
+  - `git_sync.rs` -- chart hash sync via Git CLI
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection
   - `retry.rs` -- generic async retry helper
   - `download_records.rs` -- tracks previously downloaded assets
@@ -64,7 +59,7 @@ docker compose up --build
   - `jobs.rs` -- async job manager with progress tracking and cancellation
   - `logging.rs` -- tracing-subscriber setup with file and JSON output
 
-- `src/bin/` -- standalone CLIs: `usmexport`, `usmmeta`, `assetinfo_dump`, `s3ls`
+- `crates/assetstudio-ffi/` -- AssetStudio FFI ABI and `assetstudio_ffi_worker`
 
 **Request flow:** `POST /v2/assets/update` -> handler creates a job -> `JobManager` spawns a tokio task -> `build_execution_plan` -> `AssetExecutionContext` runs download/decrypt/export/upload pipeline -> job status queryable via `GET /v2/jobs/{id}`.
 
@@ -74,10 +69,12 @@ docker compose up --build
 - **YAML:** use `yaml_serde`, never `serde_yaml`
 - **Codec:** use published `cridecoder` crate from crates.io
 - **Image conversion:** pure Rust WebP encoder (`image` crate), no external WebP toolchain
-- **External tool deps:** `AssetStudioModCLI` (.NET) and `ffmpeg` are runtime dependencies
+- **External tool deps:** `AssetStudioFFI` NativeAOT library and FFmpeg libraries/CLI are runtime dependencies
 - **Config files:** only `haruki-asset-configs.yaml` (active) and `haruki-asset-configs.example.yaml` (template)
 - **Sensitive config** uses `${env:VAR_NAME}` syntax, never hardcoded secrets
-- **Test samples** live in `tests/files/` (`0703.usm`, `se_0126_01.acb`)
+- **Codec samples** are external opt-in fixtures. Set
+  `HARUKI_CODEC_SAMPLE_DIR=/path/to/codec-samples` with `0703.usm` and
+  `se_0126_01.acb` to run frozen sample baseline tests.
 
 ## HTTP Endpoints
 
@@ -89,7 +86,9 @@ docker compose up --build
 ## Environment Variables
 
 - `HARUKI_CONFIG_PATH` -- override config file path
-- `HARUKI_ASSET_STUDIO_CLI_PATH` -- path to AssetStudioModCLI binary
+- `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` -- path to `HarukiAssetStudioFFI` native library
+- `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` -- optional path to `assetstudio_ffi_worker`
+- `HARUKI_MEDIA_BACKEND` -- media backend selection (`ffi`, `auto`, or `cli`)
 - `HARUKI_SHARED_AES_KEY_HEX` / `HARUKI_SHARED_AES_IV_HEX` -- shared AES keys (JP/TW/KR/CN)
 - `HARUKI_EN_AES_KEY_HEX` / `HARUKI_EN_AES_IV_HEX` -- EN-specific AES keys
 - `RUST_LOG` -- tracing log level filter
@@ -136,7 +135,7 @@ Examples from this repo's history:
 Use the standardized workflow layout in `.github/workflows`:
 
 - `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
-- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, then `cargo test --locked --workspace`.
 - `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
 - `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
 

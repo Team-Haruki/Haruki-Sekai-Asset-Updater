@@ -20,7 +20,7 @@ pub fn build_execution_plan(
         })?;
 
     let upload_targets = if region.upload.enabled {
-        plan_storage_targets(&config.storage, &request.region)?
+        plan_storage_targets(&config.storage, &request.region, &region.upload.providers)?
     } else {
         Vec::new()
     };
@@ -107,6 +107,8 @@ mod tests {
                 },
                 upload: RegionUploadConfig {
                     enabled: true,
+                    providers: Vec::new(),
+                    public_read: crate::core::config::UploadPublicReadConfig::default(),
                     remove_local_after_upload: false,
                 },
                 ..RegionConfig::default()

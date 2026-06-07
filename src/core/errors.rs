@@ -16,14 +16,42 @@ pub enum ConfigError {
         #[source]
         source: yaml_serde::Error,
     },
-    #[error("config_version must be 2, got {0}")]
+    #[error("invalid config uri `{uri}`: {reason}")]
+    InvalidConfigUri { uri: String, reason: String },
+    #[error("invalid config bootstrap environment variable `{name}`: {reason}")]
+    InvalidConfigBootstrap { name: String, reason: String },
+    #[error("failed to initialize config storage provider `{provider}`: {source}")]
+    ConfigStorageProvider {
+        provider: String,
+        #[source]
+        source: opendal::Error,
+    },
+    #[error("failed to read config from `{uri}`: {source}")]
+    ConfigStorageRead {
+        uri: String,
+        #[source]
+        source: opendal::Error,
+    },
+    #[error("config file {path} is not valid UTF-8: {source}")]
+    InvalidUtf8 {
+        path: String,
+        #[source]
+        source: std::string::FromUtf8Error,
+    },
+    #[error("config_version must be 3, got {0}")]
     UnsupportedVersion(u32),
-    #[error("no v2 config file found; tried: {0}")]
+    #[error("no v3 config file found; tried: {0}")]
     MissingConfigFile(String),
     #[error("invalid region key `{0}`; region keys must be lowercase")]
     InvalidRegionName(String),
     #[error("missing required environment variable `{name}` referenced by `{field}`")]
     MissingEnvironmentVariable { field: String, name: String },
+    #[error("invalid value `{value}` for `{field}`; expected {expected}")]
+    InvalidValue {
+        field: String,
+        value: String,
+        expected: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -65,6 +93,24 @@ pub enum DownloadRecordError {
         path: PathBuf,
         #[source]
         source: sonic_rs::Error,
+    },
+    #[error(
+        "storage read failed for download record provider `{provider}` path `{path}`: {source}"
+    )]
+    StorageRead {
+        provider: String,
+        path: String,
+        #[source]
+        source: opendal::Error,
+    },
+    #[error(
+        "storage write failed for download record provider `{provider}` path `{path}`: {source}"
+    )]
+    StorageWrite {
+        provider: String,
+        path: String,
+        #[source]
+        source: opendal::Error,
     },
 }
 
@@ -132,6 +178,14 @@ pub enum StorageError {
     MissingEndpoint { provider: String },
     #[error("storage provider `{provider}` is missing a bucket")]
     MissingBucket { provider: String },
+    #[error("storage provider `{provider}` has invalid configuration: {message}")]
+    InvalidProviderConfig { provider: String, message: String },
+    #[error("invalid upload public-read regex `{pattern}`: {source}")]
+    InvalidPublicReadRule {
+        pattern: String,
+        #[source]
+        source: regex::Error,
+    },
     #[error("upload root {0} is not relative to the extracted save path")]
     InvalidRelativePath(String),
     #[error("io error at {path}: {source}")]
@@ -140,12 +194,18 @@ pub enum StorageError {
         #[source]
         source: std::io::Error,
     },
-    #[error("s3 upload failed for provider `{provider}` file `{path}`: {source}")]
+    #[error("storage upload failed for provider `{provider}` file `{path}`: {source}")]
     Upload {
         provider: String,
         path: PathBuf,
         #[source]
-        source: aws_sdk_s3::Error,
+        source: opendal::Error,
+    },
+    #[error("failed to initialize storage provider `{provider}`: {source}")]
+    Provider {
+        provider: String,
+        #[source]
+        source: opendal::Error,
     },
     #[error("task join failed: {0}")]
     Join(#[from] tokio::task::JoinError),
@@ -180,6 +240,20 @@ pub enum ExportPipelineError {
         program: String,
         status: String,
         stderr: String,
+    },
+    #[error("media conversion failed: {message}")]
+    Media { message: String },
+    #[error("assetstudio ffi backend failed: {message}")]
+    AssetStudioFfi { message: String },
+    #[error("failed to serialize assetstudio ffi request: {source}")]
+    FfiSerialize {
+        #[source]
+        source: sonic_rs::Error,
+    },
+    #[error("failed to parse assetstudio ffi response: {source}")]
+    FfiParse {
+        #[source]
+        source: sonic_rs::Error,
     },
     #[error("failed to spawn worker `{worker}`: {source}")]
     WorkerSpawn {
@@ -235,6 +309,12 @@ pub enum AssetExecutionError {
     },
     #[error("failed to write temp file {path}: {source}")]
     WriteTempFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to read temp file {path}: {source}")]
+    ReadTempFile {
         path: PathBuf,
         #[source]
         source: std::io::Error,

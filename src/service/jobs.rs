@@ -220,7 +220,17 @@ impl JobManager {
                                         JobPhase::Completed,
                                         "dry-run plan completed".to_string(),
                                     );
-                                    info!(job_id = %id, region = %job.region, "dry-run plan completed");
+                                    let now = chrono::Utc::now();
+                                    job.updated_at = now;
+                                    info!(
+                                        job_id = %id,
+                                        region = %job.region,
+                                        elapsed_ms = job_elapsed_ms(job, now),
+                                        completed = job.progress.completed_downloads,
+                                        failed = job.progress.failed_downloads,
+                                        total = job.progress.total_downloads,
+                                        "dry-run plan completed"
+                                    );
                                 } else {
                                     job.status = JobStatus::Running;
                                     job.message = "job planned; starting execution".to_string();
@@ -230,8 +240,8 @@ impl JobManager {
                                         "job planned; starting execution".to_string(),
                                     );
                                     info!(job_id = %id, region = %job.region, "job planned; starting execution");
+                                    job.updated_at = chrono::Utc::now();
                                 }
-                                job.updated_at = chrono::Utc::now();
                                 false
                             }
                         } else {
@@ -289,6 +299,9 @@ impl JobManager {
                                             true
                                         } else {
                                             job.status = JobStatus::Completed;
+                                            let completed_downloads = summary.completed_downloads;
+                                            let failed_downloads = summary.failed_downloads;
+                                            let total_downloads = summary.queued_downloads;
                                             job.execution = Some(summary);
                                             job.failure = None;
                                             job.preview =
@@ -299,8 +312,17 @@ impl JobManager {
                                                 JobPhase::Completed,
                                                 "job completed".to_string(),
                                             );
-                                            job.updated_at = chrono::Utc::now();
-                                            info!(job_id = %id, region = %job.region, "job completed");
+                                            let now = chrono::Utc::now();
+                                            job.updated_at = now;
+                                            info!(
+                                                job_id = %id,
+                                                region = %job.region,
+                                                elapsed_ms = job_elapsed_ms(job, now),
+                                                completed = completed_downloads,
+                                                failed = failed_downloads,
+                                                total = total_downloads,
+                                                "job completed"
+                                            );
                                             false
                                         }
                                     } else {
@@ -330,14 +352,7 @@ impl JobManager {
             };
 
             if let Some(message) = planning_message {
-                error!(job_id = %id, error = %message, "job failed");
-                let mut job_map = jobs.write().await;
-                if let Some(job) = job_map.get_mut(&id) {
-                    job.status = JobStatus::Failed;
-                    job.message = message.clone();
-                    job.failure = Some(classify_failure(&message));
-                    job.updated_at = chrono::Utc::now();
-                }
+                finish_failed(&jobs, id, message).await;
             }
             remove_cancel_flag(&cancel_flags, id).await;
         });
@@ -345,14 +360,26 @@ impl JobManager {
 }
 
 async fn finish_failed(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid, message: String) {
-    error!(job_id = %id, error = %message, "job failed");
     let mut job_map = jobs.write().await;
     if let Some(job) = job_map.get_mut(&id) {
         job.status = JobStatus::Failed;
         job.message = message.clone();
         job.failure = Some(classify_failure(&message));
         push_progress_event(job, JobPhase::Failed, message);
-        job.updated_at = chrono::Utc::now();
+        let now = chrono::Utc::now();
+        job.updated_at = now;
+        error!(
+            job_id = %id,
+            region = %job.region,
+            elapsed_ms = job_elapsed_ms(job, now),
+            completed = job.progress.completed_downloads,
+            failed = job.progress.failed_downloads,
+            total = job.progress.total_downloads,
+            error = %job.message,
+            "job failed"
+        );
+    } else {
+        error!(job_id = %id, error = %message, "job failed");
     }
 }
 
@@ -361,7 +388,6 @@ async fn finish_cancelled(
     id: Uuid,
     message: String,
 ) {
-    warn!(job_id = %id, reason = %message, "job cancelled");
     let mut job_map = jobs.write().await;
     if let Some(job) = job_map.get_mut(&id) {
         job.status = JobStatus::Cancelled;
@@ -373,7 +399,20 @@ async fn finish_cancelled(
             at: chrono::Utc::now(),
         });
         push_progress_event(job, JobPhase::Cancelled, message);
-        job.updated_at = chrono::Utc::now();
+        let now = chrono::Utc::now();
+        job.updated_at = now;
+        warn!(
+            job_id = %id,
+            region = %job.region,
+            elapsed_ms = job_elapsed_ms(job, now),
+            completed = job.progress.completed_downloads,
+            failed = job.progress.failed_downloads,
+            total = job.progress.total_downloads,
+            reason = %job.message,
+            "job cancelled"
+        );
+    } else {
+        warn!(job_id = %id, reason = %message, "job cancelled");
     }
 }
 
@@ -390,10 +429,22 @@ async fn progress_consumer(
             }
             match update {
                 ExecutionProgressUpdate::Phase { phase, message } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        phase = ?phase,
+                        message = %message,
+                        "job phase advanced"
+                    );
                     push_progress_event(job, phase, message);
                 }
                 ExecutionProgressUpdate::DownloadsPlanned { total } => {
                     job.progress.total_downloads = total;
+                    tracing::info!(
+                        job_id = %id,
+                        region = %job.region,
+                        total,
+                        "asset bundle downloads planned"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::PlanningDownloads,
@@ -401,14 +452,141 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::BundleStarted { bundle } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        "bundle processing started"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
                         format!("downloading bundle `{bundle}`"),
                     );
                 }
+                ExecutionProgressUpdate::BundleDownloaded {
+                    bundle,
+                    bytes,
+                    elapsed_ms,
+                } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        bytes,
+                        elapsed_ms,
+                        "bundle downloaded"
+                    );
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("downloaded bundle `{bundle}` ({bytes} bytes) in {elapsed_ms} ms"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleFetchDetails { .. }
+                | ExecutionProgressUpdate::BundleDeobfuscated { .. } => {}
+                ExecutionProgressUpdate::BundleTempWritten { bundle, elapsed_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        elapsed_ms,
+                        "bundle temp file written"
+                    );
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("wrote bundle `{bundle}` temp file in {elapsed_ms} ms"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleExported { bundle, elapsed_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        elapsed_ms,
+                        "bundle exported"
+                    );
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("exported bundle `{bundle}` in {elapsed_ms} ms"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleFfiExportPhases { bundle, phase_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        phases = %format_ffi_export_phases(&phase_ms),
+                        "ffi export phases"
+                    );
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!(
+                            "ffi export phases for `{bundle}`: {}",
+                            format_ffi_export_phases(&phase_ms)
+                        ),
+                    );
+                }
+                ExecutionProgressUpdate::BundleFfiSkippedObjectReads { bundle, count } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        count,
+                        "ffi skipped object reads"
+                    );
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!("ffi skipped {count} object read(s) for `{bundle}`"),
+                    );
+                }
+                ExecutionProgressUpdate::BundleFfiObjectReadPlan { bundle, plan } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        planned = plan.planned_objects,
+                        read = plan.successful_reads,
+                        skipped = plan.skipped_reads,
+                        batches = plan.batch_count,
+                        payload_bytes = plan.payload_bundle_bytes,
+                        "ffi object read plan"
+                    );
+                    push_progress_event(
+                        job,
+                        JobPhase::DownloadingBundles,
+                        format!(
+                            "ffi object reads for `{bundle}`: planned={}, read={}, skipped={}, batches={}, payload={} bytes",
+                            plan.planned_objects,
+                            plan.successful_reads,
+                            plan.skipped_reads,
+                            plan.batch_count,
+                            plan.payload_bundle_bytes
+                        ),
+                    );
+                }
+                ExecutionProgressUpdate::SchedulerTelemetry { bundle, phase_ms } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        bundle = bundle.as_deref().unwrap_or(""),
+                        phase_ms = ?phase_ms,
+                        "asset pipeline scheduler telemetry"
+                    );
+                }
                 ExecutionProgressUpdate::BundleCompleted { bundle } => {
                     job.progress.completed_downloads += 1;
+                    tracing::info!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        completed = job.progress.completed_downloads,
+                        total = job.progress.total_downloads,
+                        "bundle completed"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -417,6 +595,15 @@ async fn progress_consumer(
                 }
                 ExecutionProgressUpdate::BundleFailed { bundle, error } => {
                     job.progress.failed_downloads += 1;
+                    tracing::warn!(
+                        job_id = %id,
+                        region = %job.region,
+                        bundle = %bundle,
+                        failed = job.progress.failed_downloads,
+                        total = job.progress.total_downloads,
+                        error = %error,
+                        "bundle failed"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
@@ -424,6 +611,12 @@ async fn progress_consumer(
                     );
                 }
                 ExecutionProgressUpdate::RecordSaved { entries } => {
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        entries,
+                        "download record saved"
+                    );
                     push_progress_event(
                         job,
                         JobPhase::PersistingState,
@@ -436,12 +629,34 @@ async fn progress_consumer(
                     } else {
                         "chart hash sync skipped".to_string()
                     };
+                    tracing::debug!(
+                        job_id = %id,
+                        region = %job.region,
+                        performed,
+                        "chart hash sync finished"
+                    );
                     push_progress_event(job, JobPhase::SyncingChartHashes, message);
                 }
             }
             job.updated_at = chrono::Utc::now();
         }
     }
+}
+
+fn format_ffi_export_phases(phase_ms: &HashMap<String, u64>) -> String {
+    let mut phases: Vec<_> = phase_ms.iter().collect();
+    phases.sort_by_key(|(phase, _)| *phase);
+    phases
+        .into_iter()
+        .map(|(phase, elapsed_ms)| format!("{phase}={elapsed_ms}ms"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn job_elapsed_ms(job: &JobSnapshot, now: chrono::DateTime<chrono::Utc>) -> i64 {
+    now.signed_duration_since(job.created_at)
+        .num_milliseconds()
+        .max(0)
 }
 
 fn push_progress_event(job: &mut JobSnapshot, phase: JobPhase, message: String) {
@@ -479,6 +694,7 @@ fn classify_failure(message: &str) -> JobFailure {
         (JobFailureKind::GitSync, true)
     } else if lowered.contains("assetstudio")
         || lowered.contains("ffmpeg")
+        || lowered.contains("media conversion")
         || lowered.contains("export")
     {
         (JobFailureKind::Export, true)

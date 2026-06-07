@@ -106,6 +106,7 @@ impl Default for JobProgressSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageTargetPlan {
+    pub provider: String,
     pub provider_kind: String,
     pub endpoint: String,
     pub bucket: String,
