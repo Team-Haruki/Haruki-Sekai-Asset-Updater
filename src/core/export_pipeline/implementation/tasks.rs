@@ -273,7 +273,14 @@ pub(super) fn prepare_usm_processing_inputs(
 
 pub(super) fn usm_segment_key(path: &Path) -> Option<(PathBuf, String, usize)> {
     let stem = path.file_stem()?.to_str()?;
-    let (prefix, segment) = stem.rsplit_once('-')?;
+    let (prefix, raw_segment) = stem.rsplit_once('-')?;
+    let segment = raw_segment
+        .rsplit_once("__dup")
+        .and_then(|(segment, duplicate)| {
+            (!duplicate.is_empty() && duplicate.bytes().all(|byte| byte.is_ascii_digit()))
+                .then_some(segment)
+        })
+        .unwrap_or(raw_segment);
     if prefix.is_empty() || segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit())
     {
         return None;

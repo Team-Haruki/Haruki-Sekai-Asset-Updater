@@ -33,7 +33,7 @@ use super::{
     prepare_usm_processing_inputs, process_usm_file, process_usm_input_with_metrics,
     record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
     scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
-    text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
+    text_asset_public_bytes_target, usm_segment_key, write_assetstudio_export_manifest_entry,
     write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
     write_native_object_payload, AssetStudioFfiAssetInfo, AssetStudioFfiObjectReadOutput,
     AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse, MediaEncodeKind,
@@ -172,6 +172,43 @@ fn prepare_usm_processing_inputs_merges_numbered_segments() {
     assert!(a.exists());
     assert!(b.exists());
     assert!(c.exists());
+}
+
+#[test]
+fn prepare_usm_processing_inputs_merges_numbered_segments_with_duplicate_suffixes() {
+    let dir = tempdir().unwrap();
+    let a = dir.path().join("link_ppr_ed1-001.usm");
+    let b = dir.path().join("link_ppr_ed1-002__dup8.usm");
+    let c = dir.path().join("link_ppr_ed1-003__dup8.usm");
+    fs::write(&a, b"CRID").unwrap();
+    fs::write(&b, b"CONT").unwrap();
+    fs::write(&c, b"TAIL").unwrap();
+
+    assert_eq!(
+        usm_segment_key(&b),
+        Some((dir.path().to_path_buf(), "link_ppr_ed1".to_string(), 2))
+    );
+
+    let prepared = prepare_usm_processing_inputs(vec![c.clone(), a.clone(), b.clone()]).unwrap();
+
+    assert_eq!(prepared.files.len(), 1);
+    assert_eq!(prepared.merged_count, 3);
+    match &prepared.files[0] {
+        UsmProcessingInput::Bytes {
+            output_dir,
+            output_name,
+            fallback_name,
+            data,
+            source_files,
+        } => {
+            assert_eq!(output_dir, dir.path());
+            assert_eq!(output_name, "link_ppr_ed1");
+            assert_eq!(fallback_name, "link_ppr_ed1.usm");
+            assert_eq!(data, b"CRIDCONTTAIL");
+            assert_eq!(source_files, &vec![a.clone(), b.clone(), c.clone()]);
+        }
+        other => panic!("expected in-memory segmented USM input, got {other:?}"),
+    }
 }
 
 #[test]
