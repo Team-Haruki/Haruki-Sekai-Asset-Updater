@@ -19,6 +19,9 @@
 - Uses the double-FFI production path by default: AssetStudio FFI worker
   pool plus FFmpeg/rsmpeg FFI. FFmpeg CLI remains available as a media fallback
   for platforms where FFI is unavailable.
+- The native AssetStudioFFI library is built from
+  [`Team-Haruki/AssetStudio`](https://github.com/Team-Haruki/AssetStudio)'s
+  `sekai-modified` branch, which is the fork's default branch.
 
 ## Layout
 
@@ -107,6 +110,25 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
   -d '{"region":"jp","asset_version":"6.0.0","asset_hash":"deadbeef","dry_run":true}'
 ```
 
+### AssetStudioFFI Runtime
+
+The Rust service talks to AssetStudio through `assetstudio_ffi_worker`, while
+the native `HarukiAssetStudioFFI` dynamic library comes from the
+[`Team-Haruki/AssetStudio`](https://github.com/Team-Haruki/AssetStudio)
+`sekai-modified` branch. Release and Docker builds use that branch by default.
+
+For local development, either download the matching AssetStudioFFI release
+archive or build the `AssetStudioFFI` project from that branch, then point the
+service at the native library and worker binary:
+
+```bash
+export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
+export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/path/to/assetstudio_ffi_worker
+```
+
+Use the platform-specific library extension for your host: `.so` on Linux,
+`.dylib` on macOS, and `.dll` on Windows.
+
 ## Runtime Tuning
 
 - AssetStudio exports use the `assetstudio_ffi_worker` pool. Set
@@ -131,9 +153,11 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
 - `concurrency.post_process` limits bundle post-processing. Keep it near the
   CPU budget for production full exports, and raise `concurrency.images` for
   image-heavy paths such as `character/member`.
-- `concurrency.audio_encode` and `concurrency.video_encode` are separate.
-  Keep video encoding lower on memory-constrained hosts because x264 keeps
-  per-encoder frame queues; audio encoding can usually run much wider.
+- `concurrency.media_encode` is the legacy aggregate FFmpeg/rsmpeg cap, while
+  `concurrency.audio_encode` and `concurrency.video_encode` split audio and
+  video encode pressure. Keep video encoding lower on memory-constrained hosts
+  because x264 keeps per-encoder frame queues; audio encoding can usually run
+  much wider.
 - Normal progress logging emits bundle-level start/completion/failure lines.
   Use debug logging for detailed download, native FFI, export, and post-process
   phase traces.
