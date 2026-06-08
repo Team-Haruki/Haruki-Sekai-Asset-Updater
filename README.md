@@ -162,6 +162,30 @@ Use the platform-specific library extension for your host: `.so` on Linux,
   Use debug logging for detailed download, native FFI, export, and post-process
   phase traces.
 
+## Benchmark Snapshot
+
+The following local comparison was run on an Apple Mac mini M4 with OrbStack
+Linux arm64 containers, using cached CN bundles where noted. It compares the
+current Rust FFI pipeline against the old Rust v5.2.2 AssetStudio CLI pipeline
+and the retired Go CLI pipeline.
+
+| Rule | Current Rust FFI | Rust v5.2.2 CLI | Old Go CLI |
+| --- | ---: | ---: | ---: |
+| `^character/member/` images | `71.5s` with local bundle HTTP, `1250/1250` | `272.9s`, `1250/1250` | `298.3s`, `1250/1250` |
+| `^music/short` audio MP3 | `57.4s`, `1547/1547` | `113.0s`, `1547/1547` | `120.3s`, `1547/1547` |
+| `^movie/gacha` video MP4 | `370.2s`, `448/448` | `401.8s`, `445/448` | `415.0s`, `448/448` |
+
+Notes:
+
+- The image run is the most CPU-bound comparison for the current pipeline; the
+  same current image rule through the normal CDN path took `108.6s`.
+- The v5.2.2 video result shown uses the best stable direct-FFmpeg rerun
+  (`download: 8`, `usm: 4`, `cridecoder@0.2.3`). The original v5 video path only
+  completed `154/448` because many USM files failed extraction.
+- Output file counts are not fully path-contract comparable across versions:
+  current Rust writes final semantic outputs, while older CLI pipelines may keep
+  extra exported or intermediate files.
+
 ## Verification
 
 - Run the Rust test suite with `cargo test --workspace`.
