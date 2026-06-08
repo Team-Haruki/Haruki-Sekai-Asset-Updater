@@ -22,8 +22,8 @@ use haruki_assetstudio_ffi::{
     AssetStudioFfiContextOpenRequest, AssetStudioFfiContextOpenResponse,
     AssetStudioFfiContextReadObjectItemRequest, AssetStudioFfiContextReadObjectsRequest,
     AssetStudioFfiError, AssetStudioFfiObjectReadBatchResponse, AssetStudioFfiObjectReadOutput,
-    AssetStudioFfiRequest, AssetStudioWorkerPool, NativeBatchPhaseStats, WorkerLease,
-    WorkerLeaseStats, WorkerOutput,
+    AssetStudioFfiRequest, AssetStudioWorkerPool, LoadedAssetStudioFfiLibrary,
+    NativeBatchPhaseStats, WorkerLease, WorkerLeaseStats, WorkerOutput,
 };
 #[cfg(test)]
 use haruki_assetstudio_ffi::{AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse};
@@ -31,8 +31,9 @@ use haruki_assetstudio_ffi::{AssetStudioFfiObjectReadResponse, AssetStudioFfiRes
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
 use crate::core::config::{
-    AppConfig, AudioOutputFormat, ImageBackendConfig, ImageOutputFormat, ImagePngCompression,
-    MediaBackend, RegionConfig, ResourcesConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
+    AppConfig, AssetStudioFfiMode, AudioOutputFormat, ImageBackendConfig, ImageOutputFormat,
+    ImagePngCompression, MediaBackend, RegionConfig, ResourcesConfig,
+    DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
 };
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{

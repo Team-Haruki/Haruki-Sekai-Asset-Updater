@@ -13,6 +13,19 @@ pub(super) async fn run_assetstudio_ffi_object_export(
     strip_path_prefix: &str,
     native_library_path: &str,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
+    if app_config.backends.asset_studio.mode == AssetStudioFfiMode::Direct {
+        return call_assetstudio_ffi_object_export_direct(
+            app_config,
+            region,
+            asset_bundle_file,
+            output_dir,
+            export_path,
+            strip_path_prefix,
+            native_library_path,
+        )
+        .await;
+    }
+
     let worker_path =
         configured_worker_path(app_config.backends.asset_studio.worker_path.as_deref())?;
     let pool = AssetStudioWorkerPool::shared(
@@ -76,6 +89,137 @@ pub(super) async fn run_assetstudio_ffi_object_export(
             .await
         }
         Err(error) => Err(error),
+    }
+}
+
+async fn call_assetstudio_ffi_object_export_direct(
+    app_config: &AppConfig,
+    region: &RegionConfig,
+    asset_bundle_file: &Path,
+    output_dir: &Path,
+    export_path: &str,
+    strip_path_prefix: &str,
+    native_library_path: &str,
+) -> Result<NativeObjectExportSummary, ExportPipelineError> {
+    let wait_started = Instant::now();
+    let cpu_budget_slot = acquire_cpu_budget_permit(app_config.effective_cpu_budget()).await?;
+    let open_request = AssetStudioFfiContextOpenRequest {
+        input_path: asset_bundle_file.to_string_lossy().to_string(),
+        asset_types: asset_studio_export_type_list(region),
+        unity_version: (!region.runtime.unity_version.is_empty())
+            .then(|| region.runtime.unity_version.clone()),
+        filter_exclude_mode: false,
+        filter_with_regex: false,
+        filter_by_name: None,
+        filter_by_container: None,
+        filter_by_path_ids: Vec::new(),
+        load_all_assets: true,
+        include_assets: false,
+    };
+    let options = NativeObjectExportOptions {
+        output_dir,
+        export_path,
+        strip_path_prefix,
+        region,
+        read_kinds: &app_config.backends.asset_studio.read_kinds,
+        image_format: app_config
+            .backends
+            .asset_studio
+            .image_format
+            .as_deref()
+            .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
+        read_batch_size: app_config.backends.asset_studio.read_batch_size,
+    };
+    let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let native_library_path = native_library_path.to_string();
+    let open_request = open_request.clone();
+    let options = NativeObjectExportOptionsOwned::from_options(&options);
+    let result = tokio::task::spawn_blocking(move || {
+        let library = shared_direct_assetstudio_library(&native_library_path)?;
+        let mut caller = DirectAssetStudioCaller {
+            library,
+            call_seq: 0,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|source| ExportPipelineError::AssetStudioFfi {
+                message: format!("failed to create assetstudio direct runtime: {source}"),
+            })?;
+        runtime.block_on(call_assetstudio_ffi_object_export_with_caller(
+            &mut caller,
+            &open_request,
+            &options.as_ref(),
+        ))
+    })
+    .await
+    .map_err(|source| ExportPipelineError::AssetStudioFfi {
+        message: format!("assetstudio ffi direct export task failed: {source}"),
+    })?;
+    drop(cpu_budget_slot.permit);
+    let mut summary = result?;
+    summary.phase_ms.insert("direct.wait".to_string(), wait_ms);
+    summary.phase_ms.insert(
+        "direct.cpu_budget_wait".to_string(),
+        cpu_budget_slot.wait_ms,
+    );
+    summary
+        .phase_ms
+        .insert("cpu_budget.wait".to_string(), cpu_budget_slot.wait_ms);
+    Ok(summary)
+}
+
+fn shared_direct_assetstudio_library(
+    native_library_path: &str,
+) -> Result<Arc<LoadedAssetStudioFfiLibrary>, AssetStudioFfiError> {
+    static LIBRARIES: OnceLock<Mutex<HashMap<String, Arc<LoadedAssetStudioFfiLibrary>>>> =
+        OnceLock::new();
+    let mut libraries = LIBRARIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if let Some(library) = libraries.get(native_library_path) {
+        return Ok(library.clone());
+    }
+    let library = Arc::new(LoadedAssetStudioFfiLibrary::load(native_library_path)?);
+    libraries.insert(native_library_path.to_string(), library.clone());
+    Ok(library)
+}
+
+#[derive(Clone)]
+struct NativeObjectExportOptionsOwned {
+    output_dir: PathBuf,
+    export_path: String,
+    strip_path_prefix: String,
+    region: RegionConfig,
+    read_kinds: BTreeMap<String, String>,
+    image_format: String,
+    read_batch_size: usize,
+}
+
+impl NativeObjectExportOptionsOwned {
+    fn from_options(options: &NativeObjectExportOptions<'_>) -> Self {
+        Self {
+            output_dir: options.output_dir.to_path_buf(),
+            export_path: options.export_path.to_string(),
+            strip_path_prefix: options.strip_path_prefix.to_string(),
+            region: options.region.clone(),
+            read_kinds: options.read_kinds.clone(),
+            image_format: options.image_format.to_string(),
+            read_batch_size: options.read_batch_size,
+        }
+    }
+
+    fn as_ref(&self) -> NativeObjectExportOptions<'_> {
+        NativeObjectExportOptions {
+            output_dir: &self.output_dir,
+            export_path: &self.export_path,
+            strip_path_prefix: &self.strip_path_prefix,
+            region: &self.region,
+            read_kinds: &self.read_kinds,
+            image_format: &self.image_format,
+            read_batch_size: self.read_batch_size,
+        }
     }
 }
 
@@ -156,8 +300,58 @@ pub(super) async fn call_assetstudio_ffi_object_export_worker(
     open_request: &AssetStudioFfiContextOpenRequest,
     options: &NativeObjectExportOptions<'_>,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
+    call_assetstudio_ffi_object_export_with_caller(worker, open_request, options).await
+}
+
+pub(super) trait AssetStudioObjectExportCaller {
+    async fn call(
+        &mut self,
+        request: &AssetStudioFfiRequest,
+    ) -> Result<WorkerOutput, ExportPipelineError>;
+}
+
+impl AssetStudioObjectExportCaller for WorkerLease {
+    async fn call(
+        &mut self,
+        request: &AssetStudioFfiRequest,
+    ) -> Result<WorkerOutput, ExportPipelineError> {
+        Ok(WorkerLease::call(self, request).await?)
+    }
+}
+
+struct DirectAssetStudioCaller {
+    library: Arc<LoadedAssetStudioFfiLibrary>,
+    call_seq: u64,
+}
+
+impl AssetStudioObjectExportCaller for DirectAssetStudioCaller {
+    async fn call(
+        &mut self,
+        request: &AssetStudioFfiRequest,
+    ) -> Result<WorkerOutput, ExportPipelineError> {
+        self.call_seq = self.call_seq.saturating_add(1);
+        let (status, response, payload) = self.library.call_typed_request(request)?;
+        Ok(WorkerOutput {
+            status: status.to_string(),
+            status_success: status == 0,
+            response,
+            stderr: String::new(),
+            payload,
+            payload_file: None,
+        })
+    }
+}
+
+async fn call_assetstudio_ffi_object_export_with_caller<C>(
+    caller: &mut C,
+    open_request: &AssetStudioFfiContextOpenRequest,
+    options: &NativeObjectExportOptions<'_>,
+) -> Result<NativeObjectExportSummary, ExportPipelineError>
+where
+    C: AssetStudioObjectExportCaller,
+{
     let open_request = AssetStudioFfiRequest::ContextOpen(open_request.clone());
-    let open_output = worker.call(&open_request).await?;
+    let open_output = caller.call(&open_request).await?;
     let open_response = parse_assetstudio_ffi_context_open_worker_output(open_output)?;
     let context_id = open_response.context_id;
     let mut summary = NativeObjectExportSummary {
@@ -174,7 +368,7 @@ pub(super) async fn call_assetstudio_ffi_object_export_worker(
 
     let unpack_result = async {
         let assets = list_assetstudio_ffi_context_objects_worker(
-            worker,
+            caller,
             context_id,
             &open_response,
             &mut summary,
@@ -199,7 +393,7 @@ pub(super) async fn call_assetstudio_ffi_object_export_worker(
                     options.image_format,
                 );
                 let request = AssetStudioFfiRequest::ContextReadObjects(request);
-                let output = worker.call(&request).await?;
+                let output = caller.call(&request).await?;
                 let read_outputs =
                     parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
                         output,
@@ -241,9 +435,9 @@ pub(super) async fn call_assetstudio_ffi_object_export_worker(
 
     let close_request = AssetStudioFfiContextCloseRequest { context_id };
     let close_request = AssetStudioFfiRequest::ContextClose(close_request);
-    let close_result = match worker.call(&close_request).await {
+    let close_result = match caller.call(&close_request).await {
         Ok(output) => parse_assetstudio_ffi_context_close_worker_output(output),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
     };
 
     match (unpack_result, close_result) {
@@ -258,7 +452,7 @@ pub(super) async fn call_assetstudio_ffi_object_export_worker(
 }
 
 pub(super) async fn list_assetstudio_ffi_context_objects_worker(
-    worker: &mut WorkerLease,
+    caller: &mut impl AssetStudioObjectExportCaller,
     context_id: i64,
     open_response: &AssetStudioFfiContextOpenResponse,
     summary: &mut NativeObjectExportSummary,
@@ -281,7 +475,7 @@ pub(super) async fn list_assetstudio_ffi_context_objects_worker(
             limit: NATIVE_AOT_CONTEXT_LIST_PAGE_SIZE,
         };
         let request = AssetStudioFfiRequest::ContextListObjects(request);
-        let output = worker.call(&request).await?;
+        let output = caller.call(&request).await?;
         let response = parse_assetstudio_ffi_context_list_objects_worker_output(output)?;
         merge_optional_max_phase_ms(
             &mut summary.phase_ms,

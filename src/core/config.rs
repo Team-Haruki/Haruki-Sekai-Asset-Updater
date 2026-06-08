@@ -243,6 +243,9 @@ impl AppConfig {
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH") {
             self.backends.asset_studio.library_path = non_empty_option(value);
         }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_MODE") {
+            self.backends.asset_studio.mode = value.parse()?;
+        }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH") {
             self.backends.asset_studio.worker_path = non_empty_option(value);
         }
@@ -1004,12 +1007,37 @@ pub struct BackendsConfig {
 #[serde(default)]
 pub struct AssetStudioBackendConfig {
     pub library_path: Option<String>,
+    pub mode: AssetStudioFfiMode,
     pub worker_path: Option<String>,
     pub process_concurrency: usize,
     pub worker_max_calls: usize,
     pub read_batch_size: usize,
     pub image_format: Option<String>,
     pub read_kinds: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetStudioFfiMode {
+    Direct,
+    #[default]
+    WorkerPool,
+}
+
+impl FromStr for AssetStudioFfiMode {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "direct" => Ok(Self::Direct),
+            "worker_pool" | "worker-pool" | "worker" | "pool" => Ok(Self::WorkerPool),
+            other => Err(ConfigError::InvalidValue {
+                field: "backends.asset_studio.mode".to_string(),
+                value: other.to_string(),
+                expected: "direct or worker_pool".to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1225,6 +1253,7 @@ impl Default for AssetStudioBackendConfig {
     fn default() -> Self {
         Self {
             library_path: None,
+            mode: AssetStudioFfiMode::WorkerPool,
             worker_path: None,
             process_concurrency: 0,
             worker_max_calls: 256,
@@ -1877,6 +1906,7 @@ regions:
         assert_eq!(config.resources.cpu.reserved, 0);
         assert!(!config.resources.cpu.throttle.enabled);
         assert_eq!(config.resources.cpu.throttle.sample_ms, 250);
+        assert_eq!(asset_studio.mode, AssetStudioFfiMode::WorkerPool);
     }
 
     #[test]
@@ -1892,6 +1922,7 @@ image:
   jpeg_quality: 88
 asset_studio:
   library_path: /tmp/libHarukiAssetStudioFFI.so
+  mode: direct
   worker_path: /tmp/assetstudio-ffi-worker
   process_concurrency: 6
   worker_max_calls: 128
@@ -1912,6 +1943,7 @@ asset_studio:
             asset_studio.library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
         );
+        assert_eq!(asset_studio.mode, AssetStudioFfiMode::Direct);
         assert_eq!(
             asset_studio.worker_path.as_deref(),
             Some("/tmp/assetstudio-ffi-worker")
@@ -2222,6 +2254,7 @@ regions:
         let _env_lock = env_lock();
         let old_media_backend = std::env::var("HARUKI_MEDIA_BACKEND").ok();
         let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH").ok();
+        let old_asset_studio_mode = std::env::var("HARUKI_ASSET_STUDIO_FFI_MODE").ok();
         let old_worker_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH").ok();
         let old_process_concurrency =
             std::env::var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY").ok();
@@ -2244,6 +2277,7 @@ regions:
             "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
             "/tmp/override-native.so",
         );
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", "direct");
         std::env::set_var(
             "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
             "/tmp/override-native-worker",
@@ -2287,6 +2321,10 @@ backends:
             Some("/tmp/override-native.so")
         );
         assert_eq!(
+            config.backends.asset_studio.mode,
+            AssetStudioFfiMode::Direct
+        );
+        assert_eq!(
             config.backends.asset_studio.worker_path.as_deref(),
             Some("/tmp/override-native-worker")
         );
@@ -2320,6 +2358,10 @@ backends:
         match old_native_path {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", value),
             None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH"),
+        }
+        match old_asset_studio_mode {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_MODE"),
         }
         match old_worker_path {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH", value),
