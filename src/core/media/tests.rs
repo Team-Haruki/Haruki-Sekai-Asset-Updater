@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use tempfile::tempdir;
@@ -11,6 +12,21 @@ use super::{
 };
 use crate::core::config::MediaBackend;
 use crate::core::config::RetryConfig;
+
+fn write_executable_script(path: &std::path::Path, script: impl AsRef<[u8]>) {
+    let mut file = fs::File::create(path).unwrap();
+    file.write_all(script.as_ref()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).unwrap();
+    }
+}
 
 #[test]
 fn frame_rate_formats_like_go_helper() {
@@ -39,19 +55,10 @@ fn convert_usm_to_mp4_builds_ffmpeg_command() {
     let output = dir.path().join("sample.mp4");
     let script_path = dir.path().join("fake_ffmpeg.sh");
     fs::write(&input, b"dummy").unwrap();
-    fs::write(
+    write_executable_script(
         &script_path,
         "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
-    )
-    .unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-    }
+    );
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
@@ -78,19 +85,10 @@ fn convert_m2v_to_mp4_removes_original_when_requested() {
     let output = dir.path().join("sample.mp4");
     let script_path = dir.path().join("fake_ffmpeg.sh");
     fs::write(&input, b"dummy").unwrap();
-    fs::write(
+    write_executable_script(
         &script_path,
         "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
-    )
-    .unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-    }
+    );
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
@@ -124,22 +122,13 @@ fn convert_usm_to_mp4_retries_after_command_failure() {
     let script_path = dir.path().join("fake_ffmpeg_retry.sh");
     let marker_path = dir.path().join("attempts.txt");
     fs::write(&input, b"dummy").unwrap();
-    fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\nset -eu\nMARKER=\"{}\"\nif [ ! -f \"$MARKER\" ]; then\n  echo first > \"$MARKER\"\n  echo transient >&2\n  exit 1\nfi\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
-                marker_path.display()
-            ),
-        )
-        .unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-    }
+    write_executable_script(
+        &script_path,
+        format!(
+            "#!/bin/sh\nset -eu\nMARKER=\"{}\"\nif [ ! -f \"$MARKER\" ]; then\n  echo first > \"$MARKER\"\n  echo transient >&2\n  exit 1\nfi\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
+            marker_path.display()
+        ),
+    );
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
@@ -167,19 +156,10 @@ fn auto_backend_falls_back_to_cli() {
     let output = dir.path().join("sample.mp4");
     let script_path = dir.path().join("fake_ffmpeg.sh");
     fs::write(&input, b"dummy").unwrap();
-    fs::write(
+    write_executable_script(
         &script_path,
         "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
-    )
-    .unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-    }
+    );
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
