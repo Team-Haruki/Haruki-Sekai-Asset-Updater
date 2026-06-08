@@ -116,6 +116,8 @@ pub(super) struct CpuThrottleState {
     settings: CpuThrottleSettings,
     last_sample: Option<Instant>,
     last_process_cpu_percent: f64,
+    #[cfg(target_os = "linux")]
+    last_process_cpu_ticks: Option<u64>,
 }
 
 impl Default for CpuThrottleState {
@@ -124,6 +126,8 @@ impl Default for CpuThrottleState {
             settings: CpuThrottleSettings::default(),
             last_sample: None,
             last_process_cpu_percent: 0.0,
+            #[cfg(target_os = "linux")]
+            last_process_cpu_ticks: None,
         }
     }
 }
@@ -179,6 +183,25 @@ pub(super) fn sample_process_tree_cpu_percent(
     {
         return Ok(state.last_process_cpu_percent);
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(ticks) = current_process_tree_cpu_ticks() {
+            let sampled = match (state.last_sample, state.last_process_cpu_ticks) {
+                (Some(last_sample), Some(last_ticks)) => {
+                    let elapsed = now.duration_since(last_sample).as_secs_f64().max(0.001);
+                    let delta_ticks = ticks.saturating_sub(last_ticks) as f64;
+                    delta_ticks / linux_clock_ticks_per_second() as f64 / elapsed * 100.0
+                }
+                _ => 0.0,
+            };
+            state.last_sample = Some(now);
+            state.last_process_cpu_ticks = Some(ticks);
+            state.last_process_cpu_percent = sampled;
+            return Ok(sampled);
+        }
+    }
+
     let sampled = current_process_tree_cpu_percent()?;
     state.last_sample = Some(now);
     state.last_process_cpu_percent = sampled;
@@ -211,6 +234,77 @@ pub(super) fn current_process_tree_cpu_percent() -> Result<f64, ExportPipelineEr
     #[cfg(not(unix))]
     {
         Ok(0.0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn current_process_tree_cpu_ticks() -> Result<u64, ExportPipelineError> {
+    let root_pid = std::process::id();
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir("/proc").map_err(|source| ExportPipelineError::Io {
+        path: PathBuf::from("/proc"),
+        source,
+    })? {
+        let entry = entry.map_err(|source| ExportPipelineError::Io {
+            path: PathBuf::from("/proc"),
+            source,
+        })?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat_path = entry.path().join("stat");
+        let Ok(stat) = std::fs::read_to_string(&stat_path) else {
+            continue;
+        };
+        if let Some((ppid, ticks)) = parse_linux_proc_stat(&stat) {
+            rows.push((pid, ppid, ticks));
+        }
+    }
+    Ok(sum_process_tree_cpu_ticks(root_pid, &rows))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_proc_stat(stat: &str) -> Option<(u32, u64)> {
+    let after_name = stat.rsplit_once(") ")?.1;
+    let fields: Vec<&str> = after_name.split_whitespace().collect();
+    let ppid = fields.get(1)?.parse::<u32>().ok()?;
+    let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
+    let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
+    Some((ppid, user_ticks.saturating_add(system_ticks)))
+}
+
+#[cfg(target_os = "linux")]
+fn sum_process_tree_cpu_ticks(root_pid: u32, rows: &[(u32, u32, u64)]) -> u64 {
+    let mut stack = vec![root_pid];
+    let mut seen = std::collections::HashSet::new();
+    let mut total: u64 = 0;
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        for (row_pid, row_ppid, ticks) in rows {
+            if *row_pid == pid {
+                total = total.saturating_add(*ticks);
+            }
+            if *row_ppid == pid {
+                stack.push(*row_pid);
+            }
+        }
+    }
+    total
+}
+
+#[cfg(target_os = "linux")]
+fn linux_clock_ticks_per_second() -> u64 {
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks > 0 {
+        ticks as u64
+    } else {
+        100
     }
 }
 
@@ -248,6 +342,29 @@ pub(super) fn sum_process_tree_cpu_percent(root_pid: u32, ps_output: &str) -> f6
         }
     }
     total
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod limits_tests {
+    use super::*;
+
+    #[test]
+    fn parses_linux_proc_stat_with_spaces_in_process_name() {
+        let stat = "1234 (name with spaces) S 42 1 1 0 -1 4194304 10 0 0 0 25 7 0 0 20 0 1 0 1";
+        assert_eq!(parse_linux_proc_stat(stat), Some((42, 32)));
+    }
+
+    #[test]
+    fn sums_linux_process_tree_ticks() {
+        let rows = vec![
+            (10, 1, 3),
+            (11, 10, 5),
+            (12, 10, 7),
+            (13, 11, 11),
+            (14, 99, 13),
+        ];
+        assert_eq!(sum_process_tree_cpu_ticks(10, &rows), 26);
+    }
 }
 
 pub(super) async fn native_process_recovery_lock() -> tokio::sync::MutexGuard<'static, ()> {
