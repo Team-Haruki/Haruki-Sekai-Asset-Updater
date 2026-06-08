@@ -5,7 +5,8 @@
 ## 1. 项目现状
 
 - 本仓库已经整理为 Rust 主项目。
-- 旧 Go 主程序已经移除，不要再按 Go 项目结构新增代码。
+- 旧 Go 主程序已经移除，不要再按 Go 服务结构新增主程序代码。
+- `tools/ffi/` 可以保留面向第三方开发者的 Python / Go AssetStudioFFI 调用示例。
 - 当前仓库为 Cargo workspace：
   - `Cargo.toml`
   - `src/`
@@ -34,6 +35,8 @@
   `se_0126_01.acb` 放在外部目录，并设置 `HARUKI_CODEC_SAMPLE_DIR`。
 - `docs/migration/`
   当前保留 `v2-api.md`，用于记录 HTTP v2 API 说明。
+- `tools/ffi/`
+  AssetStudioFFI typed ABI 与 `assetstudio_ffi_worker` 的跨语言示例代码；这些示例不属于主服务运行路径。
 
 ## 3. 配置文件约定
 
@@ -62,7 +65,7 @@
 - YAML 处理统一使用 `yaml_serde`，不要新增 `serde_yaml` 依赖。
 - codec 后端统一依赖 crates.io 上的 `cridecoder`。
 - 图片转换优先保持纯 Rust 路径，不要重新引入外部 WebP 工具链。
-- `AssetStudioFFI` NativeAOT 动态库与 `ffmpeg` 继续作为外部运行依赖。
+- `AssetStudioFFI` NativeAOT 动态库、`assetstudio_ffi_worker` 与 `ffmpeg` 继续作为外部运行依赖。
 
 ## 5. 代码风格约定
 
@@ -92,6 +95,8 @@ cargo test --workspace
   确认 `tests/codec_smoke.rs` 通过。
 - AssetStudio worker：
   确认 workspace 构建仍生成 `assetstudio_ffi_worker`。
+- FFI 示例：
+  如果修改 `tools/ffi/`，至少运行对应 Python smoke / Go smoke 或 `go test ./...`。
 - HTTP/任务流：
   确认 `tests/api.rs` 通过。
 - 日志：
@@ -101,7 +106,8 @@ cargo test --workspace
 
 ## 8. 对代理的特殊要求
 
-- 不要重新引入 Go 代码、Go 工具链或 Go 配置。
+- 不要重新引入 Go 主程序、Go 服务结构或 Go 运行配置。
+- `tools/ffi/go*` 下的 Go 代码只作为 AssetStudioFFI 示例保留，不应成为主服务依赖。
 - 不要把一次性调试输出、手工 smoke 配置、临时导出目录提交进仓库。
 - 不要在仓库里写入真实密钥、真实 token、真实云存储凭据。
 - 如果修改 CI，请确保：
@@ -109,6 +115,7 @@ cargo test --workspace
   - `cargo test --workspace`
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
+- Release artifact 与 Docker 镜像必须包含 `assetstudio_ffi_worker`，因为主服务生产路径通过 worker pool bridge 调用 AssetStudioFFI。
 
 ## 9. 推荐工作流
 
