@@ -70,6 +70,7 @@ pub(super) fn write_native_object_payload(
         )?
     } else if payload_kind.starts_with("image_array_bundle_")
         || payload_kind == "animator_bundle_fbx"
+        || payload_kind == "pjsk_model_package"
     {
         write_payload_bundle(&target, &read_output.payload)?
     } else if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {

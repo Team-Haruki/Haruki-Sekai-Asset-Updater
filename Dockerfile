@@ -40,6 +40,7 @@ ARG TARGETARCH
 WORKDIR /src
 ARG ASSETSTUDIO_REPOSITORY=https://github.com/Team-Haruki/AssetStudio.git
 ARG ASSETSTUDIO_BRANCH=sekai-modified
+ARG ASSETSTUDIO_REVISION=
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -48,7 +49,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     binutils && \
     rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 --single-branch --branch "${ASSETSTUDIO_BRANCH}" "${ASSETSTUDIO_REPOSITORY}" AssetStudio
+RUN git clone --depth 1 --single-branch --branch "${ASSETSTUDIO_BRANCH}" "${ASSETSTUDIO_REPOSITORY}" AssetStudio && \
+    if [ -n "${ASSETSTUDIO_REVISION}" ]; then \
+        cd AssetStudio && \
+        git fetch --depth 1 origin "${ASSETSTUDIO_REVISION}" && \
+        git checkout --detach "${ASSETSTUDIO_REVISION}"; \
+    fi
 # Force dependency projects away from their net472 targets during NativeAOT publish.
 RUN cd AssetStudio/AssetStudioFFI && \
     case "${TARGETARCH}" in \

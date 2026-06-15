@@ -62,6 +62,17 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
 
+      - name: Resolve AssetStudio revision
+        id: assetstudio
+        run: |
+          sha="$(git ls-remote --heads https://github.com/Team-Haruki/AssetStudio.git sekai-modified | awk '{print $1}')"
+          if [ -z "${sha}" ]; then
+            echo "AssetStudio sekai-modified branch was not found" >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "AssetStudio sekai-modified: ${sha}"
+
       - name: Build and optionally push image
         uses: docker/build-push-action@v7
         with:
@@ -72,5 +83,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             HARUKI_PACKAGE_VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+            ASSETSTUDIO_REVISION=${{ steps.assetstudio.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

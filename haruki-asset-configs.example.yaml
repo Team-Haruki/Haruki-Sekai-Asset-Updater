@@ -55,7 +55,8 @@ backends:
       TextAsset: text_bytes
       MonoBehaviour: typetree_json
       AudioClip: audio
-      Animator: fbx
+      Animator: pjsk_model_package
+      AnimationClip: pjsk_animation_clip_decoded
       all: typetree_json
 
 resources:

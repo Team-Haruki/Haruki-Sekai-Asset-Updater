@@ -1062,6 +1062,7 @@ pub(super) fn assetstudio_type_selector_matches(selector: &str, asset_type: &str
         "animator" => {
             normalized_asset_type == "animator" || normalized_asset_type == "animatorcontroller"
         }
+        "animationclip" | "animation" => normalized_asset_type == "animationclip",
         _ => false,
     }
 }
@@ -1102,6 +1103,7 @@ pub(super) fn default_native_read_kind(asset_type: &str) -> &'static str {
         "shader" | "shadervariantcollection" => "shader",
         "mesh" => "obj",
         "animator" => "fbx",
+        "animationclip" => "pjsk_animation_clip_decoded",
         _ => "typetree_json",
     }
 }
@@ -1186,6 +1188,7 @@ pub(super) fn assetstudio_export_type_selector(asset_type: &str) -> Option<&'sta
         "movietexture" | "movie_texture" => Some("movieTexture"),
         "mesh" => Some("mesh"),
         "animator" => Some("animator"),
+        "animationclip" | "animation_clip" | "animation" => Some("AnimationClip"),
         _ => None,
     }
 }

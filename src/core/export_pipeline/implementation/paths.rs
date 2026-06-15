@@ -339,7 +339,8 @@ pub(super) fn native_object_output_extension(
         | "image_array_bundle_jpeg"
         | "image_array_bundle_webp"
         | "image_array_bundle_raw_rgba"
-        | "animator_bundle_fbx" => "",
+        | "animator_bundle_fbx"
+        | "pjsk_model_package" => "",
         "audio_raw" => suggested_extension
             .and_then(static_known_payload_extension)
             .unwrap_or("wav"),
@@ -352,6 +353,7 @@ pub(super) fn native_object_output_extension(
             .unwrap_or("ttf"),
         "shader_text" => "shader",
         "mesh_obj" => "obj",
+        "pjsk_animation_clip_decoded" => "json",
         _ => suggested_extension
             .and_then(static_known_payload_extension)
             .unwrap_or_else(|| default_extension_for_asset(asset)),
