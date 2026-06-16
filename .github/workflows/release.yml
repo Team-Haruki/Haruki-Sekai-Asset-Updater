@@ -24,6 +24,9 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.name }}
+    needs:
+      - assetstudio-revision
+      - assetstudio-ffi
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -31,12 +34,15 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x64
+            ffi_name: linux-x64
             archive: tar.gz
           - os: macos-latest
             name: macos-arm64
+            ffi_name: macos-arm64
             archive: tar.gz
           - os: windows-2025
             name: windows-x64
+            ffi_name: win-x64
             archive: zip
     steps:
       - name: Checkout
@@ -71,6 +77,12 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked -p haruki-sekai-asset-updater -p haruki-assetstudio-ffi
 
+      - name: Download AssetStudioFFI artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}
+          path: assetstudio-ffi-package
+
       - name: Package archive (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -79,6 +91,10 @@ jobs:
           mkdir -p "dist/${package_dir}"
           cp "target/release/${{ env.BINARY_NAME }}" "dist/${package_dir}/${{ env.BINARY_NAME }}"
           cp "target/release/${{ env.WORKER_BINARY_NAME }}" "dist/${package_dir}/${{ env.WORKER_BINARY_NAME }}"
+          mkdir -p "dist/${package_dir}/assetstudio"
+          mkdir -p assetstudio-ffi-unpacked
+          tar -xzf "assetstudio-ffi-package/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}.tar.gz" -C assetstudio-ffi-unpacked
+          cp -R assetstudio-ffi-unpacked/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}/. "dist/${package_dir}/assetstudio/"
           tar -czf "dist/${package_dir}.tar.gz" -C dist "${package_dir}"
 
       - name: Package archive (Windows)
@@ -90,6 +106,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/$packageDir" | Out-Null
           Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "dist/$packageDir/${{ env.BINARY_NAME }}.exe"
           Copy-Item "target/release/${{ env.WORKER_BINARY_NAME }}.exe" "dist/$packageDir/${{ env.WORKER_BINARY_NAME }}.exe"
+          New-Item -ItemType Directory -Force -Path "dist/$packageDir/assetstudio", "assetstudio-ffi-unpacked" | Out-Null
+          Expand-Archive -Path "assetstudio-ffi-package/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}.zip" -DestinationPath "assetstudio-ffi-unpacked" -Force
+          Copy-Item -Path "assetstudio-ffi-unpacked/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}/*" -Destination "dist/$packageDir/assetstudio" -Recurse -Force
           Compress-Archive -Path "dist/$packageDir" -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.zip" -Force
 
       - name: Upload packaged artifact
@@ -257,7 +276,6 @@ jobs:
     name: Publish GitHub Release
     needs:
       - build
-      - assetstudio-ffi
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
