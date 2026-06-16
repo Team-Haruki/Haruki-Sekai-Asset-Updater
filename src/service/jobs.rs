@@ -11,8 +11,8 @@ use crate::core::asset_execution::{AssetExecutionContext, ExecutionProgressUpdat
 use crate::core::config::AppConfig;
 use crate::core::errors::{AssetExecutionError, RegionError};
 use crate::core::models::{
-    AssetUpdateRequest, JobFailure, JobFailureKind, JobPhase, JobProgressEvent, JobSnapshot,
-    JobStatus,
+    AssetUpdateMode, AssetUpdateRequest, JobFailure, JobFailureKind, JobPhase, JobProgressEvent,
+    JobSnapshot, JobStatus,
 };
 use crate::core::pipeline::build_execution_plan;
 use crate::core::regions::{build_url_preview, select_region};
@@ -278,9 +278,25 @@ impl JobManager {
                                 return;
                             }
                         };
+                        let execution = async {
+                            match request.mode {
+                                AssetUpdateMode::Update => executor
+                                    .execute(&config, Some(progress_tx), cancel_flag.clone())
+                                    .await,
+                                AssetUpdateMode::PrefetchRawBundles => {
+                                    executor
+                                        .prefetch_asset_bundles(
+                                            &config,
+                                            Some(progress_tx),
+                                            cancel_flag.clone(),
+                                        )
+                                        .await
+                                }
+                            }
+                        };
                         let execution_result = timeout(
                             Duration::from_secs(config.execution.timeout_seconds),
-                            executor.execute(&config, Some(progress_tx), cancel_flag.clone()),
+                            execution,
                         )
                         .await;
                         let _ = progress_task.await;

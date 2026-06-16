@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -666,7 +666,8 @@ impl AssetExecutionContext {
                 message: "building prefetch task list".to_string(),
             },
         );
-        let tasks = self.build_download_tasks(&info, &DownloadRecord::new());
+        let mut tasks = self.build_download_tasks(&info, &DownloadRecord::new());
+        tasks = self.filter_raw_bundle_tasks(tasks);
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::DownloadsPlanned { total: tasks.len() },
@@ -1270,6 +1271,11 @@ impl AssetExecutionContext {
             },
         );
 
+        if self.matches_raw_bundle_filters(&task.bundle_path) {
+            let raw_path = self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?;
+            Self::write_raw_bundle(&raw_path, &deobfuscated)?;
+        }
+
         let write_started = Instant::now();
         let temp_file = std::env::temp_dir()
             .join(&self.region_name)
@@ -1326,10 +1332,15 @@ impl AssetExecutionContext {
 
     async fn prefetch_bundle(
         &self,
-        _app_config: &AppConfig,
+        app_config: &AppConfig,
         task: &DownloadTask,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
     ) -> Result<(), AssetExecutionError> {
+        let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
+            AssetExecutionError::MissingAssetSaveDir {
+                region: self.region_name.clone(),
+            }
+        })?;
         let bundle_url = self.render_bundle_url(task)?;
         let download_started = Instant::now();
         let network_started = Instant::now();
@@ -1353,8 +1364,136 @@ impl AssetExecutionContext {
                 cache_write_ms: None,
             },
         );
+
+        let deobfuscate_started = Instant::now();
+        let deobfuscated = deobfuscate(&body);
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::BundleDeobfuscated {
+                bundle: task.bundle_path.clone(),
+                elapsed_ms: deobfuscate_started.elapsed().as_millis(),
+            },
+        );
+
+        let raw_path = self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?;
+        Self::write_raw_bundle(&raw_path, &deobfuscated)?;
+        tracing::debug!(
+            region = %self.region_name,
+            bundle = %task.bundle_path,
+            output = %raw_path.display(),
+            http_version = ?app_config.server.asset_http_version,
+            "prefetched raw asset bundle"
+        );
         Ok(())
     }
+
+    fn filter_raw_bundle_tasks(&self, tasks: Vec<DownloadTask>) -> Vec<DownloadTask> {
+        tasks
+            .into_iter()
+            .filter(|task| self.matches_raw_bundle_filters(&task.bundle_path))
+            .collect()
+    }
+
+    fn matches_raw_bundle_filters(&self, bundle_path: &str) -> bool {
+        let Some(raw_bundles) = self.region.export.raw_bundles.as_ref() else {
+            return false;
+        };
+        let include_patterns = compile_patterns(&raw_bundles.include);
+        let exclude_patterns = compile_patterns(&raw_bundles.exclude);
+        (include_patterns.is_empty() || matches_any(&include_patterns, bundle_path))
+            && !matches_any(&exclude_patterns, bundle_path)
+    }
+
+    fn raw_bundle_output_path(
+        &self,
+        asset_save_dir: &str,
+        bundle_path: &str,
+    ) -> Result<PathBuf, AssetExecutionError> {
+        let root = self
+            .region
+            .export
+            .raw_bundles
+            .as_ref()
+            .and_then(|raw_bundles| raw_bundles.output_dir.as_deref())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(asset_save_dir).join("AssetBundles"));
+        raw_bundle_output_path(&root, bundle_path)
+    }
+
+    fn write_raw_bundle(path: &Path, deobfuscated: &[u8]) -> Result<(), AssetExecutionError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                AssetExecutionError::CreateRawBundleDir {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        std::fs::write(path, deobfuscated).map_err(|source| AssetExecutionError::WriteRawBundle {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+}
+
+fn raw_bundle_output_path(
+    root: &Path,
+    bundle_path: &str,
+) -> Result<PathBuf, AssetExecutionError> {
+    if bundle_path.is_empty() {
+        return Err(AssetExecutionError::InvalidRawBundlePath {
+            bundle: bundle_path.to_string(),
+            reason: "path is empty".to_string(),
+        });
+    }
+    if bundle_path
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(AssetExecutionError::InvalidRawBundlePath {
+            bundle: bundle_path.to_string(),
+            reason: "empty, current-directory, or parent-directory components are not allowed"
+                .to_string(),
+        });
+    }
+
+    let relative = Path::new(bundle_path);
+    if relative.is_absolute() {
+        return Err(AssetExecutionError::InvalidRawBundlePath {
+            bundle: bundle_path.to_string(),
+            reason: "absolute paths are not allowed".to_string(),
+        });
+    }
+
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::Normal(value) => path.push(value),
+            Component::CurDir => {
+                return Err(AssetExecutionError::InvalidRawBundlePath {
+                    bundle: bundle_path.to_string(),
+                    reason: "current-directory components are not allowed".to_string(),
+                })
+            }
+            Component::ParentDir => {
+                return Err(AssetExecutionError::InvalidRawBundlePath {
+                    bundle: bundle_path.to_string(),
+                    reason: "parent-directory components are not allowed".to_string(),
+                })
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(AssetExecutionError::InvalidRawBundlePath {
+                    bundle: bundle_path.to_string(),
+                    reason: "root or prefix components are not allowed".to_string(),
+                })
+            }
+        }
+    }
+
+    if path.extension().and_then(|ext| ext.to_str()) != Some("bundle") {
+        path.set_extension("bundle");
+    }
+    Ok(path)
 }
 
 #[derive(Clone)]
@@ -1567,14 +1706,15 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::core::config::{
-        AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionPathsConfig,
-        RegionProviderConfig, RegionRuntimeConfig,
+        AppConfig, ChartHashConfig, GitSyncConfig, RawBundleExportConfig, RegionConfig,
+        RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
     };
-    use crate::core::models::AssetUpdateRequest;
+    use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
     use super::{
         decrypt_asset_bundle_info, deobfuscate, post_process_backlog_capacity,
-        should_download_bundle, AssetBundleDetail, AssetBundleInfo, AssetCategory,
+        raw_bundle_output_path, should_download_bundle, AssetBundleDetail, AssetBundleInfo,
+        AssetCategory,
         AssetExecutionContext,
     };
 
@@ -1701,6 +1841,24 @@ mod tests {
         assert_eq!(post_process_backlog_capacity(4, 12), 24);
     }
 
+    #[test]
+    fn raw_bundle_output_path_appends_bundle_extension_and_rejects_unsafe_paths() {
+        let root = std::path::Path::new("/tmp/raw-root");
+        assert_eq!(
+            raw_bundle_output_path(root, "live_pv/model/character/body/foo").unwrap(),
+            root.join("live_pv/model/character/body/foo.bundle")
+        );
+        assert_eq!(
+            raw_bundle_output_path(root, "character/motion/costume_setting/01_00.bundle").unwrap(),
+            root.join("character/motion/costume_setting/01_00.bundle")
+        );
+        assert!(raw_bundle_output_path(root, "").is_err());
+        assert!(raw_bundle_output_path(root, "/absolute/path").is_err());
+        assert!(raw_bundle_output_path(root, "../escape").is_err());
+        assert!(raw_bundle_output_path(root, "safe/../escape").is_err());
+        assert!(raw_bundle_output_path(root, "safe/./escape").is_err());
+    }
+
     #[tokio::test]
     async fn prefetch_can_fetch_asset_info_and_download_bundle() {
         let temp = tempdir().unwrap();
@@ -1794,6 +1952,14 @@ mod tests {
                 skip: Vec::new(),
                 priority: vec!["^start/".to_string()],
             },
+            export: crate::core::config::RegionExportConfig {
+                raw_bundles: Some(RawBundleExportConfig {
+                    output_dir: None,
+                    include: vec!["^start/".to_string()],
+                    exclude: Vec::new(),
+                }),
+                ..crate::core::config::RegionExportConfig::default()
+            },
             ..RegionConfig::default()
         };
 
@@ -1818,6 +1984,7 @@ mod tests {
             asset_version: Some("1".to_string()),
             asset_hash: Some("hash".to_string()),
             dry_run: false,
+            mode: AssetUpdateMode::PrefetchRawBundles,
         };
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
@@ -1828,6 +1995,11 @@ mod tests {
         assert_eq!(summary.completed_downloads, 1);
 
         assert_eq!(summary.failed_downloads, 0);
+        assert_eq!(
+            std::fs::read(save_dir.join("AssetBundles/start/a.bundle")).unwrap(),
+            b"BUNDLE"
+        );
+        assert!(!record_file.exists());
     }
 
     #[tokio::test]
@@ -1978,6 +2150,7 @@ mod tests {
             asset_version: None,
             asset_hash: None,
             dry_run: false,
+            mode: AssetUpdateMode::PrefetchRawBundles,
         };
 
         let executor = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
@@ -2113,6 +2286,7 @@ mod tests {
             asset_version: Some("1".to_string()),
             asset_hash: Some("hash".to_string()),
             dry_run: false,
+            mode: AssetUpdateMode::PrefetchRawBundles,
         };
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();

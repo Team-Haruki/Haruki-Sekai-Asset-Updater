@@ -315,6 +315,20 @@ pub enum AssetExecutionError {
         #[source]
         source: std::io::Error,
     },
+    #[error("invalid raw bundle path `{bundle}`: {reason}")]
+    InvalidRawBundlePath { bundle: String, reason: String },
+    #[error("failed to create raw bundle directory for {path}: {source}")]
+    CreateRawBundleDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write raw bundle {path}: {source}")]
+    WriteRawBundle {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to read temp file {path}: {source}")]
     ReadTempFile {
         path: PathBuf,

@@ -9,6 +9,21 @@ pub struct AssetUpdateRequest {
     pub asset_hash: Option<String>,
     #[serde(default)]
     pub dry_run: bool,
+    #[serde(default)]
+    pub mode: AssetUpdateMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetUpdateMode {
+    Update,
+    PrefetchRawBundles,
+}
+
+impl Default for AssetUpdateMode {
+    fn default() -> Self {
+        Self::Update
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

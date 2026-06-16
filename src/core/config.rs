@@ -1653,6 +1653,7 @@ pub struct RegionExportConfig {
     pub by_category: bool,
     #[serde(default = "default_asset_studio_export_types")]
     pub asset_studio_types: Vec<String>,
+    pub raw_bundles: Option<RawBundleExportConfig>,
     pub usm: UsmExportConfig,
     pub acb: AcbExportConfig,
     pub hca: HcaExportConfig,
@@ -1666,6 +1667,7 @@ impl Default for RegionExportConfig {
         Self {
             by_category: false,
             asset_studio_types: default_asset_studio_export_types(),
+            raw_bundles: None,
             usm: UsmExportConfig::default(),
             acb: AcbExportConfig::default(),
             hca: HcaExportConfig::default(),
@@ -1674,6 +1676,14 @@ impl Default for RegionExportConfig {
             audio: AudioExportConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct RawBundleExportConfig {
+    pub output_dir: Option<String>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2167,6 +2177,31 @@ asset_studio_types:
                 "font".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parses_raw_bundle_export_config() {
+        let yaml = r#"
+raw_bundles:
+  output_dir: /data/assets/jp-assets/AssetBundles
+  include:
+    - ^live_pv/model/characterv2/
+  exclude:
+    - /debug/
+"#;
+
+        let export: RegionExportConfig = yaml_serde::from_str(yaml).unwrap();
+        let raw_bundles = export.raw_bundles.unwrap();
+
+        assert_eq!(
+            raw_bundles.output_dir.as_deref(),
+            Some("/data/assets/jp-assets/AssetBundles")
+        );
+        assert_eq!(
+            raw_bundles.include,
+            vec!["^live_pv/model/characterv2/".to_string()]
+        );
+        assert_eq!(raw_bundles.exclude, vec!["/debug/".to_string()]);
     }
 
     #[test]

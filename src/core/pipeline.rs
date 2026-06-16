@@ -139,6 +139,7 @@ mod tests {
             asset_version: Some("1".to_string()),
             asset_hash: Some("hash".to_string()),
             dry_run: true,
+            mode: Default::default(),
         };
 
         let plan = build_execution_plan(&config, &request).unwrap();

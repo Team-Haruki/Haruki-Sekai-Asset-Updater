@@ -189,6 +189,7 @@ mod tests {
             asset_version: Some("6.0.0".to_string()),
             asset_hash: Some("deadbeef".to_string()),
             dry_run: true,
+            mode: Default::default(),
         };
 
         let preview = build_url_preview(&region, &request);
