@@ -101,6 +101,7 @@ pub(super) struct NativeObjectExportSummary {
     pub(super) phase_ms: HashMap<String, u64>,
     pub(super) skipped_object_reads: Vec<NativeSkippedObjectRead>,
     pub(super) object_read_plan: NativeObjectReadPlanStats,
+    pub(super) worker_crash_skipped: bool,
 }
 
 #[derive(Debug, Default)]

@@ -364,6 +364,7 @@ where
             inspected_objects: open_response.exportable_asset_count,
             ..NativeObjectReadPlanStats::default()
         },
+        worker_crash_skipped: false,
     };
 
     let unpack_result = async {
@@ -375,8 +376,9 @@ where
         )
         .await?;
         let configured_asset_types = asset_studio_export_type_list(options.region);
-        let readable_assets =
+        let mut readable_assets =
             select_native_object_readable_assets(&assets, &configured_asset_types, &mut summary);
+        sort_native_object_reads_for_failure_isolation(&mut readable_assets);
 
         let read_batch_size =
             native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
@@ -393,7 +395,34 @@ where
                     options.image_format,
                 );
                 let request = AssetStudioFfiRequest::ContextReadObjects(request);
-                let output = caller.call(&request).await?;
+                let output = match caller.call(&request).await {
+                    Ok(output) => output,
+                    Err(error)
+                        if asset_chunk.len() == 1
+                            && is_native_worker_signal_failure(&error)
+                            && is_native_image_asset(asset_chunk[0]) =>
+                    {
+                        let asset = asset_chunk[0];
+                        warn!(
+                            path_id = asset.path_id,
+                            asset_type = asset.asset_type.as_deref().unwrap_or(""),
+                            name = asset.name.as_deref().unwrap_or(""),
+                            error = %error,
+                            "assetstudio ffi image read crashed worker; skipping image object"
+                        );
+                        summary.skipped_object_reads.push(NativeSkippedObjectRead {
+                            path_id: asset.path_id,
+                            asset_type: asset.asset_type.clone(),
+                            name: asset.name.clone(),
+                            container: asset.container.clone(),
+                            error: format!("assetstudio ffi image read crashed worker: {error}"),
+                        });
+                        summary.object_read_plan.skipped_reads += 1;
+                        summary.worker_crash_skipped = true;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let read_outputs =
                     parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
                         output,
@@ -443,6 +472,10 @@ where
     match (unpack_result, close_result) {
         (Ok(phase_ms), Ok(())) => Ok(phase_ms),
         (Err(error), Ok(())) => Err(error),
+        (Ok(summary), Err(error)) if summary.worker_crash_skipped => {
+            warn!(error = %error, "assetstudio ffi context close failed after recoverable worker crash; keeping partial object export");
+            Ok(summary)
+        }
         (Ok(_), Err(error)) => Err(error),
         (Err(unpack_error), Err(close_error)) => {
             warn!(error = %close_error, "assetstudio ffi context close failed after object export error");
@@ -563,12 +596,7 @@ pub(super) fn is_native_aot_non_bmp_image_read(
     asset: &AssetStudioFfiAssetInfo,
     image_format: &str,
 ) -> bool {
-    let is_image_asset = asset.asset_type.as_deref().is_some_and(|asset_type| {
-        assetstudio_type_selector_matches("Texture2D", asset_type)
-            || assetstudio_type_selector_matches("Texture2DArray", asset_type)
-            || assetstudio_type_selector_matches("Sprite", asset_type)
-    });
-    is_image_asset && native_image_format_for_asset(asset, image_format) != "bmp"
+    is_native_image_asset(asset) && native_image_format_for_asset(asset, image_format) != "bmp"
 }
 
 #[allow(dead_code)]
@@ -667,6 +695,23 @@ pub(super) fn select_native_object_readable_assets<'a>(
     summary.object_read_plan.readable_objects = readable_assets.len();
     summary.object_read_plan.skipped_reads = summary.skipped_object_reads.len();
     readable_assets
+}
+
+pub(super) fn sort_native_object_reads_for_failure_isolation(
+    assets: &mut Vec<&AssetStudioFfiAssetInfo>,
+) {
+    assets.sort_by_key(|asset| {
+        let priority = if is_native_image_asset(asset) { 1 } else { 0 };
+        (priority, asset.index)
+    });
+}
+
+pub(super) fn is_native_image_asset(asset: &AssetStudioFfiAssetInfo) -> bool {
+    asset.asset_type.as_deref().is_some_and(|asset_type| {
+        assetstudio_type_selector_matches("Texture2D", asset_type)
+            || assetstudio_type_selector_matches("Texture2DArray", asset_type)
+            || assetstudio_type_selector_matches("Sprite", asset_type)
+    })
 }
 
 pub(super) fn texture2d_array_parent_containers(

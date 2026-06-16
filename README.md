@@ -117,17 +117,20 @@ the native `HarukiAssetStudioFFI` dynamic library comes from the
 [`Team-Haruki/AssetStudio`](https://github.com/Team-Haruki/AssetStudio)
 `sekai-modified` branch. Release and Docker builds use that branch by default.
 
-For local development, either download the matching AssetStudioFFI release
-archive or build the `AssetStudioFFI` project from that branch, then point the
-service at the native library and worker binary:
+Platform release archives include the matching AssetStudioFFI files under
+`assetstudio/`. For local development with a release archive, point the service
+at that bundled library and the worker binary:
 
 ```bash
-export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
-export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/path/to/assetstudio_ffi_worker
+export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=./assetstudio/HarukiAssetStudioFFI.so
+export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=./assetstudio_ffi_worker
 ```
 
 Use the platform-specific library extension for your host: `.so` on Linux,
-`.dylib` on macOS, and `.dll` on Windows.
+`.dylib` on macOS, and `.dll` on Windows; Windows releases use
+`./assetstudio/HarukiAssetStudioFFI.dll` and `./assetstudio_ffi_worker.exe`.
+You can also download the standalone AssetStudioFFI archive or build the
+`AssetStudioFFI` project yourself, then set the same variables to those paths.
 
 ## Runtime Tuning
 

@@ -33,7 +33,8 @@ use super::{
     prepare_usm_processing_inputs, process_usm_file, process_usm_input_with_metrics,
     record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
     scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
-    text_asset_public_bytes_target, usm_segment_key, write_assetstudio_export_manifest_entry,
+    sort_native_object_reads_for_failure_isolation, text_asset_public_bytes_target,
+    usm_segment_key, write_assetstudio_export_manifest_entry,
     write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
     write_native_object_payload, AssetStudioFfiAssetInfo, AssetStudioFfiObjectReadOutput,
     AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse, MediaEncodeKind,
@@ -1581,6 +1582,41 @@ fn mono_behaviour_bundledata_uses_container_json_path() {
 }
 
 #[test]
+fn live2d_build_motion_data_uses_motion_container_json_path() {
+    let asset = AssetStudioFfiAssetInfo {
+            index: 0,
+            name: Some("BuildMotionData".to_string()),
+            container: Some(
+                "assets/sekai/assetbundle/resources/startapp/live2d/model/v1/main/01_ichika/01ichika_cloth001/motions/buildmotiondata.asset"
+                    .to_string(),
+            ),
+            asset_type: Some("MonoBehaviour".to_string()),
+            type_id: 114,
+            path_id: 42,
+            unique_id: None,
+            size: 42,
+            source_file: None,
+        };
+
+    let target = native_object_output_path(
+        Path::new("/tmp/out"),
+        "live2d/model/v1/main/01_ichika/01ichika_cloth001",
+        "assets/sekai/assetbundle/resources",
+        true,
+        &asset,
+        Some("typetree_json"),
+        Some(".json"),
+    );
+
+    assert_eq!(
+        target,
+        PathBuf::from(
+            "/tmp/out/startapp/live2d/model/v1/main/01_ichika/01ichika_cloth001/motions/buildmotiondata.json"
+        )
+    );
+}
+
+#[test]
 fn mono_script_stays_in_container_subasset_path() {
     let asset = AssetStudioFfiAssetInfo {
             index: 0,
@@ -2326,6 +2362,54 @@ fn native_read_batch_size_auto_tunes_by_workload() {
 }
 
 #[test]
+fn native_object_reads_sort_images_after_metadata_assets() {
+    let texture = AssetStudioFfiAssetInfo {
+        index: 1,
+        name: Some("texture_00".to_string()),
+        container: Some("assets/live2d/texture_00.png".to_string()),
+        asset_type: Some("Texture2D".to_string()),
+        type_id: 28,
+        path_id: 1,
+        unique_id: None,
+        size: 42,
+        source_file: None,
+    };
+    let model = AssetStudioFfiAssetInfo {
+        index: 2,
+        name: Some("model3".to_string()),
+        container: Some("assets/live2d/model3.json".to_string()),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 2,
+        unique_id: None,
+        size: 42,
+        source_file: None,
+    };
+    let build_motion = AssetStudioFfiAssetInfo {
+        index: 3,
+        name: Some("BuildMotionData".to_string()),
+        container: Some("assets/live2d/motions/buildmotiondata.asset".to_string()),
+        asset_type: Some("MonoBehaviour".to_string()),
+        type_id: 114,
+        path_id: 3,
+        unique_id: None,
+        size: 42,
+        source_file: None,
+    };
+    let mut reads = vec![&texture, &model, &build_motion];
+
+    sort_native_object_reads_for_failure_isolation(&mut reads);
+
+    assert_eq!(
+        reads
+            .iter()
+            .map(|asset| asset.name.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["model3", "BuildMotionData", "texture_00"]
+    );
+}
+
+#[test]
 fn readable_assets_skip_texture2d_array_images_when_parent_is_present() {
     let parent = AssetStudioFfiAssetInfo {
         index: 0,
@@ -2599,6 +2683,7 @@ fn object_read_batch_diagnostics_record_max_phase_stats() {
         ]),
         skipped_object_reads: Vec::new(),
         object_read_plan: NativeObjectReadPlanStats::default(),
+        worker_crash_skipped: false,
     };
     let read_outputs = NativeObjectReadBatchParseOutput {
         results: Vec::new(),
