@@ -1436,10 +1436,7 @@ impl AssetExecutionContext {
     }
 }
 
-fn raw_bundle_output_path(
-    root: &Path,
-    bundle_path: &str,
-) -> Result<PathBuf, AssetExecutionError> {
+fn raw_bundle_output_path(root: &Path, bundle_path: &str) -> Result<PathBuf, AssetExecutionError> {
     if bundle_path.is_empty() {
         return Err(AssetExecutionError::InvalidRawBundlePath {
             bundle: bundle_path.to_string(),
@@ -1714,8 +1711,7 @@ mod tests {
     use super::{
         decrypt_asset_bundle_info, deobfuscate, post_process_backlog_capacity,
         raw_bundle_output_path, should_download_bundle, AssetBundleDetail, AssetBundleInfo,
-        AssetCategory,
-        AssetExecutionContext,
+        AssetCategory, AssetExecutionContext,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;

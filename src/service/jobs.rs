@@ -280,9 +280,11 @@ impl JobManager {
                         };
                         let execution = async {
                             match request.mode {
-                                AssetUpdateMode::Update => executor
-                                    .execute(&config, Some(progress_tx), cancel_flag.clone())
-                                    .await,
+                                AssetUpdateMode::Update => {
+                                    executor
+                                        .execute(&config, Some(progress_tx), cancel_flag.clone())
+                                        .await
+                                }
                                 AssetUpdateMode::PrefetchRawBundles => {
                                     executor
                                         .prefetch_asset_bundles(
