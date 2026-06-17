@@ -2118,6 +2118,14 @@ mod tests {
                 skip: Vec::new(),
                 priority: vec!["^ond/".to_string()],
             },
+            export: crate::core::config::RegionExportConfig {
+                raw_bundles: Some(RawBundleExportConfig {
+                    output_dir: None,
+                    include: vec!["^ond/".to_string()],
+                    exclude: Vec::new(),
+                }),
+                ..crate::core::config::RegionExportConfig::default()
+            },
             ..RegionConfig::default()
         };
 
@@ -2259,6 +2267,14 @@ mod tests {
                 on_demand: Vec::new(),
                 skip: Vec::new(),
                 priority: vec!["^start/".to_string()],
+            },
+            export: crate::core::config::RegionExportConfig {
+                raw_bundles: Some(RawBundleExportConfig {
+                    output_dir: None,
+                    include: vec!["^start/".to_string()],
+                    exclude: Vec::new(),
+                }),
+                ..crate::core::config::RegionExportConfig::default()
             },
             ..RegionConfig::default()
         };
