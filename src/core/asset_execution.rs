@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -362,6 +363,7 @@ impl AssetExecutionContext {
         let mut joins = JoinSet::new();
         let mut post_process_joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
+        let haruki_3d_staging_root = self.haruki_3d_staging_root();
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::Phase {
@@ -388,6 +390,7 @@ impl AssetExecutionContext {
             let app_config = app_config_cloned.clone();
             let progress = progress.clone();
             let cancel_flag = cancel_flag.clone();
+            let haruki_3d_staging_root = haruki_3d_staging_root.clone();
             joins.spawn(async move {
                 let download_slot_wait_started = Instant::now();
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
@@ -415,7 +418,12 @@ impl AssetExecutionContext {
                 let bundle_path = task.bundle_path.clone();
                 let bundle_hash = task.bundle_hash.clone();
                 let result = match ctx
-                    .download_and_export_bundle_payloads(&app_config, &task, &progress)
+                    .download_and_export_bundle_payloads(
+                        &app_config,
+                        &task,
+                        &progress,
+                        haruki_3d_staging_root.as_deref(),
+                    )
                     .await
                 {
                     Ok(mut job) => {
@@ -593,6 +601,7 @@ impl AssetExecutionContext {
                 message: "saving downloaded asset record".to_string(),
             },
         );
+        self.run_haruki_3d_export_if_enabled(&haruki_3d_staging_root)?;
         self.ensure_not_cancelled(&cancel_flag)?;
         Self::save_download_record_on_blocking_thread(
             record_path.clone(),
@@ -1231,6 +1240,7 @@ impl AssetExecutionContext {
         app_config: &AppConfig,
         task: &DownloadTask,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+        haruki_3d_staging_root: Option<&Path>,
     ) -> Result<NativeBundlePostProcessJob, AssetExecutionError> {
         let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
             AssetExecutionError::MissingAssetSaveDir {
@@ -1274,6 +1284,12 @@ impl AssetExecutionContext {
         if self.matches_raw_bundle_filters(&task.bundle_path) {
             let raw_path = self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?;
             Self::write_raw_bundle(&raw_path, &deobfuscated)?;
+        }
+        if self.matches_haruki_3d_filters(&task.bundle_path) {
+            if let Some(staging_root) = haruki_3d_staging_root {
+                let staging_path = raw_bundle_output_path(staging_root, &task.bundle_path)?;
+                Self::write_haruki_3d_staging_bundle(&staging_path, &deobfuscated)?;
+            }
         }
 
         let write_started = Instant::now();
@@ -1404,6 +1420,35 @@ impl AssetExecutionContext {
             && !matches_any(&exclude_patterns, bundle_path)
     }
 
+    fn matches_haruki_3d_filters(&self, bundle_path: &str) -> bool {
+        let haruki_3d = &self.region.export.haruki_3d;
+        if !haruki_3d.enabled || haruki_3d.include.is_empty() {
+            return false;
+        }
+        let include_patterns = compile_patterns(&haruki_3d.include);
+        let exclude_patterns = compile_patterns(&haruki_3d.exclude);
+        matches_any(&include_patterns, bundle_path) && !matches_any(&exclude_patterns, bundle_path)
+    }
+
+    fn haruki_3d_staging_root(&self) -> Option<PathBuf> {
+        let haruki_3d = &self.region.export.haruki_3d;
+        if !haruki_3d.enabled {
+            return None;
+        }
+        let run_id = self
+            .resolved_asset_version
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("current")
+            .replace(['/', '\\', ':'], "_");
+        Some(
+            Path::new(&haruki_3d.staging_dir)
+                .join(&self.region_name)
+                .join(run_id)
+                .join("AssetBundles"),
+        )
+    }
+
     fn raw_bundle_output_path(
         &self,
         asset_save_dir: &str,
@@ -1432,6 +1477,99 @@ impl AssetExecutionContext {
         std::fs::write(path, deobfuscated).map_err(|source| AssetExecutionError::WriteRawBundle {
             path: path.to_path_buf(),
             source,
+        })
+    }
+
+    fn write_haruki_3d_staging_bundle(
+        path: &Path,
+        deobfuscated: &[u8],
+    ) -> Result<(), AssetExecutionError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                AssetExecutionError::CreateHaruki3dStagingDir {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        std::fs::write(path, deobfuscated).map_err(|source| {
+            AssetExecutionError::WriteHaruki3dStagingBundle {
+                path: path.to_path_buf(),
+                source,
+            }
+        })
+    }
+
+    fn run_haruki_3d_export_if_enabled(
+        &self,
+        staging_root: &Option<PathBuf>,
+    ) -> Result<(), AssetExecutionError> {
+        let haruki_3d = &self.region.export.haruki_3d;
+        if !haruki_3d.enabled {
+            return Ok(());
+        }
+        let Some(staging_root) = staging_root else {
+            return Ok(());
+        };
+        if !staging_root.exists() {
+            tracing::info!(
+                region = %self.region_name,
+                staging = %staging_root.display(),
+                "no Haruki 3D staging bundles were written"
+            );
+            return Ok(());
+        }
+
+        let status = Command::new(&haruki_3d.exporter_path)
+            .arg("--emit-part-packages")
+            .arg("--master")
+            .arg(&haruki_3d.master_dir)
+            .arg("--asset-root")
+            .arg(staging_root)
+            .arg("--out")
+            .arg(&haruki_3d.output_dir)
+            .output()
+            .map_err(|source| AssetExecutionError::Haruki3dExporterSpawn {
+                program: haruki_3d.exporter_path.clone(),
+                source,
+            });
+
+        match status {
+            Ok(output) if output.status.success() => {
+                if haruki_3d.cleanup_staging_after_success {
+                    Self::remove_haruki_3d_staging(staging_root)?;
+                }
+                Ok(())
+            }
+            Ok(output) => {
+                if haruki_3d.cleanup_staging_after_failure {
+                    Self::remove_haruki_3d_staging(staging_root)?;
+                }
+                Err(AssetExecutionError::Haruki3dExporterFailed {
+                    program: haruki_3d.exporter_path.clone(),
+                    status: output.status.to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                })
+            }
+            Err(err) => {
+                if haruki_3d.cleanup_staging_after_failure {
+                    Self::remove_haruki_3d_staging(staging_root)?;
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn remove_haruki_3d_staging(staging_root: &Path) -> Result<(), AssetExecutionError> {
+        let remove_root = staging_root
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| staging_root.to_path_buf());
+        std::fs::remove_dir_all(&remove_root).map_err(|source| {
+            AssetExecutionError::RemoveHaruki3dStagingDir {
+                path: remove_root,
+                source,
+            }
         })
     }
 }

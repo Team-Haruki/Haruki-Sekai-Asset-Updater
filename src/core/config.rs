@@ -188,6 +188,7 @@ impl AppConfig {
             validate_image_export_config(region_name, &region.export.images)?;
             validate_video_export_config(region_name, &region.export.video)?;
             validate_audio_export_config(region_name, &region.export.audio)?;
+            validate_haruki_3d_export_config(region_name, &region.export.haruki_3d)?;
         }
         validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
         warn_media_fallback_backend_options(&self.backends.media);
@@ -781,6 +782,37 @@ fn validate_audio_export_config(
             field: format!("regions.{region_name}.export.audio.formats"),
             value: "[]".to_string(),
             expected: "at least one of wav, flac, or mp3".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_haruki_3d_export_config(
+    region_name: &str,
+    haruki_3d: &Haruki3dExportConfig,
+) -> Result<(), ConfigError> {
+    if !haruki_3d.enabled {
+        return Ok(());
+    }
+    for (field, value) in [
+        ("exporter_path", &haruki_3d.exporter_path),
+        ("master_dir", &haruki_3d.master_dir),
+        ("staging_dir", &haruki_3d.staging_dir),
+        ("output_dir", &haruki_3d.output_dir),
+    ] {
+        if value.trim().is_empty() {
+            return Err(ConfigError::InvalidValue {
+                field: format!("regions.{region_name}.export.haruki_3d.{field}"),
+                value: value.clone(),
+                expected: "a non-empty path".to_string(),
+            });
+        }
+    }
+    if haruki_3d.include.is_empty() {
+        return Err(ConfigError::InvalidValue {
+            field: format!("regions.{region_name}.export.haruki_3d.include"),
+            value: "[]".to_string(),
+            expected: "at least one include pattern".to_string(),
         });
     }
     Ok(())
@@ -1654,6 +1686,7 @@ pub struct RegionExportConfig {
     #[serde(default = "default_asset_studio_export_types")]
     pub asset_studio_types: Vec<String>,
     pub raw_bundles: Option<RawBundleExportConfig>,
+    pub haruki_3d: Haruki3dExportConfig,
     pub usm: UsmExportConfig,
     pub acb: AcbExportConfig,
     pub hca: HcaExportConfig,
@@ -1668,6 +1701,7 @@ impl Default for RegionExportConfig {
             by_category: false,
             asset_studio_types: default_asset_studio_export_types(),
             raw_bundles: None,
+            haruki_3d: Haruki3dExportConfig::default(),
             usm: UsmExportConfig::default(),
             acb: AcbExportConfig::default(),
             hca: HcaExportConfig::default(),
@@ -1684,6 +1718,36 @@ pub struct RawBundleExportConfig {
     pub output_dir: Option<String>,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Haruki3dExportConfig {
+    pub enabled: bool,
+    pub exporter_path: String,
+    pub master_dir: String,
+    pub staging_dir: String,
+    pub output_dir: String,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+    pub cleanup_staging_after_success: bool,
+    pub cleanup_staging_after_failure: bool,
+}
+
+impl Default for Haruki3dExportConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            exporter_path: String::new(),
+            master_dir: String::new(),
+            staging_dir: String::new(),
+            output_dir: String::new(),
+            include: Vec::new(),
+            exclude: Vec::new(),
+            cleanup_staging_after_success: true,
+            cleanup_staging_after_failure: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2202,6 +2266,39 @@ raw_bundles:
             vec!["^live_pv/model/characterv2/".to_string()]
         );
         assert_eq!(raw_bundles.exclude, vec!["/debug/".to_string()]);
+    }
+
+    #[test]
+    fn parses_haruki_3d_export_config() {
+        let yaml = r#"
+haruki_3d:
+  enabled: true
+  exporter_path: /app/bin/Haruki-3D-Exporter
+  master_dir: /app/data/masterdata
+  staging_dir: /app/data/3d-staging
+  output_dir: /app/data/assets/jp-assets/3d
+  include:
+    - ^live_pv/model/characterv2/
+  exclude:
+    - /debug/
+  cleanup_staging_after_success: true
+  cleanup_staging_after_failure: false
+"#;
+
+        let export: RegionExportConfig = yaml_serde::from_str(yaml).unwrap();
+
+        assert!(export.haruki_3d.enabled);
+        assert_eq!(
+            export.haruki_3d.exporter_path,
+            "/app/bin/Haruki-3D-Exporter"
+        );
+        assert_eq!(
+            export.haruki_3d.include,
+            vec!["^live_pv/model/characterv2/".to_string()]
+        );
+        assert_eq!(export.haruki_3d.exclude, vec!["/debug/".to_string()]);
+        assert!(export.haruki_3d.cleanup_staging_after_success);
+        assert!(!export.haruki_3d.cleanup_staging_after_failure);
     }
 
     #[test]
