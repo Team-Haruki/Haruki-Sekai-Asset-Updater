@@ -166,14 +166,15 @@ regions:
         enabled: false
         exporter_path: "/app/bin/Haruki-3D-Exporter"
         master_dir: "/app/data/masterdata"
-        staging_dir: "/app/data/3d-staging"
+        work_dir: "/app/data/3d-work"
+        manifest_file: "./Data/jp-assets/3d/haruki-3d-export-manifest.json"
         output_dir: "./Data/jp-assets/3d"
         include:
           - "^live_pv/model/characterv2/(body|face|head_optional)/"
           - "^live_pv/model/characterv2/color_variation/(body|face|head_optional)/"
         exclude: []
-        cleanup_staging_after_success: true
-        cleanup_staging_after_failure: false
+        cleanup_work_dir_after_success: true
+        cleanup_work_dir_after_failure: true
     upload:
       enabled: false
       providers: []

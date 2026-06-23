@@ -797,8 +797,8 @@ fn validate_haruki_3d_export_config(
     for (field, value) in [
         ("exporter_path", &haruki_3d.exporter_path),
         ("master_dir", &haruki_3d.master_dir),
-        ("staging_dir", &haruki_3d.staging_dir),
         ("output_dir", &haruki_3d.output_dir),
+        ("manifest_file", &haruki_3d.manifest_file),
     ] {
         if value.trim().is_empty() {
             return Err(ConfigError::InvalidValue {
@@ -807,6 +807,13 @@ fn validate_haruki_3d_export_config(
                 expected: "a non-empty path".to_string(),
             });
         }
+    }
+    if haruki_3d.work_dir.trim().is_empty() && haruki_3d.staging_dir.trim().is_empty() {
+        return Err(ConfigError::InvalidValue {
+            field: format!("regions.{region_name}.export.haruki_3d.work_dir"),
+            value: haruki_3d.work_dir.clone(),
+            expected: "a non-empty path".to_string(),
+        });
     }
     if haruki_3d.include.is_empty() {
         return Err(ConfigError::InvalidValue {
@@ -1726,10 +1733,14 @@ pub struct Haruki3dExportConfig {
     pub enabled: bool,
     pub exporter_path: String,
     pub master_dir: String,
+    pub work_dir: String,
+    pub manifest_file: String,
     pub staging_dir: String,
     pub output_dir: String,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
+    pub cleanup_work_dir_after_success: bool,
+    pub cleanup_work_dir_after_failure: bool,
     pub cleanup_staging_after_success: bool,
     pub cleanup_staging_after_failure: bool,
 }
@@ -1740,10 +1751,14 @@ impl Default for Haruki3dExportConfig {
             enabled: false,
             exporter_path: String::new(),
             master_dir: String::new(),
+            work_dir: String::new(),
+            manifest_file: String::new(),
             staging_dir: String::new(),
             output_dir: String::new(),
             include: Vec::new(),
             exclude: Vec::new(),
+            cleanup_work_dir_after_success: true,
+            cleanup_work_dir_after_failure: true,
             cleanup_staging_after_success: true,
             cleanup_staging_after_failure: false,
         }
@@ -2275,14 +2290,15 @@ haruki_3d:
   enabled: true
   exporter_path: /app/bin/Haruki-3D-Exporter
   master_dir: /app/data/masterdata
-  staging_dir: /app/data/3d-staging
+  work_dir: /app/data/3d-work
+  manifest_file: /app/data/3d/haruki-3d-export-manifest.json
   output_dir: /app/data/assets/jp-assets/3d
   include:
     - ^live_pv/model/characterv2/
   exclude:
     - /debug/
-  cleanup_staging_after_success: true
-  cleanup_staging_after_failure: false
+  cleanup_work_dir_after_success: true
+  cleanup_work_dir_after_failure: false
 "#;
 
         let export: RegionExportConfig = yaml_serde::from_str(yaml).unwrap();
@@ -2292,13 +2308,18 @@ haruki_3d:
             export.haruki_3d.exporter_path,
             "/app/bin/Haruki-3D-Exporter"
         );
+        assert_eq!(export.haruki_3d.work_dir, "/app/data/3d-work");
+        assert_eq!(
+            export.haruki_3d.manifest_file,
+            "/app/data/3d/haruki-3d-export-manifest.json"
+        );
         assert_eq!(
             export.haruki_3d.include,
             vec!["^live_pv/model/characterv2/".to_string()]
         );
         assert_eq!(export.haruki_3d.exclude, vec!["/debug/".to_string()]);
-        assert!(export.haruki_3d.cleanup_staging_after_success);
-        assert!(!export.haruki_3d.cleanup_staging_after_failure);
+        assert!(export.haruki_3d.cleanup_work_dir_after_success);
+        assert!(!export.haruki_3d.cleanup_work_dir_after_failure);
     }
 
     #[test]

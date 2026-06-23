@@ -158,6 +158,8 @@ pub struct ExecutionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobSnapshot {
     pub id: Uuid,
+    pub parent_job_id: Option<Uuid>,
+    pub kind: String,
     pub region: String,
     pub asset_version: Option<String>,
     pub asset_hash: Option<String>,
@@ -178,6 +180,11 @@ impl JobSnapshot {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
+            parent_job_id: None,
+            kind: match request.mode {
+                AssetUpdateMode::Update => "asset_update".to_string(),
+                AssetUpdateMode::PrefetchRawBundles => "raw_bundle_prefetch".to_string(),
+            },
             region: request.region.clone(),
             asset_version: request.asset_version.clone(),
             asset_hash: request.asset_hash.clone(),
