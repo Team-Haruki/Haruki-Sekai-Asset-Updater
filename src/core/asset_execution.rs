@@ -1634,9 +1634,9 @@ impl AssetExecutionContext {
                 RegionProviderConfig::Nuverse { .. } => detail.crc.to_string(),
                 RegionProviderConfig::ColorfulPalette { .. } => detail.hash.clone(),
             };
-            if !downloaded_assets
+            if downloaded_assets
                 .get(bundle_name)
-                .is_some_and(|existing| existing == &bundle_hash)
+                .is_none_or(|existing| existing != &bundle_hash)
             {
                 continue;
             }
@@ -2036,7 +2036,11 @@ mod tests {
             exporter_path: "/bin/true".to_string(),
             master_dir: "/data/master".to_string(),
             work_dir: temp.path().join("3d-work").to_string_lossy().into_owned(),
-            manifest_file: temp.path().join("manifest.json").to_string_lossy().into_owned(),
+            manifest_file: temp
+                .path()
+                .join("manifest.json")
+                .to_string_lossy()
+                .into_owned(),
             output_dir: temp.path().join("out").to_string_lossy().into_owned(),
             include: vec!["^live_pv/model/characterv2/".to_string()],
             exclude: Vec::new(),

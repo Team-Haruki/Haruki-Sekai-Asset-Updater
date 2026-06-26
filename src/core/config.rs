@@ -889,13 +889,12 @@ fn warn_media_fallback_backend_options(media: &MediaBackendConfig) {
 fn validate_asset_studio_ffi_read_kind(field: &str, value: &str) -> Result<(), ConfigError> {
     match value.trim().to_lowercase().as_str() {
         "auto" | "raw" | "typetree_json" | "image" | "image_archive" | "audio" | "video"
-        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx" => {
-            Ok(())
-        }
+        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx"
+        | "pjsk_model_package" | "pjsk_animation_clip_decoded" => Ok(()),
         other => Err(ConfigError::InvalidValue {
             field: field.to_string(),
             value: other.to_string(),
-            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, or fbx".to_string(),
+            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, fbx, pjsk_model_package, or pjsk_animation_clip_decoded".to_string(),
         }),
     }
 }
@@ -2218,6 +2217,22 @@ asset_studio:
     fn accepts_raw_rgba_asset_studio_ffi_image_format() {
         let mut config = AppConfig::default();
         config.backends.asset_studio.image_format = Some("raw_rgba".to_string());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn accepts_pjsk_asset_studio_ffi_read_kinds() {
+        let mut config = AppConfig::default();
+        config
+            .backends
+            .asset_studio
+            .read_kinds
+            .insert("Animator".to_string(), "pjsk_model_package".to_string());
+        config.backends.asset_studio.read_kinds.insert(
+            "AnimationClip".to_string(),
+            "pjsk_animation_clip_decoded".to_string(),
+        );
+
         config.validate().unwrap();
     }
 
