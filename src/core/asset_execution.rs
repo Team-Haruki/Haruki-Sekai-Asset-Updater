@@ -1583,41 +1583,83 @@ impl AssetExecutionContext {
             );
         }
 
-        let output = tokio::process::Command::new(&haruki_3d.exporter_path)
-            .arg("--emit-part-packages")
-            .arg("--master")
-            .arg(&haruki_3d.master_dir)
-            .arg("--asset-root")
-            .arg(&asset_root)
-            .arg("--out")
-            .arg(&haruki_3d.output_dir)
-            .arg("--manifest")
-            .arg(&haruki_3d.manifest_file)
-            .output()
-            .await
-            .map_err(|source| AssetExecutionError::Haruki3dExporterSpawn {
-                program: haruki_3d.exporter_path.clone(),
-                source,
-            })?;
+        let exporter_commands = Self::build_haruki_3d_exporter_commands(&haruki_3d, &asset_root);
 
-        if output.status.success() {
-            if haruki_3d.cleanup_work_dir_after_success {
-                Self::remove_haruki_3d_work_dir(&work_run_dir)?;
+        for args in exporter_commands {
+            let output = tokio::process::Command::new(&haruki_3d.exporter_path)
+                .args(&args)
+                .output()
+                .await
+                .map_err(|source| AssetExecutionError::Haruki3dExporterSpawn {
+                    program: haruki_3d.exporter_path.clone(),
+                    source,
+                })?;
+
+            if !output.status.success() {
+                if haruki_3d.cleanup_work_dir_after_failure {
+                    Self::remove_haruki_3d_work_dir(&work_run_dir)?;
+                }
+                return Err(AssetExecutionError::Haruki3dExporterFailed {
+                    program: haruki_3d.exporter_path.clone(),
+                    status: output.status.to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                });
             }
-            return Ok(Haruki3dExportSummary {
-                matched_bundles: tasks.len(),
-                downloaded_bundles: downloaded,
-            });
         }
 
-        if haruki_3d.cleanup_work_dir_after_failure {
+        if haruki_3d.cleanup_work_dir_after_success {
             Self::remove_haruki_3d_work_dir(&work_run_dir)?;
         }
-        Err(AssetExecutionError::Haruki3dExporterFailed {
-            program: haruki_3d.exporter_path.clone(),
-            status: output.status.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        Ok(Haruki3dExportSummary {
+            matched_bundles: tasks.len(),
+            downloaded_bundles: downloaded,
         })
+    }
+
+    fn build_haruki_3d_exporter_commands(
+        haruki_3d: &crate::core::config::Haruki3dExportConfig,
+        asset_root: &Path,
+    ) -> Vec<Vec<String>> {
+        let asset_root_arg = asset_root.to_string_lossy().to_string();
+        let mut exporter_commands = vec![
+            vec![
+                "--emit-costume-registries".to_string(),
+                "--master".to_string(),
+                haruki_3d.master_dir.clone(),
+                "--asset-root".to_string(),
+                asset_root_arg.clone(),
+                "--out".to_string(),
+                haruki_3d.output_dir.clone(),
+            ],
+            vec![
+                "--emit-part-packages".to_string(),
+                "--master".to_string(),
+                haruki_3d.master_dir.clone(),
+                "--asset-root".to_string(),
+                asset_root_arg.clone(),
+                "--out".to_string(),
+                haruki_3d.output_dir.clone(),
+                "--manifest".to_string(),
+                haruki_3d.manifest_file.clone(),
+            ],
+        ];
+        if !haruki_3d.role_character3d_ids.is_empty() {
+            let mut role_args = vec![
+                "--emit-role-runtimes".to_string(),
+                "--master".to_string(),
+                haruki_3d.master_dir.clone(),
+                "--asset-root".to_string(),
+                asset_root_arg,
+                "--out".to_string(),
+                haruki_3d.output_dir.clone(),
+            ];
+            for id in &haruki_3d.role_character3d_ids {
+                role_args.push("--role-character3d-id".to_string());
+                role_args.push(id.to_string());
+            }
+            exporter_commands.push(role_args);
+        }
+        exporter_commands
     }
 
     fn build_haruki_3d_tasks(
@@ -1928,6 +1970,7 @@ mod tests {
     use axum::Router;
     use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
     use std::collections::{BTreeMap, HashMap};
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -2118,6 +2161,35 @@ mod tests {
                 .join("6.0.9")
                 .join("AssetBundles")
         );
+    }
+
+    #[test]
+    fn haruki_3d_background_export_runs_registry_parts_and_role_runtimes() {
+        let config = crate::core::config::Haruki3dExportConfig {
+            master_dir: "/master".to_string(),
+            output_dir: "/runtime".to_string(),
+            manifest_file: "/runtime/manifest.json".to_string(),
+            role_character3d_ids: vec![5, 7],
+            ..crate::core::config::Haruki3dExportConfig::default()
+        };
+        let commands = AssetExecutionContext::build_haruki_3d_exporter_commands(
+            &config,
+            Path::new("/work/AssetBundles"),
+        );
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0][0], "--emit-costume-registries");
+        assert_eq!(commands[1][0], "--emit-part-packages");
+        assert_eq!(commands[2][0], "--emit-role-runtimes");
+        assert_eq!(
+            commands[2]
+                .iter()
+                .filter(|value| value.as_str() == "--role-character3d-id")
+                .count(),
+            2
+        );
+        assert!(commands[2].contains(&"5".to_string()));
+        assert!(commands[2].contains(&"7".to_string()));
     }
 
     #[test]

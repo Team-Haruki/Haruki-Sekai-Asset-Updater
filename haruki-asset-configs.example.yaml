@@ -55,7 +55,8 @@ backends:
       TextAsset: text_bytes
       MonoBehaviour: typetree_json
       AudioClip: audio
-      Animator: fbx
+      Animator: pjsk_model_package
+      AnimationClip: pjsk_animation_clip_decoded
       all: typetree_json
 
 resources:
@@ -147,6 +148,15 @@ regions:
         - ".*"
     export:
       by_category: false
+      asset_studio_types:
+        - monoBehaviour
+        - textAsset
+        - tex2d
+        - tex2dArray
+        - sprite
+        - audio
+        - animator
+        - AnimationClip
       usm:
         export: true
         decode: true
@@ -162,16 +172,34 @@ regions:
         direct_mp4: true
       audio:
         formats: ["mp3"] # wav | flac | mp3
+      raw_bundles:
+        output_dir: "./Data/jp-assets/AssetBundles"
+        include:
+          - "^live_pv/model/characterv2/body/"
+          - "^live_pv/model/characterv2/face/"
+          - "^live_pv/model/characterv2/head_optional/"
+          - "^live_pv/model/characterv2/color_variation/body/"
+          - "^live_pv/model/characterv2/color_variation/face/"
+          - "^live_pv/model/characterv2/color_variation/head_optional/"
+          - "^character/motion/costume_setting/"
+        exclude: []
       haruki_3d:
         enabled: false
         exporter_path: "/app/bin/Haruki-3D-Exporter"
-        master_dir: "/app/data/masterdata"
+        master_dir: "/app/data/haruki-sekai-master/master"
         work_dir: "/app/data/3d-work"
-        manifest_file: "./Data/jp-assets/3d/haruki-3d-export-manifest.json"
-        output_dir: "./Data/jp-assets/3d"
+        manifest_file: "/app/data/3d-output/haruki-3d-export-manifest.json"
+        output_dir: "/app/data/3d-output"
+        role_character3d_ids:
+          - 5
         include:
-          - "^live_pv/model/characterv2/(body|face|head_optional)/"
-          - "^live_pv/model/characterv2/color_variation/(body|face|head_optional)/"
+          - "^live_pv/model/characterv2/body/"
+          - "^live_pv/model/characterv2/face/"
+          - "^live_pv/model/characterv2/head_optional/"
+          - "^live_pv/model/characterv2/color_variation/body/"
+          - "^live_pv/model/characterv2/color_variation/face/"
+          - "^live_pv/model/characterv2/color_variation/head_optional/"
+          - "^character/motion/costume_setting/"
         exclude: []
         cleanup_work_dir_after_success: true
         cleanup_work_dir_after_failure: true

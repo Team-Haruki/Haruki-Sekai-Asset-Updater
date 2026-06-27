@@ -822,6 +822,17 @@ fn validate_haruki_3d_export_config(
             expected: "at least one include pattern".to_string(),
         });
     }
+    if let Some(value) = haruki_3d
+        .role_character3d_ids
+        .iter()
+        .find(|value| **value <= 0)
+    {
+        return Err(ConfigError::InvalidValue {
+            field: format!("regions.{region_name}.export.haruki_3d.role_character3d_ids"),
+            value: value.to_string(),
+            expected: "positive character3d ids".to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -1736,6 +1747,7 @@ pub struct Haruki3dExportConfig {
     pub manifest_file: String,
     pub staging_dir: String,
     pub output_dir: String,
+    pub role_character3d_ids: Vec<i64>,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub cleanup_work_dir_after_success: bool,
@@ -1754,6 +1766,7 @@ impl Default for Haruki3dExportConfig {
             manifest_file: String::new(),
             staging_dir: String::new(),
             output_dir: String::new(),
+            role_character3d_ids: Vec::new(),
             include: Vec::new(),
             exclude: Vec::new(),
             cleanup_work_dir_after_success: true,
@@ -2306,8 +2319,10 @@ haruki_3d:
   exporter_path: /app/bin/Haruki-3D-Exporter
   master_dir: /app/data/masterdata
   work_dir: /app/data/3d-work
-  manifest_file: /app/data/3d/haruki-3d-export-manifest.json
-  output_dir: /app/data/assets/jp-assets/3d
+  manifest_file: /app/data/3d-output/haruki-3d-export-manifest.json
+  output_dir: /app/data/3d-output
+  role_character3d_ids:
+    - 5
   include:
     - ^live_pv/model/characterv2/
   exclude:
@@ -2326,8 +2341,10 @@ haruki_3d:
         assert_eq!(export.haruki_3d.work_dir, "/app/data/3d-work");
         assert_eq!(
             export.haruki_3d.manifest_file,
-            "/app/data/3d/haruki-3d-export-manifest.json"
+            "/app/data/3d-output/haruki-3d-export-manifest.json"
         );
+        assert_eq!(export.haruki_3d.output_dir, "/app/data/3d-output");
+        assert_eq!(export.haruki_3d.role_character3d_ids, vec![5]);
         assert_eq!(
             export.haruki_3d.include,
             vec!["^live_pv/model/characterv2/".to_string()]
@@ -2335,6 +2352,99 @@ haruki_3d:
         assert_eq!(export.haruki_3d.exclude, vec!["/debug/".to_string()]);
         assert!(export.haruki_3d.cleanup_work_dir_after_success);
         assert!(!export.haruki_3d.cleanup_work_dir_after_failure);
+    }
+
+    #[test]
+    fn example_config_advertises_current_haruki_3d_pipeline_selectors() {
+        let config_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("haruki-asset-configs.example.yaml");
+        let config = AppConfig::load_from_path(config_path).unwrap();
+        let asset_studio = &config.backends.asset_studio;
+        assert_eq!(
+            asset_studio.read_kinds.get("Animator").map(String::as_str),
+            Some("pjsk_model_package")
+        );
+        assert_eq!(
+            asset_studio
+                .read_kinds
+                .get("AnimationClip")
+                .map(String::as_str),
+            Some("pjsk_animation_clip_decoded")
+        );
+
+        let jp = config.regions.get("jp").expect("jp region exists");
+        assert!(
+            jp.export
+                .asset_studio_types
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case("animator")),
+            "jp asset_studio_types should request Animator exports"
+        );
+        assert!(
+            jp.export
+                .asset_studio_types
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case("AnimationClip")),
+            "jp asset_studio_types should request AnimationClip exports"
+        );
+
+        let raw_bundles = jp
+            .export
+            .raw_bundles
+            .as_ref()
+            .expect("jp raw bundle retention configured");
+        for expected in [
+            "live_pv/model/characterv2/body/",
+            "live_pv/model/characterv2/face/",
+            "live_pv/model/characterv2/head_optional/",
+            "live_pv/model/characterv2/color_variation/body/",
+            "live_pv/model/characterv2/color_variation/face/",
+            "live_pv/model/characterv2/color_variation/head_optional/",
+            "character/motion/costume_setting/",
+        ] {
+            assert!(
+                raw_bundles
+                    .include
+                    .iter()
+                    .any(|value| value.contains(expected)),
+                "raw_bundles.include should retain {expected}"
+            );
+        }
+
+        let haruki_3d = &jp.export.haruki_3d;
+        assert!(
+            haruki_3d.master_dir.contains("haruki-sekai-master/master"),
+            "haruki_3d.master_dir should point at the upstream masterdata checkout"
+        );
+        assert!(
+            haruki_3d.output_dir.contains("3d-output"),
+            "haruki_3d.output_dir should point at a stable runtime root"
+        );
+        assert!(
+            haruki_3d.manifest_file.contains("3d-output"),
+            "haruki_3d.manifest_file should live beside the stable runtime root"
+        );
+        assert!(
+            haruki_3d.role_character3d_ids.contains(&5),
+            "haruki_3d.role_character3d_ids should include a v1 smoke role runtime"
+        );
+        for expected in [
+            "live_pv/model/characterv2/body/",
+            "live_pv/model/characterv2/face/",
+            "live_pv/model/characterv2/head_optional/",
+            "live_pv/model/characterv2/color_variation/body/",
+            "live_pv/model/characterv2/color_variation/face/",
+            "live_pv/model/characterv2/color_variation/head_optional/",
+            "character/motion/costume_setting/",
+        ] {
+            assert!(
+                haruki_3d
+                    .include
+                    .iter()
+                    .any(|value| value.contains(expected)),
+                "haruki_3d.include should stage {expected}"
+            );
+        }
     }
 
     #[test]
