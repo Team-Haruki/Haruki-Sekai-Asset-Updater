@@ -125,7 +125,7 @@ fn convert_usm_to_mp4_retries_after_command_failure() {
     write_executable_script(
         &script_path,
         format!(
-            "#!/bin/sh\nset -eu\nMARKER=\"{}\"\nif [ ! -f \"$MARKER\" ]; then\n  echo first > \"$MARKER\"\n  echo transient >&2\n  exit 1\nfi\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
+            "#!/bin/sh\nset -eu\nMARKER=\"{}\"\nif [ ! -f \"$MARKER\" ]; then\n  echo first > \"$MARKER\"\n  echo 'Connection reset by peer' >&2\n  exit 1\nfi\nout=\"\"\nfor arg in \"$@\"; do\n  out=\"$arg\"\ndone\n: > \"$out\"\n",
             marker_path.display()
         ),
     );
@@ -147,6 +147,43 @@ fn convert_usm_to_mp4_retries_after_command_failure() {
 
     assert!(marker_path.exists());
     assert!(output.exists());
+}
+
+#[test]
+fn convert_usm_to_mp4_does_not_retry_deterministic_failure() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("sample.usm");
+    let output = dir.path().join("sample.mp4");
+    let script_path = dir.path().join("fake_ffmpeg_fatal.sh");
+    let marker_path = dir.path().join("attempts.txt");
+    fs::write(&input, b"dummy").unwrap();
+    // Always fails with a deterministic (non-transient) error, recording each invocation.
+    write_executable_script(
+        &script_path,
+        format!(
+            "#!/bin/sh\nset -eu\necho x >> \"{}\"\necho 'Invalid data found when processing input' >&2\nexit 1\n",
+            marker_path.display()
+        ),
+    );
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(convert_usm_to_mp4_with_backend(
+        &input,
+        &output,
+        &script_path.to_string_lossy(),
+        MediaBackend::Cli,
+        &RetryConfig {
+            attempts: 3,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        },
+    ));
+
+    assert!(result.is_err());
+    // A deterministic failure must run exactly once (no wasted retries).
+    let attempts = fs::read_to_string(&marker_path).unwrap();
+    assert_eq!(attempts.lines().count(), 1);
+    assert!(!output.exists());
 }
 
 #[test]

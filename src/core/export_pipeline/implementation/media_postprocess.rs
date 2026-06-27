@@ -1126,7 +1126,8 @@ pub(super) fn handle_acb_files_streaming(
         "post_process.acb.hca_tracks_wall",
         hca_started,
     );
-    merged.generated_files = results.lock().unwrap().clone();
+    // Workers have joined, so this holds the only reference; move the vec out instead of cloning.
+    merged.generated_files = std::mem::take(&mut *results.lock().unwrap());
 
     for source_file in source_files.lock().unwrap().iter() {
         let phase_started = Instant::now();
@@ -1431,7 +1432,8 @@ pub(super) fn process_hca_tracks(
     if let Some(err) = first_error.lock().unwrap().take() {
         return Err(err);
     }
-    output.generated_files = results.lock().unwrap().clone();
+    // Workers have joined, so this holds the only reference; move the vec out instead of cloning.
+    output.generated_files = std::mem::take(&mut *results.lock().unwrap());
     merge_raw_phase_ms(&mut output.phase_ms, &phase_ms.lock().unwrap());
     Ok(output)
 }

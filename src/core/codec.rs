@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::core::errors::CodecError;
 
-pub const CODEC_BACKEND: &str = "crates.io:cridecoder@0.2.3";
+pub const CODEC_BACKEND: &str = "crates.io:cridecoder@0.3.3";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CodecSummary {

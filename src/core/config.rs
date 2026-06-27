@@ -184,10 +184,40 @@ impl AppConfig {
             validate_asset_studio_ffi_image_format(image_format)?;
         }
         validate_image_backend(&self.backends.image)?;
+        // Enabling auth without any credential is fail-open (every request authorized). Reject it
+        // so a misconfiguration can't silently disable protection on the mutating endpoints.
+        if self.server.auth.enabled {
+            let has_credential = self
+                .server
+                .auth
+                .bearer_token
+                .as_deref()
+                .is_some_and(|token| !token.is_empty())
+                || self
+                    .server
+                    .auth
+                    .user_agent_prefix
+                    .as_deref()
+                    .is_some_and(|prefix| !prefix.is_empty());
+            if !has_credential {
+                return Err(ConfigError::InvalidValue {
+                    field: "server.auth".to_string(),
+                    value: "enabled=true with no credentials".to_string(),
+                    expected: "a non-empty bearer_token or user_agent_prefix when auth is enabled"
+                        .to_string(),
+                });
+            }
+        }
         for (region_name, region) in &self.regions {
             validate_image_export_config(region_name, &region.export.images)?;
             validate_video_export_config(region_name, &region.export.video)?;
             validate_audio_export_config(region_name, &region.export.audio)?;
+            // Fail fast on bad crypto material / filter regexes for regions that are actually in
+            // use, instead of blowing up mid-job at decrypt or silently dropping a typo'd filter.
+            if region.enabled {
+                validate_region_crypto(region_name, &region.crypto)?;
+                validate_region_filter_regexes(region_name, region)?;
+            }
         }
         validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
         warn_media_fallback_backend_options(&self.backends.media);
@@ -481,8 +511,14 @@ fn expand_env_references_in_string(raw: &str) -> Result<Option<String>, ConfigEr
         expanded.push_str(&raw[cursor..start]);
         let name_start = start + "${env:".len();
         let Some(relative_end) = raw[name_start..].find('}') else {
-            expanded.push_str(&raw[start..]);
-            return Ok(Some(expanded));
+            // An unclosed `${env:` is almost always a typo (e.g. a missing `}` on a secret field).
+            // Failing loudly beats silently treating it as a literal value, which would surface
+            // later as a confusing hex/decrypt error.
+            return Err(ConfigError::InvalidValue {
+                field: "config file".to_string(),
+                value: "${env:...".to_string(),
+                expected: "a closed ${env:VAR} reference (missing closing '}')".to_string(),
+            });
         };
         let end = name_start + relative_end;
         let name = raw[name_start..end].trim();
@@ -708,6 +744,89 @@ fn parse_cpu_ratio_env(field: &str, value: &str) -> Result<f64, ConfigError> {
             value: trimmed.to_string(),
             expected: "a number greater than 0 and less than or equal to 1".to_string(),
         })
+}
+
+fn validate_region_crypto(region_name: &str, crypto: &CryptoConfig) -> Result<(), ConfigError> {
+    if let Some(key_hex) = &crypto.aes_key_hex {
+        validate_aes_hex(
+            &format!("regions.{region_name}.crypto.aes_key_hex"),
+            key_hex,
+            &[16, 24, 32],
+        )?;
+    }
+    if let Some(iv_hex) = &crypto.aes_iv_hex {
+        validate_aes_hex(
+            &format!("regions.{region_name}.crypto.aes_iv_hex"),
+            iv_hex,
+            &[16],
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_aes_hex(
+    field: &str,
+    value: &str,
+    allowed_lengths: &[usize],
+) -> Result<(), ConfigError> {
+    let bytes = hex::decode(value).map_err(|_| ConfigError::InvalidValue {
+        field: field.to_string(),
+        value: "<redacted>".to_string(),
+        expected: "a valid hexadecimal string".to_string(),
+    })?;
+    if !allowed_lengths.contains(&bytes.len()) {
+        return Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: format!("{} byte(s)", bytes.len()),
+            expected: format!("hex decoding to one of {allowed_lengths:?} bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_region_filter_regexes(
+    region_name: &str,
+    region: &RegionConfig,
+) -> Result<(), ConfigError> {
+    let filters = &region.filters;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.start_app"),
+        &filters.start_app,
+    )?;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.on_demand"),
+        &filters.on_demand,
+    )?;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.skip"),
+        &filters.skip,
+    )?;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.priority"),
+        &filters.priority,
+    )?;
+    if let Some(raw_bundles) = &region.export.raw_bundles {
+        validate_regex_patterns(
+            &format!("regions.{region_name}.export.raw_bundles.include"),
+            &raw_bundles.include,
+        )?;
+        validate_regex_patterns(
+            &format!("regions.{region_name}.export.raw_bundles.exclude"),
+            &raw_bundles.exclude,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_regex_patterns(field: &str, patterns: &[String]) -> Result<(), ConfigError> {
+    for pattern in patterns {
+        regex::Regex::new(pattern).map_err(|source| ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: pattern.clone(),
+            expected: format!("a valid regular expression ({source})"),
+        })?;
+    }
+    Ok(())
 }
 
 fn normalize_asset_studio_ffi_image_format(value: &str) -> Result<String, ConfigError> {
@@ -1216,6 +1335,12 @@ pub struct ExecutionConfig {
     /// record to disk mid-run.  Set to `0` to disable mid-run flushing (record
     /// is only written once at the end).  Mirrors Go's `batchSaveSize`.
     pub batch_save_size: usize,
+    /// Maximum number of jobs whose heavy download/export pipeline may run at once. Extra jobs are
+    /// accepted (HTTP 202) but queue for a slot instead of all running concurrently. `0` = no limit.
+    pub max_concurrent_jobs: usize,
+    /// Cap on retained terminal (Completed/Failed/Cancelled) job snapshots kept in memory for the
+    /// jobs API. Oldest terminal jobs are evicted beyond this. `0` = keep all (unbounded).
+    pub retain_terminal_jobs: usize,
     pub retry: RetryConfig,
 }
 
@@ -1226,6 +1351,8 @@ impl Default for ExecutionConfig {
             allow_cancel: true,
             max_in_flight_bundle_bytes: 0,
             batch_save_size: 50,
+            max_concurrent_jobs: 4,
+            retain_terminal_jobs: 256,
             retry: RetryConfig::default(),
         }
     }

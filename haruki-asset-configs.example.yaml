@@ -27,6 +27,8 @@ execution:
   timeout_seconds: 300
   allow_cancel: true
   batch_save_size: 50
+  max_concurrent_jobs: 4 # max jobs running the heavy pipeline at once; extra jobs queue. 0 = unlimited
+  retain_terminal_jobs: 256 # cap on retained finished job snapshots in memory. 0 = keep all
   retry:
     attempts: 4
     initial_backoff_ms: 1000

@@ -44,3 +44,37 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --workspace
+
+  rust-media-ffi:
+    name: Rust checks (media-ffi)
+    runs-on: ubuntu-latest
+    # Mirror the Dockerfile's build environment (Debian trixie ships the ffmpeg 7.x dev libs that
+    # rsmpeg's `ffmpeg7_1` feature needs) so the production media-ffi path is actually compiled,
+    # clippy'd and tested in CI instead of only inside the Docker build.
+    container: debian:trixie-slim
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl clang pkg-config build-essential git \
+            libavcodec-dev libavdevice-dev libavformat-dev \
+            libavutil-dev libswresample-dev libswscale-dev
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy (media-ffi)
+        run: cargo clippy --locked --workspace --all-targets --features haruki-sekai-asset-updater/media-ffi -- -D warnings
+
+      - name: Run tests (media-ffi)
+        run: cargo test --locked --workspace --features haruki-sekai-asset-updater/media-ffi

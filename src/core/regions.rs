@@ -8,9 +8,11 @@ pub fn select_region<'a>(
     config: &'a AppConfig,
     name: &str,
 ) -> Result<&'a RegionConfig, RegionError> {
+    // Configured region keys are forced lowercase by AppConfig::validate(); normalize the
+    // requested name so callers can send "JP"/"Jp" without hitting a spurious NotFound.
     let region = config
         .regions
-        .get(name)
+        .get(&name.to_ascii_lowercase())
         .ok_or_else(|| RegionError::NotFound(name.to_string()))?;
     if !region.enabled {
         return Err(RegionError::Disabled(name.to_string()));

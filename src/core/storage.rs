@@ -210,12 +210,14 @@ async fn upload_single_file(
     let content_type = mime_guess::from_path(file_path)
         .first_or_octet_stream()
         .to_string();
-    let content = tokio::fs::read(file_path)
-        .await
-        .map_err(|source| StorageError::Io {
+    // Hold the body as an opendal `Buffer` (refcounted) so the per-retry clone below is a cheap
+    // pointer bump instead of a full second copy of the (potentially tens-of-MB) file.
+    let content = opendal::Buffer::from(tokio::fs::read(file_path).await.map_err(|source| {
+        StorageError::Io {
             path: file_path.to_path_buf(),
             source,
-        })?;
+        }
+    })?);
 
     retry_async(
         retry,
