@@ -46,7 +46,7 @@ jobs:
             archive: zip
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -202,7 +202,7 @@ jobs:
 
       - name: Checkout AssetStudio
         if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: Team-Haruki/AssetStudio
           ref: ${{ needs.assetstudio-revision.outputs.sha }}
