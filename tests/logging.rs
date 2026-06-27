@@ -128,11 +128,19 @@ async fn binary_writes_main_and_access_logs_to_files() {
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Close client connections before signaling so the server's graceful shutdown isn't blocked
+    // waiting on idle keep-alive connections held open by the pooled reqwest client.
+    drop(client);
+
     #[cfg(unix)]
-    {
+    let pid = child.id();
+
+    #[cfg(unix)]
+    if let Some(pid) = pid {
         let _ = Command::new("kill")
             .arg("-TERM")
-            .arg(child.id().expect("child pid").to_string())
+            .arg(pid.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -142,7 +150,26 @@ async fn binary_writes_main_and_access_logs_to_files() {
     {
         let _ = child.kill().await;
     }
-    let output = child.wait_with_output().await.unwrap();
+
+    // Bound the wait so a server that refuses to terminate fails the test (and CI) fast instead of
+    // hanging indefinitely.
+    let output = match tokio::time::timeout(Duration::from_secs(15), child.wait_with_output()).await
+    {
+        Ok(result) => result.unwrap(),
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(pid) = pid {
+                let _ = Command::new("kill")
+                    .arg("-KILL")
+                    .arg(pid.to_string())
+                    .status()
+                    .await;
+            }
+            panic!(
+                "server did not exit within 15s of the shutdown signal (possible shutdown hang)"
+            );
+        }
+    };
 
     let main_contents = fs::read_to_string(&main_log).unwrap();
     let access_contents = fs::read_to_string(&access_log).unwrap();
