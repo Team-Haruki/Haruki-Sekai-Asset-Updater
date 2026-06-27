@@ -343,6 +343,36 @@ pub enum AssetExecutionError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to create Haruki 3D staging directory for {path}: {source}")]
+    CreateHaruki3dStagingDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write Haruki 3D staging bundle {path}: {source}")]
+    WriteHaruki3dStagingBundle {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to remove Haruki 3D staging directory {path}: {source}")]
+    RemoveHaruki3dStagingDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to spawn Haruki 3D exporter `{program}`: {source}")]
+    Haruki3dExporterSpawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Haruki 3D exporter `{program}` failed with status {status}: {stderr}")]
+    Haruki3dExporterFailed {
+        program: String,
+        status: String,
+        stderr: String,
+    },
     #[error("failed to read temp file {path}: {source}")]
     ReadTempFile {
         path: PathBuf,

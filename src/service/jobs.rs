@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -20,6 +20,8 @@ use crate::core::regions::{build_url_preview, select_region};
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct JobListEntry {
     pub id: Uuid,
+    pub parent_job_id: Option<Uuid>,
+    pub kind: String,
     pub region: String,
     pub status: JobStatus,
     pub dry_run: bool,
@@ -54,6 +56,7 @@ pub struct JobManager {
     /// Per-region locks serializing execution so concurrent same-region jobs can't clobber each
     /// other's download record (lost updates) or share a temp path mid-export.
     region_locks: RegionLockMap,
+    haruki_3d_active: Arc<RwLock<HashSet<String>>>,
 }
 
 impl JobManager {
@@ -68,6 +71,7 @@ impl JobManager {
             cancel_flags: Arc::new(RwLock::new(HashMap::new())),
             job_semaphore,
             region_locks: Arc::new(RwLock::new(HashMap::new())),
+            haruki_3d_active: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -113,6 +117,8 @@ impl JobManager {
             .values()
             .map(|job| JobListEntry {
                 id: job.id,
+                parent_job_id: job.parent_job_id,
+                kind: job.kind.clone(),
                 region: job.region.clone(),
                 status: job.status.clone(),
                 dry_run: job.dry_run,
@@ -187,6 +193,7 @@ impl JobManager {
         let cancel_flags = self.cancel_flags.clone();
         let job_semaphore = self.job_semaphore.clone();
         let region_locks = self.region_locks.clone();
+        let haruki_3d_active = self.haruki_3d_active.clone();
 
         tokio::spawn(async move {
             let cancel_flag = {
@@ -412,6 +419,19 @@ impl JobManager {
                                     remove_cancel_flag(&cancel_flags, id).await;
                                     return;
                                 }
+                                if request.mode == AssetUpdateMode::Update
+                                    && region.export.haruki_3d.enabled
+                                {
+                                    spawn_haruki_3d_child_job(
+                                        jobs.clone(),
+                                        cancel_flags.clone(),
+                                        haruki_3d_active.clone(),
+                                        config.clone(),
+                                        id,
+                                        request.clone(),
+                                    )
+                                    .await;
+                                }
                                 None
                             }
                             Ok(Err(AssetExecutionError::Cancelled)) => {
@@ -475,6 +495,124 @@ async fn finish_failed(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid,
     } else {
         error!(job_id = %id, error = %message, "job failed");
     }
+}
+
+async fn spawn_haruki_3d_child_job(
+    jobs: Arc<RwLock<HashMap<Uuid, JobSnapshot>>>,
+    cancel_flags: Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>,
+    haruki_3d_active: Arc<RwLock<HashSet<String>>>,
+    config: Arc<AppConfig>,
+    parent_id: Uuid,
+    request: AssetUpdateRequest,
+) {
+    let mut child = JobSnapshot::new(&request);
+    child.parent_job_id = Some(parent_id);
+    child.kind = "haruki_3d_export".to_string();
+    child.message = "Haruki 3D export queued".to_string();
+    let child_id = child.id;
+    {
+        let mut job_map = jobs.write().await;
+        job_map.insert(child_id, child);
+    }
+    {
+        let mut flags = cancel_flags.write().await;
+        flags.insert(child_id, Arc::new(AtomicBool::new(false)));
+    }
+
+    tokio::spawn(async move {
+        let active_key = match select_region(&config, &request.region) {
+            Ok(region) => format!(
+                "{}:{}",
+                request.region,
+                if region.export.haruki_3d.work_dir.trim().is_empty() {
+                    &region.export.haruki_3d.staging_dir
+                } else {
+                    &region.export.haruki_3d.work_dir
+                }
+            ),
+            Err(err) => {
+                finish_failed(&jobs, child_id, err.to_string()).await;
+                remove_cancel_flag(&cancel_flags, child_id).await;
+                return;
+            }
+        };
+        {
+            let mut active = haruki_3d_active.write().await;
+            if !active.insert(active_key.clone()) {
+                let mut job_map = jobs.write().await;
+                if let Some(job) = job_map.get_mut(&child_id) {
+                    job.status = JobStatus::Completed;
+                    let message =
+                        "Haruki 3D export skipped; another export is already running".to_string();
+                    job.message = message.clone();
+                    push_progress_event(job, JobPhase::Completed, message);
+                    job.updated_at = chrono::Utc::now();
+                }
+                remove_cancel_flag(&cancel_flags, child_id).await;
+                return;
+            }
+        }
+        let cancel_flag = {
+            let flags = cancel_flags.read().await;
+            flags.get(&child_id).cloned()
+        };
+        {
+            let mut job_map = jobs.write().await;
+            if let Some(job) = job_map.get_mut(&child_id) {
+                job.status = JobStatus::Running;
+                job.message = "Haruki 3D export running".to_string();
+                push_progress_event(
+                    job,
+                    JobPhase::PlanningDownloads,
+                    "Haruki 3D export running".to_string(),
+                );
+                job.updated_at = chrono::Utc::now();
+            }
+        }
+
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let progress_task = tokio::spawn(progress_consumer(jobs.clone(), child_id, progress_rx));
+        let result = async {
+            let region = select_region(&config, &request.region)?.clone();
+            let executor = AssetExecutionContext::new(&config, &request.region, &region, &request)?;
+            executor
+                .run_haruki_3d_background_export(&config, Some(progress_tx), cancel_flag.clone())
+                .await
+        }
+        .await;
+        let _ = progress_task.await;
+
+        match result {
+            Ok(summary) => {
+                let mut job_map = jobs.write().await;
+                if let Some(job) = job_map.get_mut(&child_id) {
+                    if job.status == JobStatus::Cancelled {
+                        job.updated_at = chrono::Utc::now();
+                    } else {
+                        job.status = JobStatus::Completed;
+                        let message = format!(
+                            "Haruki 3D export completed; matched {} bundle(s), downloaded {} bundle(s)",
+                            summary.matched_bundles, summary.downloaded_bundles
+                        );
+                        job.message = message.clone();
+                        push_progress_event(job, JobPhase::Completed, message);
+                        job.updated_at = chrono::Utc::now();
+                    }
+                }
+            }
+            Err(AssetExecutionError::Cancelled) => {
+                finish_cancelled(&jobs, child_id, "Haruki 3D export cancelled".to_string()).await;
+            }
+            Err(err) => {
+                finish_failed(&jobs, child_id, err.to_string()).await;
+            }
+        }
+        {
+            let mut active = haruki_3d_active.write().await;
+            active.remove(&active_key);
+        }
+        remove_cancel_flag(&cancel_flags, child_id).await;
+    });
 }
 
 async fn finish_cancelled(
