@@ -61,6 +61,35 @@ RUN cd AssetStudio/AssetStudioFFI && \
     -p:PublishAot=true \
     -p:InvariantGlobalization=true
 
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS haruki-3d-exporter-builder
+ARG HARUKI_3D_EXPORTER_REPOSITORY=https://github.com/storyxy3/Haruki-3D-Exporter.git
+ARG HARUKI_3D_EXPORTER_BRANCH=main
+ARG ASSETSTUDIO_REPOSITORY=https://github.com/Team-Haruki/AssetStudio.git
+ARG ASSETSTUDIO_BRANCH=sekai-modified
+ENV DEBIAN_FRONTEND=noninteractive \
+    ASSETSTUDIO_REPOSITORY=${ASSETSTUDIO_REPOSITORY} \
+    ASSETSTUDIO_BRANCH=${ASSETSTUDIO_BRANCH} \
+    ASSETSTUDIO_ROOT=/src/AssetStudio
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    clang \
+    zlib1g-dev \
+    binutils && \
+    rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --single-branch --branch "${ASSETSTUDIO_BRANCH}" "${ASSETSTUDIO_REPOSITORY}" AssetStudio
+RUN git clone --depth 1 --single-branch --branch "${HARUKI_3D_EXPORTER_BRANCH}" "${HARUKI_3D_EXPORTER_REPOSITORY}" Haruki-3D-Exporter
+RUN cd Haruki-3D-Exporter && \
+    dotnet restore \
+        -p:AssetStudioRoot="${ASSETSTUDIO_ROOT}" \
+        -p:RestoreConfigFile=NuGet.Config && \
+    dotnet publish -c Release -o /app/haruki-3d-exporter \
+        --no-restore \
+        -p:AssetStudioRoot="${ASSETSTUDIO_ROOT}"
+
+FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim AS dotnet-runtime
+
 FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -87,7 +116,12 @@ WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
 COPY --from=builder /app/target/release/assetstudio_ffi_worker /app/assetstudio_ffi_worker
 COPY --from=assetstudio-builder /app/assetstudio-ffi /app/assetstudio
-RUN mkdir -p logs
+COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
+COPY --from=dotnet-runtime /usr/bin/dotnet /usr/bin/dotnet
+COPY --from=haruki-3d-exporter-builder /app/haruki-3d-exporter /app/bin/haruki-3d-exporter
+RUN mkdir -p logs && \
+    printf '#!/bin/sh\nexec dotnet /app/bin/haruki-3d-exporter/Haruki-3D-Exporter.dll "$@"\n' > /app/bin/Haruki-3D-Exporter && \
+    chmod +x /app/bin/Haruki-3D-Exporter
 
 ENV TZ=Asia/Shanghai \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true \
