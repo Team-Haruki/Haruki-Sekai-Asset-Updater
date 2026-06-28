@@ -21,8 +21,13 @@ fn dockerfile_bundles_haruki_3d_exporter_binary() {
         "Dockerfile should install the exporter executable at the config default path"
     );
     assert!(
-        dockerfile.contains("FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim AS dotnet-runtime"),
+        dockerfile
+            .contains("FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim AS dotnet-runtime"),
         "Dockerfile should source the .NET runtime from the official runtime image"
+    );
+    assert!(
+        dockerfile.contains("bash scripts/prepare-assetstudio.sh"),
+        "Dockerfile should use the exporter's AssetStudio preparation script before restore"
     );
     assert!(
         dockerfile.contains("COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet"),

@@ -80,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --single-branch --branch "${ASSETSTUDIO_BRANCH}" "${ASSETSTUDIO_REPOSITORY}" AssetStudio
 RUN git clone --depth 1 --single-branch --branch "${HARUKI_3D_EXPORTER_BRANCH}" "${HARUKI_3D_EXPORTER_REPOSITORY}" Haruki-3D-Exporter
+RUN cd Haruki-3D-Exporter && bash scripts/prepare-assetstudio.sh
 RUN cd Haruki-3D-Exporter && \
     dotnet restore \
         -p:AssetStudioRoot="${ASSETSTUDIO_ROOT}" \
