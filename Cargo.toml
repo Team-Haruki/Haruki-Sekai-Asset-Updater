@@ -15,7 +15,7 @@ axum = { version = "0.8", features = ["macros", "json"] }
 cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.6", features = ["derive"] }
-cridecoder = "0.2.3"
+cridecoder = "0.3.3"
 haruki-assetstudio-ffi = { path = "crates/assetstudio-ffi" }
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
