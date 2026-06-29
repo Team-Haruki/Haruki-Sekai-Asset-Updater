@@ -89,7 +89,7 @@ RUN cd Haruki-3D-Exporter && \
         --no-restore \
         -p:AssetStudioRoot="${ASSETSTUDIO_ROOT}"
 
-FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim AS dotnet-runtime
+FROM mcr.microsoft.com/dotnet/runtime:9.0-bookworm-slim AS dotnet-runtime
 
 FROM debian:trixie-slim
 
