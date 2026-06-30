@@ -185,7 +185,7 @@ regions:
         exclude: []
       haruki_3d:
         enabled: false
-        exporter_path: "/app/bin/Haruki-3D-Exporter"
+        exporter_path: "/app/haruki-3d/exporter/Haruki-3D-Exporter"
         master_dir: "/app/data/haruki-sekai-master/master"
         work_dir: "/app/data/3d-work"
         manifest_file: "/app/data/3d-output/haruki-3d-export-manifest.json"

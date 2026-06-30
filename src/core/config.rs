@@ -2316,7 +2316,7 @@ raw_bundles:
         let yaml = r#"
 haruki_3d:
   enabled: true
-  exporter_path: /app/bin/Haruki-3D-Exporter
+  exporter_path: /app/haruki-3d/exporter/Haruki-3D-Exporter
   master_dir: /app/data/masterdata
   work_dir: /app/data/3d-work
   manifest_file: /app/data/3d-output/haruki-3d-export-manifest.json
@@ -2336,7 +2336,7 @@ haruki_3d:
         assert!(export.haruki_3d.enabled);
         assert_eq!(
             export.haruki_3d.exporter_path,
-            "/app/bin/Haruki-3D-Exporter"
+            "/app/haruki-3d/exporter/Haruki-3D-Exporter"
         );
         assert_eq!(export.haruki_3d.work_dir, "/app/data/3d-work");
         assert_eq!(

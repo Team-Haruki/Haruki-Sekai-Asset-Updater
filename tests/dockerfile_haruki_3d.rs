@@ -1,56 +1,44 @@
 use std::fs;
 
 #[test]
-fn dockerfile_bundles_haruki_3d_exporter_binary() {
+fn dockerfile_keeps_haruki_3d_exporter_external() {
     let dockerfile = fs::read_to_string("Dockerfile").expect("Dockerfile should be readable");
 
     assert!(
-        dockerfile.contains("AS haruki-3d-exporter-builder"),
-        "Dockerfile should build Haruki-3D-Exporter in a dedicated stage"
+        !dockerfile.contains("AS haruki-3d-exporter-builder"),
+        "default Docker image should not build Haruki-3D-Exporter"
     );
     assert!(
-        dockerfile.contains("HARUKI_3D_EXPORTER_REPOSITORY"),
-        "Dockerfile should allow CI to choose the exporter repository"
+        !dockerfile.contains("HARUKI_3D_EXPORTER_REPOSITORY"),
+        "default Docker image should not clone the exporter repository"
     );
     assert!(
-        dockerfile.contains("HARUKI_3D_EXPORTER_BRANCH"),
-        "Dockerfile should allow CI to choose the exporter branch or tag"
-    );
-    assert!(
-        dockerfile.contains("/app/bin/Haruki-3D-Exporter"),
-        "Dockerfile should install the exporter executable at the config default path"
-    );
-    assert!(
-        dockerfile
+        !dockerfile
             .contains("FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim AS dotnet-runtime"),
-        "Dockerfile should source the .NET runtime from the official runtime image"
+        "default Docker image should not bundle the .NET runtime for exporter use"
     );
     assert!(
-        dockerfile.contains("bash scripts/prepare-assetstudio.sh"),
-        "Dockerfile should use the exporter's AssetStudio preparation script before restore"
+        !dockerfile.contains("/app/bin/Haruki-3D-Exporter"),
+        "default Docker image should not install an exporter wrapper"
     );
     assert!(
-        dockerfile.contains("COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet"),
-        "final image should copy the .NET runtime needed by the exporter"
-    );
-    assert!(
-        dockerfile.contains("COPY --from=haruki-3d-exporter-builder"),
-        "final image should copy the exporter output from the exporter build stage"
-    );
-    assert!(
-        !dockerfile.contains("dotnet-runtime-8.0"),
-        "final image should not depend on Debian trixie carrying the dotnet runtime package"
+        !dockerfile.contains("COPY --from=haruki-3d-exporter-builder"),
+        "default Docker image should not copy exporter output into the updater image"
     );
 }
 
 #[test]
-fn example_config_matches_bundled_exporter_path() {
+fn example_config_uses_external_haruki_3d_exporter_path() {
     let config = fs::read_to_string("haruki-asset-configs.example.yaml")
         .expect("example config should be readable");
 
     assert!(
-        config.contains("exporter_path: \"/app/bin/Haruki-3D-Exporter\""),
-        "example config should point at the exporter path installed by Dockerfile"
+        config.contains("enabled: false"),
+        "Haruki 3D export should stay disabled by default"
+    );
+    assert!(
+        config.contains("exporter_path: \"/app/haruki-3d/exporter/Haruki-3D-Exporter\""),
+        "example config should point at an externally mounted exporter"
     );
     assert!(
         config.contains("work_dir: \"/app/data/3d-work\""),
