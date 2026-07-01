@@ -1747,6 +1747,7 @@ pub struct Haruki3dExportConfig {
     pub manifest_file: String,
     pub staging_dir: String,
     pub output_dir: String,
+    pub process_concurrency: usize,
     pub role_character3d_ids: Vec<i64>,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
@@ -1766,6 +1767,7 @@ impl Default for Haruki3dExportConfig {
             manifest_file: String::new(),
             staging_dir: String::new(),
             output_dir: String::new(),
+            process_concurrency: 0,
             role_character3d_ids: Vec::new(),
             include: Vec::new(),
             exclude: Vec::new(),
@@ -2321,6 +2323,7 @@ haruki_3d:
   work_dir: /app/data/3d-work
   manifest_file: /app/data/3d-output/haruki-3d-export-manifest.json
   output_dir: /app/data/3d-output
+  process_concurrency: 16
   role_character3d_ids:
     - 5
   include:
@@ -2344,6 +2347,7 @@ haruki_3d:
             "/app/data/3d-output/haruki-3d-export-manifest.json"
         );
         assert_eq!(export.haruki_3d.output_dir, "/app/data/3d-output");
+        assert_eq!(export.haruki_3d.process_concurrency, 16);
         assert_eq!(export.haruki_3d.role_character3d_ids, vec![5]);
         assert_eq!(
             export.haruki_3d.include,
@@ -2427,6 +2431,10 @@ haruki_3d:
         assert!(
             haruki_3d.role_character3d_ids.contains(&5),
             "haruki_3d.role_character3d_ids should include a v1 smoke role runtime"
+        );
+        assert_eq!(
+            haruki_3d.process_concurrency, 0,
+            "haruki_3d.process_concurrency should default to exporter auto in the example config"
         );
         for expected in [
             "live_pv/model/characterv2/body/",
