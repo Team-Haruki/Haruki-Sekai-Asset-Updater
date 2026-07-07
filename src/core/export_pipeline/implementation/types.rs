@@ -2,8 +2,6 @@ use super::*;
 
 pub(super) const NATIVE_AOT_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";
 pub(super) const NATIVE_AOT_IMAGE_SURROGATE_FORMAT: &str = "bmp";
-#[allow(dead_code)]
-pub(super) const NATIVE_AOT_FAST_IMAGE_FORMAT: &str = NATIVE_AOT_DEFAULT_IMAGE_FORMAT;
 pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC: &[u8] = b"HARUKI_ASSET_PAYLOAD_BUNDLE_V1";
 pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC: u32 = 0x4250_4148; // HAPB
 pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION: u16 = 2;
@@ -198,11 +196,7 @@ pub(super) struct NativeObjectReadBatchParseOutput {
     pub(super) payload_data_bytes: u64,
     pub(super) failed_count: usize,
     pub(super) read_payload_ms: u64,
-    pub(super) worker_id: Option<String>,
-    pub(super) call_seq: Option<u64>,
     pub(super) phase_ms: HashMap<String, u64>,
-    pub(super) asset_type_counts: HashMap<String, usize>,
     pub(super) payload_kind_counts: HashMap<String, usize>,
     pub(super) payload_bytes_by_kind: HashMap<String, u64>,
-    pub(super) phase_stats: HashMap<String, NativeBatchPhaseStats>,
 }

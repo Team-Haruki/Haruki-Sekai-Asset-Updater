@@ -1176,6 +1176,7 @@ pub struct BackendsConfig {
 #[serde(default)]
 pub struct AssetStudioBackendConfig {
     pub library_path: Option<String>,
+    #[serde(alias = "call_mode")]
     pub mode: AssetStudioFfiMode,
     pub worker_path: Option<String>,
     pub process_concurrency: usize,
@@ -1185,10 +1186,9 @@ pub struct AssetStudioBackendConfig {
     pub read_kinds: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetStudioFfiMode {
-    Direct,
     #[default]
     WorkerPool,
 }
@@ -1198,14 +1198,30 @@ impl FromStr for AssetStudioFfiMode {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "direct" => Ok(Self::Direct),
             "worker_pool" | "worker-pool" | "worker" | "pool" => Ok(Self::WorkerPool),
+            "direct" => Err(ConfigError::InvalidValue {
+                field: "backends.asset_studio.mode".to_string(),
+                value: "direct".to_string(),
+                expected: "worker_pool (direct mode was removed; use worker_pool)".to_string(),
+            }),
             other => Err(ConfigError::InvalidValue {
                 field: "backends.asset_studio.mode".to_string(),
                 value: other.to_string(),
-                expected: "direct or worker_pool".to_string(),
+                expected: "worker_pool".to_string(),
             }),
         }
+    }
+}
+
+// Manual Deserialize so both the yaml `mode` key and the env override share the
+// FromStr aliases and its clear "direct mode was removed" error.
+impl<'de> Deserialize<'de> for AssetStudioFfiMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -2151,7 +2167,7 @@ image:
   jpeg_quality: 88
 asset_studio:
   library_path: /tmp/libHarukiAssetStudioFFI.so
-  mode: direct
+  mode: worker_pool
   worker_path: /tmp/assetstudio-ffi-worker
   process_concurrency: 6
   worker_max_calls: 128
@@ -2172,7 +2188,7 @@ asset_studio:
             asset_studio.library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
         );
-        assert_eq!(asset_studio.mode, AssetStudioFfiMode::Direct);
+        assert_eq!(asset_studio.mode, AssetStudioFfiMode::WorkerPool);
         assert_eq!(
             asset_studio.worker_path.as_deref(),
             Some("/tmp/assetstudio-ffi-worker")
@@ -2188,6 +2204,35 @@ asset_studio:
         assert_eq!(
             asset_studio.read_kinds.get("all").map(String::as_str),
             Some("typetree_json")
+        );
+    }
+
+    #[test]
+    fn rejects_removed_direct_asset_studio_mode() {
+        let err = "direct"
+            .parse::<AssetStudioFfiMode>()
+            .expect_err("removed direct mode should fail");
+        assert!(matches!(
+            &err,
+            ConfigError::InvalidValue { field, value, expected }
+                if field == "backends.asset_studio.mode"
+                    && value == "direct"
+                    && expected.contains("direct mode was removed")
+        ));
+
+        let yaml = "asset_studio:\n  mode: direct\n";
+        let err = yaml_serde::from_str::<BackendsConfig>(yaml)
+            .expect_err("removed direct mode should fail in yaml");
+        assert!(err.to_string().contains("direct mode was removed"));
+    }
+
+    #[test]
+    fn accepts_call_mode_alias_for_asset_studio_mode() {
+        let yaml = "asset_studio:\n  call_mode: pool\n";
+        let backends: BackendsConfig = yaml_serde::from_str(yaml).unwrap();
+        assert_eq!(
+            backends.asset_studio.mode,
+            AssetStudioFfiMode::WorkerPool
         );
     }
 
@@ -2684,7 +2729,7 @@ regions:
             "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
             "/tmp/override-native.so",
         );
-        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", "direct");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", "pool");
         std::env::set_var(
             "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
             "/tmp/override-native-worker",
@@ -2729,7 +2774,7 @@ backends:
         );
         assert_eq!(
             config.backends.asset_studio.mode,
-            AssetStudioFfiMode::Direct
+            AssetStudioFfiMode::WorkerPool
         );
         assert_eq!(
             config.backends.asset_studio.worker_path.as_deref(),

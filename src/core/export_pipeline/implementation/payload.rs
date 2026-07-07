@@ -899,7 +899,7 @@ pub(super) fn safe_payload_bundle_path(name: &str) -> PathBuf {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn parse_payload_bundle(
     payload: &[u8],
 ) -> Result<Vec<(String, Vec<u8>)>, ExportPipelineError> {
@@ -1046,19 +1046,7 @@ pub(super) fn parse_payload_bundle_borrowed(
     if payload.starts_with(NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC) {
         cursor += NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC.len();
         let count = read_bundle_u32(payload, &mut cursor)? as usize;
-        match parse_payload_bundle_grouped_entries(payload, cursor, count) {
-            Ok(entries) => return Ok(entries),
-            Err(grouped_error) => {
-                return parse_payload_bundle_interleaved_entries(payload, cursor, count, None)
-                    .map_err(|interleaved_error| ExportPipelineError::AssetStudioFfi {
-                        message: format!(
-                            "{}; legacy grouped parse also failed: {}",
-                            assetstudio_error_message(&interleaved_error),
-                            assetstudio_error_message(&grouped_error)
-                        ),
-                    });
-            }
-        }
+        return parse_payload_bundle_grouped_entries(payload, cursor, count);
     }
 
     Err(ExportPipelineError::AssetStudioFfi {
@@ -1178,13 +1166,6 @@ pub(super) fn finish_payload_bundle_parse(
         }
     }
     Ok(())
-}
-
-pub(super) fn assetstudio_error_message(error: &ExportPipelineError) -> String {
-    match error {
-        ExportPipelineError::AssetStudioFfi { message } => message.clone(),
-        other => other.to_string(),
-    }
 }
 
 pub(super) fn read_bundle_u32(

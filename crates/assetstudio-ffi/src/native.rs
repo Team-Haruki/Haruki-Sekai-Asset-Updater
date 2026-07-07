@@ -4,7 +4,6 @@ use std::mem::size_of;
 use std::os::raw::{c_char, c_int, c_longlong, c_uchar};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use tracing::warn;
 
@@ -390,20 +389,6 @@ impl Drop for EnvVarGuard {
             None => std::env::remove_var(self.name),
         }
     }
-}
-
-fn native_call_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-}
-
-pub fn call_assetstudio_ffi_typed_request(
-    native_library_path: &str,
-    request: &AssetStudioFfiRequest,
-) -> Result<(c_int, AssetStudioFfiResponse, Vec<u8>), AssetStudioFfiError> {
-    let _lock = native_call_lock();
-    let library = LoadedAssetStudioFfiLibrary::load(native_library_path)?;
-    library.call_typed_request(request)
 }
 
 pub struct LoadedAssetStudioFfiLibrary {
@@ -807,37 +792,6 @@ impl LoadedAssetStudioFfiLibrary {
                     status,
                     AssetStudioFfiResponse::ContextClose(response),
                     Vec::new(),
-                ))
-            }
-            AssetStudioFfiRequest::ContextReadObject(request) => {
-                let batch_request = AssetStudioFfiContextReadObjectsRequest {
-                    context_id: request.context_id,
-                    objects: vec![AssetStudioFfiContextReadObjectItemRequest {
-                        path_id: request.path_id,
-                        kind: request.kind.clone(),
-                        image_format: request.image_format.clone(),
-                    }],
-                    payload_capacity_hint: 0,
-                };
-                let (status, batch_response, payload) =
-                    self.read_context_objects(&batch_request)?;
-                let response = batch_response.reads.into_iter().next().unwrap_or_else(|| {
-                    AssetStudioFfiObjectReadResponse {
-                        success: false,
-                        asset: None,
-                        payload_kind: None,
-                        payload_len: 0,
-                        suggested_extension: None,
-                        warnings: Vec::new(),
-                        phase_ms: HashMap::new(),
-                        error: Some("typed context_read_object returned no read item".to_string()),
-                        duration_ms: None,
-                    }
-                });
-                Ok((
-                    status,
-                    AssetStudioFfiResponse::ContextReadObject(response),
-                    payload,
                 ))
             }
             AssetStudioFfiRequest::ContextReadObjects(request) => {
@@ -1679,7 +1633,6 @@ fn typed_read_objects_response(
         reads,
         warnings: Vec::new(),
         phase_ms,
-        asset_type_counts: HashMap::new(),
         payload_kind_counts,
         payload_bytes_by_kind,
         payload_len: response.payload_len,
@@ -1697,9 +1650,6 @@ fn typed_read_objects_response(
         } else {
             0
         },
-        worker_id: None,
-        call_seq: None,
-        phase_stats: HashMap::new(),
         error: (!success).then(|| {
             format!(
                 "typed context_read_objects_direct_retry_v1 failed: requested={} status={} response_status={} error_code={}",

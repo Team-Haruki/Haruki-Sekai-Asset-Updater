@@ -470,7 +470,6 @@ fn response_operation(response: &AssetStudioFfiResponse) -> AssetStudioFfiOperat
             AssetStudioFfiOperation::ContextListObjects
         }
         AssetStudioFfiResponse::ContextClose(_) => AssetStudioFfiOperation::ContextClose,
-        AssetStudioFfiResponse::ContextReadObject(_) => AssetStudioFfiOperation::ContextReadObject,
         AssetStudioFfiResponse::ContextReadObjects(_) => {
             AssetStudioFfiOperation::ContextReadObjects
         }
