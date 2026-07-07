@@ -440,6 +440,16 @@ where
                             read_output
                         }
                         NativeObjectReadParseResult::Skipped(skipped) => {
+                            // A skipped read is data loss for this object; without the
+                            // warning a systematic failure (e.g. a native dependency
+                            // that cannot load) is invisible outside summary metadata.
+                            warn!(
+                                path_id = skipped.path_id,
+                                asset_type = skipped.asset_type.as_deref().unwrap_or(""),
+                                name = skipped.name.as_deref().unwrap_or(""),
+                                error = %skipped.error,
+                                "assetstudio ffi object read failed; skipping object"
+                            );
                             summary.skipped_object_reads.push(skipped);
                             summary.object_read_plan.skipped_reads += 1;
                             continue;
