@@ -45,7 +45,7 @@ backends:
     jpeg_quality: 95
   asset_studio:
     library_path: ""
-    mode: "worker_pool" # worker_pool for production isolation; direct for local FFI throughput benchmarks
+    mode: "worker_pool" # the only supported mode; workers isolate native crashes from the service
     worker_path: ""
     process_concurrency: 0 # 0 = auto: CPU budget, or CPU-count oversubscription when CPU throttle is enabled
     worker_max_calls: 256 # 0 disables recycling
@@ -186,11 +186,12 @@ regions:
         exclude: []
       haruki_3d:
         enabled: false
-        exporter_path: "/app/bin/Haruki-3D-Exporter"
+        exporter_path: "/app/haruki-3d/exporter/Haruki-3D-Exporter"
         master_dir: "/app/data/haruki-sekai-master/master"
         work_dir: "/app/data/3d-work"
         manifest_file: "/app/data/3d-output/haruki-3d-export-manifest.json"
         output_dir: "/app/data/3d-output"
+        process_concurrency: 0 # 0 = exporter auto CPU count; set a fixed value such as 16 for bounded full 3D export
         role_character3d_ids:
           - 5
         include:

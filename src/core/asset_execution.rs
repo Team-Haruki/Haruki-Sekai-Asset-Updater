@@ -1714,6 +1714,8 @@ impl AssetExecutionContext {
                 haruki_3d.output_dir.clone(),
                 "--manifest".to_string(),
                 haruki_3d.manifest_file.clone(),
+                "--part-package-process-concurrency".to_string(),
+                haruki_3d.process_concurrency.to_string(),
             ],
         ];
         if !haruki_3d.role_character3d_ids.is_empty() {
@@ -2237,6 +2239,7 @@ mod tests {
             master_dir: "/master".to_string(),
             output_dir: "/runtime".to_string(),
             manifest_file: "/runtime/manifest.json".to_string(),
+            process_concurrency: 16,
             role_character3d_ids: vec![5, 7],
             ..crate::core::config::Haruki3dExportConfig::default()
         };
@@ -2248,6 +2251,12 @@ mod tests {
         assert_eq!(commands.len(), 3);
         assert_eq!(commands[0][0], "--emit-costume-registries");
         assert_eq!(commands[1][0], "--emit-part-packages");
+        assert!(
+            commands[1]
+                .windows(2)
+                .any(|pair| pair == ["--part-package-process-concurrency", "16"]),
+            "part package command should pass haruki_3d.process_concurrency"
+        );
         assert_eq!(commands[2][0], "--emit-role-runtimes");
         assert_eq!(
             commands[2]
