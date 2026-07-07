@@ -5,6 +5,10 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: haruki-sekai-asset-updater
+    # FFI workers stream decoded payloads through /dev/shm-backed mapped files;
+    # the Docker default (64MB) forces the graceful in-memory fallback and loses
+    # the zero-copy path. tmpfs is a cap, not an allocation — generous is free.
+    shm_size: 2gb
     ports:
       - "${HTTP_PORT:-8080}:8080"
     volumes:

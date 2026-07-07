@@ -57,8 +57,7 @@ backends:
       TextAsset: text_bytes
       MonoBehaviour: typetree_json
       AudioClip: audio
-      Animator: pjsk_model_package
-      AnimationClip: pjsk_animation_clip_decoded
+      Animator: fbx # requires linux-x64/macOS (no FBX SDK for linux-arm64); model packages & motion clips flow through the haruki_3d raw-bundle pipeline
       all: typetree_json
 
 resources:

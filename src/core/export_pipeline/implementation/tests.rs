@@ -27,8 +27,7 @@ use super::{
     native_object_output_extension, native_object_output_path, native_read_batch_size_for_assets,
     native_read_kind_for_asset, native_skipped_unsupported_asset,
     parse_assetstudio_ffi_context_list_objects_worker_output,
-    parse_assetstudio_ffi_object_read_batch_worker_output_recoverable,
-    parse_assetstudio_ffi_object_read_worker_output_recoverable, parse_payload_bundle,
+    parse_assetstudio_ffi_object_read_batch_worker_output_recoverable, parse_payload_bundle,
     parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
     prepare_usm_processing_inputs, process_usm_file, process_usm_input_with_metrics,
     record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
@@ -38,11 +37,11 @@ use super::{
     write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
     write_native_object_payload, AssetStudioFfiAssetInfo, AssetStudioFfiObjectReadOutput,
     AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse, MediaEncodeKind,
-    NativeBatchPhaseStats, NativeObjectExportOptions, NativeObjectExportSummary,
-    NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
+    NativeObjectExportOptions, NativeObjectExportSummary, NativeObjectReadBatchParseOutput,
+    NativeObjectReadParseResult, NativeObjectReadPlanStats,
     NativeSemanticExportPathState, UsmProcessingInput, WorkerOutput,
     ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, NATIVE_AOT_DEFAULT_IMAGE_FORMAT,
-    NATIVE_AOT_FAST_IMAGE_FORMAT, NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+    NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
 };
 
 fn sample_path(name: &str) -> Option<PathBuf> {
@@ -524,10 +523,6 @@ fn png_to_webp_uses_pure_rust_encoder() {
 #[test]
 fn native_aot_default_image_format_preserves_alpha() {
     assert_eq!(NATIVE_AOT_DEFAULT_IMAGE_FORMAT, "raw_rgba");
-    assert_eq!(
-        NATIVE_AOT_FAST_IMAGE_FORMAT,
-        NATIVE_AOT_DEFAULT_IMAGE_FORMAT
-    );
     assert_eq!(NATIVE_AOT_IMAGE_SURROGATE_FORMAT, "bmp");
 }
 
@@ -846,7 +841,7 @@ fn native_image_object_payload_is_flushed_after_export_queue() {
             error: None,
             duration_ms: None,
         },
-        payload,
+        payload: payload.into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -905,7 +900,7 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
             error: None,
             duration_ms: None,
         },
-        payload: b"acb!".to_vec(),
+        payload: bytes::Bytes::from_static(b"acb!"),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -965,7 +960,7 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
             error: None,
             duration_ms: None,
         },
-        payload: b"score".to_vec(),
+        payload: bytes::Bytes::from_static(b"score"),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1033,7 +1028,7 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
             error: None,
             duration_ms: None,
         },
-        payload: b"usm!".to_vec(),
+        payload: bytes::Bytes::from_static(b"usm!"),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1097,7 +1092,7 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
             error: None,
             duration_ms: None,
         },
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1167,7 +1162,7 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
             error: None,
             duration_ms: None,
         },
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1228,7 +1223,7 @@ fn monoscript_typetree_routes_to_container_subasset_path() {
             error: None,
             duration_ms: None,
         },
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1778,7 +1773,7 @@ fn manifest_records_native_surrogate_image_public_png_path() {
             error: None,
             duration_ms: None,
         },
-        payload: Vec::new(),
+        payload: bytes::Bytes::new(),
     };
 
     write_assetstudio_export_manifest_entry(dir.path(), &target, &asset, &read_output).unwrap();
@@ -1835,7 +1830,7 @@ fn manifest_records_animator_bundle_public_fbx_path() {
             error: None,
             duration_ms: None,
         },
-        payload,
+        payload: payload.into(),
     };
 
     write_assetstudio_export_manifest_entry(dir.path(), &target, &asset, &read_output).unwrap();
@@ -2025,7 +2020,7 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
             error: None,
             duration_ms: None,
         },
-        payload: br#"{"m_Name":"004026_shiho01"}"#.to_vec(),
+        payload: bytes::Bytes::from_static(br#"{"m_Name":"004026_shiho01"}"#),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -2087,11 +2082,11 @@ fn native_object_export_keeps_distinct_semantic_duplicates() {
             error: None,
             duration_ms: None,
         },
-        payload: br#"{"m_GameObject":1}"#.to_vec(),
+        payload: bytes::Bytes::from_static(br#"{"m_GameObject":1}"#),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
-    read_output.payload = br#"{"m_GameObject":2}"#.to_vec();
+    read_output.payload = bytes::Bytes::from_static(br#"{"m_GameObject":2}"#);
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
     let first = dir
@@ -2210,28 +2205,6 @@ fn assetstudio_type_names_accept_short_and_class_aliases() {
         Some("animator")
     );
     assert_eq!(assetstudio_export_type_selector("GameObject"), None);
-}
-
-#[test]
-fn native_payload_bundle_parser_reads_multiple_entries() {
-    let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
-    payload.extend_from_slice(&2u32.to_le_bytes());
-    payload.extend_from_slice(&("layer_0000.bmp".len() as u32).to_le_bytes());
-    payload.extend_from_slice(&3u64.to_le_bytes());
-    payload.extend_from_slice(b"layer_0000.bmp");
-    payload.extend_from_slice(b"one");
-    payload.extend_from_slice(&("nested/layer_0001.bmp".len() as u32).to_le_bytes());
-    payload.extend_from_slice(&3u64.to_le_bytes());
-    payload.extend_from_slice(b"nested/layer_0001.bmp");
-    payload.extend_from_slice(b"two");
-
-    let entries = parse_payload_bundle(&payload).unwrap();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].0, "layer_0000.bmp");
-    assert_eq!(entries[0].1, b"one");
-    assert_eq!(entries[1].0, "nested/layer_0001.bmp");
-    assert_eq!(entries[1].1, b"two");
 }
 
 #[test]
@@ -2485,110 +2458,6 @@ fn context_list_objects_worker_output_parses_pages() {
 }
 
 #[test]
-fn object_read_failure_is_recoverable_for_single_asset() {
-    let asset = AssetStudioFfiAssetInfo {
-        index: 0,
-        name: Some("bad".to_string()),
-        container: None,
-        asset_type: Some("Shader".to_string()),
-        type_id: 48,
-        path_id: 42,
-        unique_id: None,
-        size: 0,
-        source_file: None,
-    };
-    let output = WorkerOutput {
-            status: "100".to_string(),
-            status_success: false,
-            response: AssetStudioFfiResponse::ContextReadObject(
-                sonic_rs::from_str(r#"{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"boom","duration_ms":1}"#).unwrap(),
-            ),
-            stderr: String::new(),
-            payload: Vec::new(),
-            payload_file: None,
-        };
-
-    let parsed =
-        parse_assetstudio_ffi_object_read_worker_output_recoverable(output, &asset).unwrap();
-    let NativeObjectReadParseResult::Skipped(skipped) = parsed else {
-        panic!("expected skipped object read");
-    };
-    assert_eq!(skipped.path_id, 42);
-    assert_eq!(skipped.asset_type.as_deref(), Some("Shader"));
-    assert_eq!(skipped.name.as_deref(), Some("bad"));
-    assert_eq!(skipped.error, "boom");
-}
-
-#[test]
-fn object_read_prefers_in_memory_worker_payload() {
-    let asset = AssetStudioFfiAssetInfo {
-        index: 0,
-        name: Some("ok".to_string()),
-        container: None,
-        asset_type: Some("TextAsset".to_string()),
-        type_id: 49,
-        path_id: 7,
-        unique_id: None,
-        size: 3,
-        source_file: None,
-    };
-    let output = WorkerOutput {
-            status: "0".to_string(),
-            status_success: true,
-            response: AssetStudioFfiResponse::ContextReadObject(
-                sonic_rs::from_str(r#"{"success":true,"asset":{"index":0,"name":"ok","container":null,"asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}"#).unwrap(),
-            ),
-            stderr: String::new(),
-            payload: b"abc".to_vec(),
-            payload_file: None,
-        };
-
-    let parsed =
-        parse_assetstudio_ffi_object_read_worker_output_recoverable(output, &asset).unwrap();
-    let NativeObjectReadParseResult::Read(read) = parsed else {
-        panic!("expected successful object read");
-    };
-    assert_eq!(read.payload, b"abc");
-    assert_eq!(read.response.payload_len, 3);
-}
-
-#[test]
-fn object_read_loads_payload_file_and_removes_it() {
-    let dir = tempdir().unwrap();
-    let payload_file = dir.path().join("payload.bin");
-    fs::write(&payload_file, b"abc").unwrap();
-    let asset = AssetStudioFfiAssetInfo {
-        index: 0,
-        name: Some("ok".to_string()),
-        container: None,
-        asset_type: Some("TextAsset".to_string()),
-        type_id: 49,
-        path_id: 7,
-        unique_id: None,
-        size: 3,
-        source_file: None,
-    };
-    let output = WorkerOutput {
-            status: "0".to_string(),
-            status_success: true,
-            response: AssetStudioFfiResponse::ContextReadObject(
-                sonic_rs::from_str(r#"{"success":true,"asset":{"index":0,"name":"ok","container":null,"asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}"#).unwrap(),
-            ),
-            stderr: String::new(),
-            payload: Vec::new(),
-            payload_file: Some(payload_file.clone()),
-        };
-
-    let parsed =
-        parse_assetstudio_ffi_object_read_worker_output_recoverable(output, &asset).unwrap();
-    let NativeObjectReadParseResult::Read(read) = parsed else {
-        panic!("expected successful object read");
-    };
-    assert_eq!(read.payload, b"abc");
-    assert!(!payload_file.exists());
-}
-
-#[test]
 fn object_read_batch_preserves_diagnostics_and_payloads() {
     let good_asset = AssetStudioFfiAssetInfo {
         index: 0,
@@ -2623,7 +2492,7 @@ fn object_read_batch_preserves_diagnostics_and_payloads() {
             status: "0".to_string(),
             status_success: true,
             response: AssetStudioFfiResponse::ContextReadObjects(
-                sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{"read_object.read_payload":4},"error":null,"duration_ms":5},{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"shader unsupported","duration_ms":1}],"warnings":["batch warning"],"payload_len":3,"object_count":2,"payload_bundle_bytes":123,"failed_count":1,"read_payload_ms":4,"worker_id":"worker-a","call_seq":42,"phase_stats":{"read_payload":{"p50_ms":2,"p95_ms":7}},"error":null,"duration_ms":6}"#).unwrap(),
+                sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{"read_object.read_payload":4},"error":null,"duration_ms":5},{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"shader unsupported","duration_ms":1}],"warnings":["batch warning"],"payload_len":3,"object_count":2,"payload_bundle_bytes":123,"failed_count":1,"read_payload_ms":4,"error":null,"duration_ms":6}"#).unwrap(),
             ),
             stderr: String::new(),
             payload,
@@ -2638,20 +2507,11 @@ fn object_read_batch_preserves_diagnostics_and_payloads() {
     assert_eq!(parsed.payload_bundle_bytes, 123);
     assert_eq!(parsed.failed_count, 1);
     assert_eq!(parsed.read_payload_ms, 4);
-    assert_eq!(parsed.worker_id.as_deref(), Some("worker-a"));
-    assert_eq!(parsed.call_seq, Some(42));
-    assert_eq!(
-        parsed
-            .phase_stats
-            .get("read_payload")
-            .map(|stats| stats.p95_ms),
-        Some(7)
-    );
     assert_eq!(parsed.results.len(), 2);
     let NativeObjectReadParseResult::Read(read) = &parsed.results[0] else {
         panic!("expected successful batch object read");
     };
-    assert_eq!(read.payload, b"abc");
+    assert_eq!(read.payload.as_ref(), b"abc");
     assert_eq!(read.response.payload_len, 3);
     let NativeObjectReadParseResult::Skipped(skipped) = &parsed.results[1] else {
         panic!("expected skipped batch object read");
@@ -2661,7 +2521,57 @@ fn object_read_batch_preserves_diagnostics_and_payloads() {
 }
 
 #[test]
-fn object_read_batch_diagnostics_record_max_phase_stats() {
+fn object_read_batch_maps_spilled_payload_file_and_removes_it() {
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("ok".to_string()),
+        container: Some("assets/ok.bytes".to_string()),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 7,
+        unique_id: None,
+        size: 3,
+        source_file: None,
+    };
+    let mut payload = Vec::new();
+    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&3u64.to_le_bytes());
+    payload.extend_from_slice(b"7");
+    payload.extend_from_slice(b"abc");
+    let spill_dir = tempfile::tempdir().unwrap();
+    let payload_file = spill_dir.path().join("spilled-payload.bin");
+    std::fs::write(&payload_file, &payload).unwrap();
+    let output = WorkerOutput {
+            status: "0".to_string(),
+            status_success: true,
+            response: AssetStudioFfiResponse::ContextReadObjects(
+                sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}],"warnings":[],"payload_len":3,"object_count":1,"payload_bundle_bytes":0,"failed_count":0,"read_payload_ms":1,"error":null,"duration_ms":1}"#).unwrap(),
+            ),
+            stderr: String::new(),
+            payload: Vec::new(),
+            payload_file: Some(payload_file.clone()),
+        };
+    let assets = [&asset];
+
+    let parsed =
+        parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(output, &assets).unwrap();
+
+    assert_eq!(parsed.results.len(), 1);
+    let NativeObjectReadParseResult::Read(read) = &parsed.results[0] else {
+        panic!("expected successful batch object read");
+    };
+    // The payload slice is served straight from the (already unlinked) mapping.
+    assert_eq!(read.payload.as_ref(), b"abc");
+    assert!(
+        !payload_file.exists(),
+        "spilled payload file should be removed after mapping"
+    );
+}
+
+#[test]
+fn object_read_batch_diagnostics_record_batch_counters() {
     let asset = AssetStudioFfiAssetInfo {
         index: 0,
         name: Some("ok".to_string()),
@@ -2677,10 +2587,7 @@ fn object_read_batch_diagnostics_record_max_phase_stats() {
         written_files: Vec::new(),
         acb_sources: Vec::new(),
         pending_image_writes: Vec::new(),
-        phase_ms: HashMap::from([
-            ("read_batch.read_payload.p50".to_string(), 5),
-            ("read_batch.read_payload.p95".to_string(), 5),
-        ]),
+        phase_ms: HashMap::new(),
         skipped_object_reads: Vec::new(),
         object_read_plan: NativeObjectReadPlanStats::default(),
         worker_crash_skipped: false,
@@ -2694,19 +2601,9 @@ fn object_read_batch_diagnostics_record_max_phase_stats() {
         payload_data_bytes: 3,
         failed_count: 0,
         read_payload_ms: 3,
-        worker_id: Some("worker-a".to_string()),
-        call_seq: Some(1),
         phase_ms: HashMap::from([("read_objects".to_string(), 4)]),
-        asset_type_counts: HashMap::from([("TextAsset".to_string(), 1)]),
         payload_kind_counts: HashMap::from([("text_bytes".to_string(), 1)]),
         payload_bytes_by_kind: HashMap::from([("text_bytes".to_string(), 3)]),
-        phase_stats: HashMap::from([(
-            "read_payload".to_string(),
-            NativeBatchPhaseStats {
-                p50_ms: 2,
-                p95_ms: 9,
-            },
-        )]),
     };
 
     record_native_object_read_batch_diagnostics(&mut summary, &[&asset], &read_outputs);
@@ -2714,22 +2611,8 @@ fn object_read_batch_diagnostics_record_max_phase_stats() {
     assert_eq!(summary.object_read_plan.payload_bundle_bytes, 10);
     assert_eq!(summary.object_read_plan.read_payload_ms, 3);
     assert_eq!(
-        summary.phase_ms.get("read_batch.read_payload.p50"),
-        Some(&5)
-    );
-    assert_eq!(
-        summary.phase_ms.get("read_batch.read_payload.p95"),
-        Some(&9)
-    );
-    assert_eq!(
         summary.phase_ms.get("read_batch.phase.read_objects"),
         Some(&4)
-    );
-    assert_eq!(
-        summary
-            .phase_ms
-            .get("read_batch.asset_type_count.TextAsset"),
-        Some(&1)
     );
     assert_eq!(
         summary

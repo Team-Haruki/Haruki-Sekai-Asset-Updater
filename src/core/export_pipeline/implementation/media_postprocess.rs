@@ -779,28 +779,6 @@ pub(super) fn write_usm_streams(
     Ok(generated)
 }
 
-#[allow(dead_code)]
-pub(super) async fn process_usm_file_with_metrics(
-    usm_file: &Path,
-    export_path: &Path,
-    region: &RegionConfig,
-    ffmpeg_path: &str,
-    media_backend: MediaBackend,
-    retry: &crate::core::config::RetryConfig,
-) -> Result<UsmPostProcessOutput, ExportPipelineError> {
-    process_usm_input_with_metrics(
-        &UsmProcessingInput::Path(usm_file.to_path_buf()),
-        export_path,
-        region,
-        ffmpeg_path,
-        media_backend,
-        retry,
-        1,
-        1,
-    )
-    .await
-}
-
 pub(super) fn handle_acb_files_owned(
     options: &OwnedAcbPostProcessOptions,
     acb_concurrency: usize,
