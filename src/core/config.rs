@@ -2232,10 +2232,7 @@ asset_studio:
     fn accepts_call_mode_alias_for_asset_studio_mode() {
         let yaml = "asset_studio:\n  call_mode: pool\n";
         let backends: BackendsConfig = yaml_serde::from_str(yaml).unwrap();
-        assert_eq!(
-            backends.asset_studio.mode,
-            AssetStudioFfiMode::WorkerPool
-        );
+        assert_eq!(backends.asset_studio.mode, AssetStudioFfiMode::WorkerPool);
     }
 
     #[test]

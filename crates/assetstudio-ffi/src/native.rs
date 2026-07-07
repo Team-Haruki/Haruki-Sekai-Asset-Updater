@@ -954,7 +954,8 @@ impl LoadedAssetStudioFfiLibrary {
         request: &AssetStudioFfiContextReadObjectsRequest,
     ) -> Result<(c_int, AssetStudioFfiObjectReadBatchResponse, Vec<u8>), AssetStudioFfiError> {
         let storage = build_typed_read_items(request)?;
-        let typed_request = typed_read_batch_request(request.context_id, &storage, ptr::null_mut(), 0);
+        let typed_request =
+            typed_read_batch_request(request.context_id, &storage, ptr::null_mut(), 0);
         let mut response = AssetStudioTypedObjectReadBatchRetryResponse::default();
         let status =
             unsafe { (self.context_read_objects_direct_retry)(&typed_request, &mut response) };
@@ -983,8 +984,10 @@ impl LoadedAssetStudioFfiLibrary {
         &self,
         request: &AssetStudioFfiContextReadObjectsRequest,
         directory: Option<&Path>,
-    ) -> Result<Option<(c_int, AssetStudioFfiObjectReadBatchResponse, CallPayload)>, AssetStudioFfiError>
-    {
+    ) -> Result<
+        Option<(c_int, AssetStudioFfiObjectReadBatchResponse, CallPayload)>,
+        AssetStudioFfiError,
+    > {
         let names = request
             .objects
             .iter()
@@ -1103,10 +1106,13 @@ impl LoadedAssetStudioFfiLibrary {
                     let remapped_len = usize::try_from(required).map_err(|_| {
                         std::io::Error::new(std::io::ErrorKind::OutOfMemory, "payload too large")
                     })?;
-                    let previous = std::mem::replace(&mut mapping, RwFileMapping {
-                        pointer: libc::MAP_FAILED,
-                        len: 0,
-                    });
+                    let previous = std::mem::replace(
+                        &mut mapping,
+                        RwFileMapping {
+                            pointer: libc::MAP_FAILED,
+                            len: 0,
+                        },
+                    );
                     drop(previous);
                     reserve_file_capacity(&file, required)?;
                     file.set_len(required)?;
@@ -1182,10 +1188,11 @@ fn build_typed_read_items(
     let mut formats = Vec::with_capacity(request.objects.len());
     let mut items = Vec::with_capacity(request.objects.len());
     for item in &request.objects {
-        let kind =
-            CString::new(item.kind.clone()).map_err(|source| AssetStudioFfiError::AssetStudioFfi {
+        let kind = CString::new(item.kind.clone()).map_err(|source| {
+            AssetStudioFfiError::AssetStudioFfi {
                 message: format!("native read kind contains nul byte: {source}"),
-            })?;
+            }
+        })?;
         let format = CString::new(item.image_format.clone()).map_err(|source| {
             AssetStudioFfiError::AssetStudioFfi {
                 message: format!("native read image format contains nul byte: {source}"),
@@ -1301,7 +1308,10 @@ fn reserve_file_capacity(file: &std::fs::File, len: u64) -> std::io::Result<()> 
         return Ok(());
     }
     let len = i64::try_from(len).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::OutOfMemory, "spill capacity exceeds i64")
+        std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "spill capacity exceeds i64",
+        )
     })?;
     loop {
         // posix_fallocate returns the error number directly instead of via errno.
@@ -1324,7 +1334,10 @@ fn reserve_file_capacity(file: &std::fs::File, len: u64) -> std::io::Result<()> 
         return Ok(());
     }
     let delta = i64::try_from(len - current).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::OutOfMemory, "spill capacity exceeds i64")
+        std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "spill capacity exceeds i64",
+        )
     })?;
     let mut store = libc::fstore_t {
         fst_flags: libc::F_ALLOCATEALL,

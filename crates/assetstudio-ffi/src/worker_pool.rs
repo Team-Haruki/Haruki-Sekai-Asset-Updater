@@ -478,4 +478,3 @@ fn native_library_working_dir(native_library_path: &str) -> Option<&Path> {
 fn absolute_command_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
-

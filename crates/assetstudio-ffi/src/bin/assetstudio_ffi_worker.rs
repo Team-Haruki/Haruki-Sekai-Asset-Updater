@@ -596,8 +596,8 @@ mod tests {
     use std::io::{self, Cursor};
 
     use super::{
-        read_frame, spill_payload_into_dir, spill_payload_to_temp_file,
-        sweep_stale_spill_files_in, write_frame, MAX_FRAME_SIZE,
+        read_frame, spill_payload_into_dir, spill_payload_to_temp_file, sweep_stale_spill_files_in,
+        write_frame, MAX_FRAME_SIZE,
     };
 
     #[test]
@@ -668,8 +668,7 @@ mod tests {
 
         // A fresh spill file survives a sweep with the real five-minute horizon.
         let fresh = spill_payload_into_dir(b"fresh", Some(dir.path())).unwrap();
-        let removed =
-            sweep_stale_spill_files_in(dir.path(), super::STALE_SPILL_FILE_MAX_AGE);
+        let removed = sweep_stale_spill_files_in(dir.path(), super::STALE_SPILL_FILE_MAX_AGE);
         assert_eq!(removed, 0);
         assert!(fresh.exists());
     }
