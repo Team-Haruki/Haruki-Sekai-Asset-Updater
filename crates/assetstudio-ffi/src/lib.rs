@@ -3,20 +3,20 @@ mod native;
 mod types;
 mod worker_pool;
 
-pub use frame::{read_worker_frame, write_worker_frame};
-pub use native::{call_assetstudio_ffi_typed_request, LoadedAssetStudioFfiLibrary};
+pub use native::{
+    CallPayload, LoadedAssetStudioFfiLibrary, PayloadSpillPlan, WORKER_PAYLOAD_FILE_PREFIX,
+    WORKER_PAYLOAD_FILE_SUFFIX,
+};
 pub use types::{
     AssetStudioFfiAssetInfo, AssetStudioFfiContextCloseRequest, AssetStudioFfiContextCloseResponse,
     AssetStudioFfiContextListObjectsRequest, AssetStudioFfiContextListObjectsResponse,
     AssetStudioFfiContextOpenRequest, AssetStudioFfiContextOpenResponse,
-    AssetStudioFfiContextReadObjectItemRequest, AssetStudioFfiContextReadObjectRequest,
-    AssetStudioFfiContextReadObjectsRequest, AssetStudioFfiError,
-    AssetStudioFfiObjectReadBatchResponse, AssetStudioFfiObjectReadOutput,
+    AssetStudioFfiContextReadObjectItemRequest, AssetStudioFfiContextReadObjectsRequest,
+    AssetStudioFfiError, AssetStudioFfiObjectReadBatchResponse, AssetStudioFfiObjectReadOutput,
     AssetStudioFfiObjectReadResponse, AssetStudioFfiOperation, AssetStudioFfiRequest,
-    AssetStudioFfiResponse, NativeBatchPhaseStats,
+    AssetStudioFfiResponse,
 };
 pub use worker_pool::{
-    configured_worker_path, with_worker_lease, worker_executable_name, AssetStudioWorkerPool,
-    WorkerLease, WorkerLeaseStats, WorkerOutput, WorkerPoolStatsSnapshot, WorkerServerRequest,
-    WorkerServerResponse,
+    configured_worker_path, worker_executable_name, AssetStudioWorkerPool, WorkerLease,
+    WorkerLeaseStats, WorkerOutput, WorkerPoolStatsSnapshot,
 };

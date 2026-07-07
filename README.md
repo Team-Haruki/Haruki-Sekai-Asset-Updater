@@ -140,10 +140,9 @@ You can also download the standalone AssetStudioFFI archive or build the
   `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
   `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`, and
   `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE` tune worker pool throughput.
-- `backends.asset_studio.mode` defaults to `worker_pool` for production crash
-  isolation. Set it to `direct`, or set `HARUKI_ASSET_STUDIO_FFI_MODE=direct`,
-  only for local throughput benchmarks where the service process may load and
-  call `HarukiAssetStudioFFI` directly.
+- `backends.asset_studio.mode` is always `worker_pool` for production crash
+  isolation. The former in-process `direct` mode was removed; configuring it
+  fails config loading with a clear error.
 - `resources.memory.max_in_flight_bundle_bytes` is a soft memory guard. The default
   `0` disables it. On small Linux hosts, set it to the amount of bundle work the
   process may keep in memory, for example

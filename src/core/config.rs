@@ -184,11 +184,41 @@ impl AppConfig {
             validate_asset_studio_ffi_image_format(image_format)?;
         }
         validate_image_backend(&self.backends.image)?;
+        // Enabling auth without any credential is fail-open (every request authorized). Reject it
+        // so a misconfiguration can't silently disable protection on the mutating endpoints.
+        if self.server.auth.enabled {
+            let has_credential = self
+                .server
+                .auth
+                .bearer_token
+                .as_deref()
+                .is_some_and(|token| !token.is_empty())
+                || self
+                    .server
+                    .auth
+                    .user_agent_prefix
+                    .as_deref()
+                    .is_some_and(|prefix| !prefix.is_empty());
+            if !has_credential {
+                return Err(ConfigError::InvalidValue {
+                    field: "server.auth".to_string(),
+                    value: "enabled=true with no credentials".to_string(),
+                    expected: "a non-empty bearer_token or user_agent_prefix when auth is enabled"
+                        .to_string(),
+                });
+            }
+        }
         for (region_name, region) in &self.regions {
             validate_image_export_config(region_name, &region.export.images)?;
             validate_video_export_config(region_name, &region.export.video)?;
             validate_audio_export_config(region_name, &region.export.audio)?;
             validate_haruki_3d_export_config(region_name, &region.export.haruki_3d)?;
+            // Fail fast on bad crypto material / filter regexes for regions that are actually in
+            // use, instead of blowing up mid-job at decrypt or silently dropping a typo'd filter.
+            if region.enabled {
+                validate_region_crypto(region_name, &region.crypto)?;
+                validate_region_filter_regexes(region_name, region)?;
+            }
         }
         validate_asset_studio_ffi_read_kinds(&self.backends.asset_studio.read_kinds)?;
         warn_media_fallback_backend_options(&self.backends.media);
@@ -482,8 +512,14 @@ fn expand_env_references_in_string(raw: &str) -> Result<Option<String>, ConfigEr
         expanded.push_str(&raw[cursor..start]);
         let name_start = start + "${env:".len();
         let Some(relative_end) = raw[name_start..].find('}') else {
-            expanded.push_str(&raw[start..]);
-            return Ok(Some(expanded));
+            // An unclosed `${env:` is almost always a typo (e.g. a missing `}` on a secret field).
+            // Failing loudly beats silently treating it as a literal value, which would surface
+            // later as a confusing hex/decrypt error.
+            return Err(ConfigError::InvalidValue {
+                field: "config file".to_string(),
+                value: "${env:...".to_string(),
+                expected: "a closed ${env:VAR} reference (missing closing '}')".to_string(),
+            });
         };
         let end = name_start + relative_end;
         let name = raw[name_start..end].trim();
@@ -711,6 +747,89 @@ fn parse_cpu_ratio_env(field: &str, value: &str) -> Result<f64, ConfigError> {
         })
 }
 
+fn validate_region_crypto(region_name: &str, crypto: &CryptoConfig) -> Result<(), ConfigError> {
+    if let Some(key_hex) = &crypto.aes_key_hex {
+        validate_aes_hex(
+            &format!("regions.{region_name}.crypto.aes_key_hex"),
+            key_hex,
+            &[16, 24, 32],
+        )?;
+    }
+    if let Some(iv_hex) = &crypto.aes_iv_hex {
+        validate_aes_hex(
+            &format!("regions.{region_name}.crypto.aes_iv_hex"),
+            iv_hex,
+            &[16],
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_aes_hex(
+    field: &str,
+    value: &str,
+    allowed_lengths: &[usize],
+) -> Result<(), ConfigError> {
+    let bytes = hex::decode(value).map_err(|_| ConfigError::InvalidValue {
+        field: field.to_string(),
+        value: "<redacted>".to_string(),
+        expected: "a valid hexadecimal string".to_string(),
+    })?;
+    if !allowed_lengths.contains(&bytes.len()) {
+        return Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: format!("{} byte(s)", bytes.len()),
+            expected: format!("hex decoding to one of {allowed_lengths:?} bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_region_filter_regexes(
+    region_name: &str,
+    region: &RegionConfig,
+) -> Result<(), ConfigError> {
+    let filters = &region.filters;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.start_app"),
+        &filters.start_app,
+    )?;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.on_demand"),
+        &filters.on_demand,
+    )?;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.skip"),
+        &filters.skip,
+    )?;
+    validate_regex_patterns(
+        &format!("regions.{region_name}.filters.priority"),
+        &filters.priority,
+    )?;
+    if let Some(raw_bundles) = &region.export.raw_bundles {
+        validate_regex_patterns(
+            &format!("regions.{region_name}.export.raw_bundles.include"),
+            &raw_bundles.include,
+        )?;
+        validate_regex_patterns(
+            &format!("regions.{region_name}.export.raw_bundles.exclude"),
+            &raw_bundles.exclude,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_regex_patterns(field: &str, patterns: &[String]) -> Result<(), ConfigError> {
+    for pattern in patterns {
+        regex::Regex::new(pattern).map_err(|source| ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: pattern.clone(),
+            expected: format!("a valid regular expression ({source})"),
+        })?;
+    }
+    Ok(())
+}
+
 fn normalize_asset_studio_ffi_image_format(value: &str) -> Result<String, ConfigError> {
     let normalized = value.trim().to_lowercase();
     validate_asset_studio_ffi_image_format(&normalized)?;
@@ -900,12 +1019,13 @@ fn warn_media_fallback_backend_options(media: &MediaBackendConfig) {
 fn validate_asset_studio_ffi_read_kind(field: &str, value: &str) -> Result<(), ConfigError> {
     match value.trim().to_lowercase().as_str() {
         "auto" | "raw" | "typetree_json" | "image" | "image_archive" | "audio" | "video"
-        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx"
-        | "pjsk_model_package" | "pjsk_animation_clip_decoded" => Ok(()),
+        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx" => {
+            Ok(())
+        }
         other => Err(ConfigError::InvalidValue {
             field: field.to_string(),
             value: other.to_string(),
-            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, fbx, pjsk_model_package, or pjsk_animation_clip_decoded".to_string(),
+            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, or fbx".to_string(),
         }),
     }
 }
@@ -1056,6 +1176,7 @@ pub struct BackendsConfig {
 #[serde(default)]
 pub struct AssetStudioBackendConfig {
     pub library_path: Option<String>,
+    #[serde(alias = "call_mode")]
     pub mode: AssetStudioFfiMode,
     pub worker_path: Option<String>,
     pub process_concurrency: usize,
@@ -1065,10 +1186,9 @@ pub struct AssetStudioBackendConfig {
     pub read_kinds: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetStudioFfiMode {
-    Direct,
     #[default]
     WorkerPool,
 }
@@ -1078,14 +1198,30 @@ impl FromStr for AssetStudioFfiMode {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "direct" => Ok(Self::Direct),
             "worker_pool" | "worker-pool" | "worker" | "pool" => Ok(Self::WorkerPool),
+            "direct" => Err(ConfigError::InvalidValue {
+                field: "backends.asset_studio.mode".to_string(),
+                value: "direct".to_string(),
+                expected: "worker_pool (direct mode was removed; use worker_pool)".to_string(),
+            }),
             other => Err(ConfigError::InvalidValue {
                 field: "backends.asset_studio.mode".to_string(),
                 value: other.to_string(),
-                expected: "direct or worker_pool".to_string(),
+                expected: "worker_pool".to_string(),
             }),
         }
+    }
+}
+
+// Manual Deserialize so both the yaml `mode` key and the env override share the
+// FromStr aliases and its clear "direct mode was removed" error.
+impl<'de> Deserialize<'de> for AssetStudioFfiMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -1265,6 +1401,12 @@ pub struct ExecutionConfig {
     /// record to disk mid-run.  Set to `0` to disable mid-run flushing (record
     /// is only written once at the end).  Mirrors Go's `batchSaveSize`.
     pub batch_save_size: usize,
+    /// Maximum number of jobs whose heavy download/export pipeline may run at once. Extra jobs are
+    /// accepted (HTTP 202) but queue for a slot instead of all running concurrently. `0` = no limit.
+    pub max_concurrent_jobs: usize,
+    /// Cap on retained terminal (Completed/Failed/Cancelled) job snapshots kept in memory for the
+    /// jobs API. Oldest terminal jobs are evicted beyond this. `0` = keep all (unbounded).
+    pub retain_terminal_jobs: usize,
     pub retry: RetryConfig,
 }
 
@@ -1275,6 +1417,8 @@ impl Default for ExecutionConfig {
             allow_cancel: true,
             max_in_flight_bundle_bytes: 0,
             batch_save_size: 50,
+            max_concurrent_jobs: 4,
+            retain_terminal_jobs: 256,
             retry: RetryConfig::default(),
         }
     }
@@ -2025,7 +2169,7 @@ image:
   jpeg_quality: 88
 asset_studio:
   library_path: /tmp/libHarukiAssetStudioFFI.so
-  mode: direct
+  mode: worker_pool
   worker_path: /tmp/assetstudio-ffi-worker
   process_concurrency: 6
   worker_max_calls: 128
@@ -2046,7 +2190,7 @@ asset_studio:
             asset_studio.library_path.as_deref(),
             Some("/tmp/libHarukiAssetStudioFFI.so")
         );
-        assert_eq!(asset_studio.mode, AssetStudioFfiMode::Direct);
+        assert_eq!(asset_studio.mode, AssetStudioFfiMode::WorkerPool);
         assert_eq!(
             asset_studio.worker_path.as_deref(),
             Some("/tmp/assetstudio-ffi-worker")
@@ -2063,6 +2207,32 @@ asset_studio:
             asset_studio.read_kinds.get("all").map(String::as_str),
             Some("typetree_json")
         );
+    }
+
+    #[test]
+    fn rejects_removed_direct_asset_studio_mode() {
+        let err = "direct"
+            .parse::<AssetStudioFfiMode>()
+            .expect_err("removed direct mode should fail");
+        assert!(matches!(
+            &err,
+            ConfigError::InvalidValue { field, value, expected }
+                if field == "backends.asset_studio.mode"
+                    && value == "direct"
+                    && expected.contains("direct mode was removed")
+        ));
+
+        let yaml = "asset_studio:\n  mode: direct\n";
+        let err = yaml_serde::from_str::<BackendsConfig>(yaml)
+            .expect_err("removed direct mode should fail in yaml");
+        assert!(err.to_string().contains("direct mode was removed"));
+    }
+
+    #[test]
+    fn accepts_call_mode_alias_for_asset_studio_mode() {
+        let yaml = "asset_studio:\n  call_mode: pool\n";
+        let backends: BackendsConfig = yaml_serde::from_str(yaml).unwrap();
+        assert_eq!(backends.asset_studio.mode, AssetStudioFfiMode::WorkerPool);
     }
 
     #[test]
@@ -2236,19 +2406,22 @@ asset_studio:
     }
 
     #[test]
-    fn accepts_pjsk_asset_studio_ffi_read_kinds() {
-        let mut config = AppConfig::default();
-        config
-            .backends
-            .asset_studio
-            .read_kinds
-            .insert("Animator".to_string(), "pjsk_model_package".to_string());
-        config.backends.asset_studio.read_kinds.insert(
-            "AnimationClip".to_string(),
-            "pjsk_animation_clip_decoded".to_string(),
-        );
-
-        config.validate().unwrap();
+    fn rejects_unimplemented_pjsk_read_kinds() {
+        // The FFI dylib never implemented these kinds; model packages and motion
+        // clips flow through the haruki_3d raw-bundle pipeline instead. Accepting
+        // them here would silently drop every Animator/AnimationClip export.
+        for (asset_type, kind) in [
+            ("Animator", "pjsk_model_package"),
+            ("AnimationClip", "pjsk_animation_clip_decoded"),
+        ] {
+            let mut config = AppConfig::default();
+            config
+                .backends
+                .asset_studio
+                .read_kinds
+                .insert(asset_type.to_string(), kind.to_string());
+            config.validate().unwrap_err();
+        }
     }
 
     #[test]
@@ -2366,14 +2539,12 @@ haruki_3d:
         let asset_studio = &config.backends.asset_studio;
         assert_eq!(
             asset_studio.read_kinds.get("Animator").map(String::as_str),
-            Some("pjsk_model_package")
+            Some("fbx")
         );
         assert_eq!(
-            asset_studio
-                .read_kinds
-                .get("AnimationClip")
-                .map(String::as_str),
-            Some("pjsk_animation_clip_decoded")
+            asset_studio.read_kinds.get("AnimationClip"),
+            None,
+            "motion clips are consumed by the haruki_3d raw-bundle pipeline, not FFI reads"
         );
 
         let jp = config.regions.get("jp").expect("jp region exists");
@@ -2563,7 +2734,7 @@ regions:
             "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
             "/tmp/override-native.so",
         );
-        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", "direct");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", "pool");
         std::env::set_var(
             "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
             "/tmp/override-native-worker",
@@ -2608,7 +2779,7 @@ backends:
         );
         assert_eq!(
             config.backends.asset_studio.mode,
-            AssetStudioFfiMode::Direct
+            AssetStudioFfiMode::WorkerPool
         );
         assert_eq!(
             config.backends.asset_studio.worker_path.as_deref(),

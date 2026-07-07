@@ -675,9 +675,9 @@ dependencies = [
 
 [[package]]
 name = "cridecoder"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3afbd29544b4195fb7fda71189d9dc7efe8f4fc376b4a2f8eb8aaa52e9ecc18e"
+checksum = "791e2f16c14800658903e329013a208a7dfe9bf9f9481140a4ac91df06cbc5fc"
 dependencies = [
  "byteorder",
  "encoding_rs",
@@ -1109,6 +1109,7 @@ dependencies = [
 name = "haruki-assetstudio-ffi"
 version = "6.0.5"
 dependencies = [
+ "bytes",
  "clap",
  "libc",
  "libloading 0.9.0",
@@ -1126,6 +1127,7 @@ version = "6.0.5"
 dependencies = [
  "aes 0.9.1",
  "axum",
+ "bytes",
  "cbc 0.2.1",
  "chrono",
  "clap",
@@ -3116,7 +3118,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

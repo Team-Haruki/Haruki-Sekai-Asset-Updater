@@ -165,12 +165,28 @@ fn authorize(config: &AppConfig, headers: &HeaderMap) -> Result<(), ApiError> {
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
-        if authorization != format!("Bearer {token}") {
+        // Strip the scheme and compare the token in constant time so a short-circuiting `!=`
+        // can't leak how many leading bytes matched (a byte-by-byte timing oracle).
+        let provided = authorization.strip_prefix("Bearer ").unwrap_or_default();
+        if !constant_time_eq(provided.as_bytes(), token.as_bytes()) {
             return Err(ApiError::Unauthorized("invalid bearer token".to_string()));
         }
     }
 
     Ok(())
+}
+
+/// Constant-time byte-slice equality. The length comparison may short-circuit (token length is not
+/// considered secret), but for equal-length inputs every byte is always examined.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 #[derive(Debug)]

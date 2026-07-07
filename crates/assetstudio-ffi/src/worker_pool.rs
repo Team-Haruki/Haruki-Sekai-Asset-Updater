@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,20 +16,20 @@ use crate::frame::{read_worker_frame, write_worker_frame};
 use crate::types::*;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct WorkerServerRequest {
-    pub id: u64,
-    pub request: AssetStudioFfiRequest,
+pub(crate) struct WorkerServerRequest {
+    pub(crate) id: u64,
+    pub(crate) request: AssetStudioFfiRequest,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct WorkerServerResponse {
-    pub id: u64,
-    pub status: Option<i32>,
-    pub response: Option<AssetStudioFfiResponse>,
+pub(crate) struct WorkerServerResponse {
+    pub(crate) id: u64,
+    pub(crate) status: Option<i32>,
+    pub(crate) response: Option<AssetStudioFfiResponse>,
     #[serde(default)]
-    pub payload_len: usize,
-    pub payload_file: Option<String>,
-    pub error: Option<String>,
+    pub(crate) payload_len: usize,
+    pub(crate) payload_file: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -478,12 +477,4 @@ fn native_library_working_dir(native_library_path: &str) -> Option<&Path> {
 
 fn absolute_command_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-pub async fn with_worker_lease<T, E, F, Fut>(lease: &mut WorkerLease, f: F) -> Result<T, E>
-where
-    F: FnOnce(&mut WorkerLease) -> Fut,
-    Fut: Future<Output = Result<T, E>>,
-{
-    f(lease).await
 }

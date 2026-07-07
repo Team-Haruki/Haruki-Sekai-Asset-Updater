@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -20,7 +19,7 @@ use tokio::task::JoinSet;
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::config::{AppConfig, AssetHttpVersion, RegionConfig, RegionProviderConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
-use crate::core::errors::AssetExecutionError;
+use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::export_pipeline::{
     export_unity_asset_bundle_payloads, flush_pending_native_image_writes,
     post_process_exported_files, NativeObjectReadPlanStats, UnityAssetBundlePayloadExport,
@@ -466,9 +465,29 @@ impl AssetExecutionContext {
         }
 
         while !joins.is_empty() || !post_process_joins.is_empty() {
+            // If cancellation was requested, stop scheduling/awaiting more (expensive) post-process
+            // work and fall through to persist the record before returning Cancelled, rather than
+            // draining every already-queued bundle first.
+            if self.ensure_not_cancelled(&cancel_flag).is_err() {
+                break;
+            }
             tokio::select! {
                 Some(result) = joins.join_next(), if !joins.is_empty() => {
-                    let (bundle_path, _bundle_hash, result) = result.expect("bundle task panicked");
+                    let (bundle_path, _bundle_hash, result) = match result {
+                        Ok(tuple) => tuple,
+                        Err(join_err) => {
+                            // A download/export sub-task panicked or was aborted. Count it as a
+                            // failed bundle instead of unwinding the orchestrator (which would
+                            // leave the owning job wedged in Running forever).
+                            failed += 1;
+                            tracing::error!(
+                                region = %self.region_name,
+                                error = %join_err,
+                                "bundle download/export task panicked or was aborted; counting as failed"
+                            );
+                            continue;
+                        }
+                    };
                     match result {
                         Ok(BundleWorkOutput::NativePostProcess(job)) => {
                             let app_config = app_config_cloned.clone();
@@ -537,7 +556,9 @@ impl AssetExecutionContext {
                             });
                         }
                         Err(AssetExecutionError::Cancelled) => {
-                            return Err(AssetExecutionError::Cancelled);
+                            // Stop scheduling further work but fall through to persist the record so
+                            // already-completed bundles aren't re-downloaded on the next run.
+                            break;
                         }
                         Err(err) => {
                             failed += 1;
@@ -558,8 +579,20 @@ impl AssetExecutionContext {
                     }
                 }
                 Some(result) = post_process_joins.join_next(), if !post_process_joins.is_empty() => {
-                    let (bundle_path, bundle_hash, result) =
-                        result.expect("bundle post-process task panicked");
+                    let (bundle_path, bundle_hash, result) = match result {
+                        Ok(tuple) => tuple,
+                        Err(join_err) => {
+                            // Post-process sub-task panicked or was aborted: count as failed
+                            // rather than re-panicking the orchestrator.
+                            failed += 1;
+                            tracing::error!(
+                                region = %self.region_name,
+                                error = %join_err,
+                                "bundle post-process task panicked or was aborted; counting as failed"
+                            );
+                            continue;
+                        }
+                    };
                     match result {
                         Ok(()) => {
                             Self::record_completed_bundle(
@@ -576,7 +609,9 @@ impl AssetExecutionContext {
                             .await;
                         }
                         Err(AssetExecutionError::Cancelled) => {
-                            return Err(AssetExecutionError::Cancelled);
+                            // Stop scheduling further work but fall through to persist the record so
+                            // already-completed bundles aren't re-downloaded on the next run.
+                            break;
                         }
                         Err(err) => {
                             failed += 1;
@@ -606,7 +641,8 @@ impl AssetExecutionContext {
                 message: "saving downloaded asset record".to_string(),
             },
         );
-        self.ensure_not_cancelled(&cancel_flag)?;
+        // Persist the record BEFORE honoring cancellation: every bundle that finished already ran
+        // its export/upload side effects, so dropping them here would force a redundant re-run.
         Self::save_download_record_on_blocking_thread(
             record_path.clone(),
             downloaded_assets.clone(),
@@ -618,6 +654,8 @@ impl AssetExecutionContext {
                 entries: downloaded_assets.len(),
             },
         );
+        // Honor cancellation now that the record is durable (this skips the heavier chart sync).
+        self.ensure_not_cancelled(&cancel_flag)?;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::Phase {
@@ -646,7 +684,9 @@ impl AssetExecutionContext {
             queued_downloads: tasks.len(),
             completed_downloads: completed,
             failed_downloads: failed,
-            updated_record_entries: downloaded_assets.len(),
+            // Number of record entries actually added/updated this run (not the whole record size),
+            // keeping the semantics consistent with the empty-task early-return path above.
+            updated_record_entries: completed,
             chart_hash_sync_performed,
         })
     }
@@ -756,7 +796,20 @@ impl AssetExecutionContext {
         let mut completed = 0usize;
         let mut failed = 0usize;
         while let Some(result) = joins.join_next().await {
-            let (bundle_path, result) = result.expect("bundle prefetch task panicked");
+            let (bundle_path, result) = match result {
+                Ok(tuple) => tuple,
+                Err(join_err) => {
+                    // Prefetch sub-task panicked or was aborted: count as failed instead of
+                    // unwinding the run.
+                    failed += 1;
+                    tracing::error!(
+                        region = %self.region_name,
+                        error = %join_err,
+                        "bundle prefetch task panicked or was aborted; counting as failed"
+                    );
+                    continue;
+                }
+            };
             match result {
                 Ok(()) => {
                     completed += 1;
@@ -1275,50 +1328,70 @@ impl AssetExecutionContext {
             },
         );
 
-        let deobfuscate_started = Instant::now();
-        let deobfuscated = deobfuscate(&body);
+        // The bundle path originates from the (untrusted) asset-info server. Validate it before it
+        // is used to build any filesystem path, so a name like "../../etc/foo" can't escape the
+        // temp/export directories.
+        let safe_bundle_path = validate_relative_bundle_path(&task.bundle_path)?.to_path_buf();
+        let raw_bundle_target = if self.matches_raw_bundle_filters(&task.bundle_path) {
+            Some(self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?)
+        } else {
+            None
+        };
+        let haruki_3d_work_target = if self.matches_haruki_3d_filters(&task.bundle_path) {
+            match haruki_3d_work_root {
+                Some(work_root) => Some(raw_bundle_output_path(work_root, &task.bundle_path)?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let temp_file = std::env::temp_dir()
+            .join(&self.region_name)
+            .join(&safe_bundle_path);
+
+        // Deobfuscation (a full-buffer transform) and the raw-bundle/temp-file writes are
+        // CPU/blocking work. Run them on a blocking thread so the async runtime workers (which also
+        // serve HTTP and other jobs) aren't stalled while many bundles process concurrently.
+        let blocking_started = Instant::now();
+        let temp_file_for_blocking = temp_file.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), AssetExecutionError> {
+            let deobfuscated = deobfuscate(&body);
+            if let Some(raw_path) = raw_bundle_target {
+                Self::write_raw_bundle(&raw_path, &deobfuscated)?;
+            }
+            if let Some(work_path) = haruki_3d_work_target {
+                Self::write_haruki_3d_work_bundle(&work_path, &deobfuscated)?;
+            }
+            if let Some(parent) = temp_file_for_blocking.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| {
+                    AssetExecutionError::CreateTempDir {
+                        path: parent.to_path_buf(),
+                        source,
+                    }
+                })?;
+            }
+            std::fs::write(&temp_file_for_blocking, deobfuscated).map_err(|source| {
+                AssetExecutionError::WriteTempFile {
+                    path: temp_file_for_blocking.clone(),
+                    source,
+                }
+            })?;
+            Ok(())
+        })
+        .await
+        .map_err(|source| AssetExecutionError::BlockingTask(source.to_string()))??;
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDeobfuscated {
                 bundle: task.bundle_path.clone(),
-                elapsed_ms: deobfuscate_started.elapsed().as_millis(),
+                elapsed_ms: blocking_started.elapsed().as_millis(),
             },
         );
-
-        if self.matches_raw_bundle_filters(&task.bundle_path) {
-            let raw_path = self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?;
-            Self::write_raw_bundle(&raw_path, &deobfuscated)?;
-        }
-        if self.matches_haruki_3d_filters(&task.bundle_path) {
-            if let Some(work_root) = haruki_3d_work_root {
-                let work_path = raw_bundle_output_path(work_root, &task.bundle_path)?;
-                Self::write_haruki_3d_work_bundle(&work_path, &deobfuscated)?;
-            }
-        }
-
-        let write_started = Instant::now();
-        let temp_file = std::env::temp_dir()
-            .join(&self.region_name)
-            .join(&task.bundle_path);
-        if let Some(parent) = temp_file.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| {
-                AssetExecutionError::CreateTempDir {
-                    path: parent.to_path_buf(),
-                    source,
-                }
-            })?;
-        }
-        std::fs::write(&temp_file, deobfuscated).map_err(|source| {
-            AssetExecutionError::WriteTempFile {
-                path: temp_file.clone(),
-                source,
-            }
-        })?;
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleTempWritten {
                 bundle: task.bundle_path.clone(),
-                elapsed_ms: write_started.elapsed().as_millis(),
+                elapsed_ms: blocking_started.elapsed().as_millis(),
             },
         );
 
@@ -1710,54 +1783,56 @@ impl AssetExecutionContext {
     }
 }
 
-fn raw_bundle_output_path(root: &Path, bundle_path: &str) -> Result<PathBuf, AssetExecutionError> {
+/// Validate an untrusted, server-provided bundle path: it must be a relative path made only of
+/// normal components (no empty / `.` / `..` / absolute / root / prefix). Returns it as a relative
+/// `Path` so callers can safely `join` it onto a trusted root without escaping it.
+fn validate_relative_bundle_path(bundle_path: &str) -> Result<&Path, AssetExecutionError> {
+    let invalid = |reason: &str| AssetExecutionError::InvalidRawBundlePath {
+        bundle: bundle_path.to_string(),
+        reason: reason.to_string(),
+    };
     if bundle_path.is_empty() {
-        return Err(AssetExecutionError::InvalidRawBundlePath {
-            bundle: bundle_path.to_string(),
-            reason: "path is empty".to_string(),
-        });
+        return Err(invalid("path is empty"));
     }
     if bundle_path
         .split('/')
         .any(|component| component.is_empty() || component == "." || component == "..")
     {
-        return Err(AssetExecutionError::InvalidRawBundlePath {
-            bundle: bundle_path.to_string(),
-            reason: "empty, current-directory, or parent-directory components are not allowed"
-                .to_string(),
-        });
+        return Err(invalid(
+            "empty, current-directory, or parent-directory components are not allowed",
+        ));
     }
 
     let relative = Path::new(bundle_path);
     if relative.is_absolute() {
-        return Err(AssetExecutionError::InvalidRawBundlePath {
-            bundle: bundle_path.to_string(),
-            reason: "absolute paths are not allowed".to_string(),
-        });
+        return Err(invalid("absolute paths are not allowed"));
     }
+
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => {}
+            Component::CurDir => {
+                return Err(invalid("current-directory components are not allowed"))
+            }
+            Component::ParentDir => {
+                return Err(invalid("parent-directory components are not allowed"))
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(invalid("root or prefix components are not allowed"))
+            }
+        }
+    }
+
+    Ok(relative)
+}
+
+fn raw_bundle_output_path(root: &Path, bundle_path: &str) -> Result<PathBuf, AssetExecutionError> {
+    let relative = validate_relative_bundle_path(bundle_path)?;
 
     let mut path = root.to_path_buf();
     for component in relative.components() {
-        match component {
-            Component::Normal(value) => path.push(value),
-            Component::CurDir => {
-                return Err(AssetExecutionError::InvalidRawBundlePath {
-                    bundle: bundle_path.to_string(),
-                    reason: "current-directory components are not allowed".to_string(),
-                })
-            }
-            Component::ParentDir => {
-                return Err(AssetExecutionError::InvalidRawBundlePath {
-                    bundle: bundle_path.to_string(),
-                    reason: "parent-directory components are not allowed".to_string(),
-                })
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(AssetExecutionError::InvalidRawBundlePath {
-                    bundle: bundle_path.to_string(),
-                    reason: "root or prefix components are not allowed".to_string(),
-                })
-            }
+        if let Component::Normal(value) = component {
+            path.push(value);
         }
     }
 
@@ -1827,20 +1902,13 @@ pub async fn fetch_live_asset_bundle_info(
 fn is_retryable_http_error(err: &AssetExecutionError) -> bool {
     match err {
         AssetExecutionError::Http(_) => true,
-        AssetExecutionError::HttpStatus { status, .. } => *status >= 500,
+        // 5xx are transient; 429 (Too Many Requests) and 408 (Request Timeout) are the canonical
+        // "back off and retry" signals that Project Sekai CDNs/rate limiters emit under load.
+        AssetExecutionError::HttpStatus { status, .. } => {
+            *status >= 500 || *status == 429 || *status == 408
+        }
         _ => false,
     }
-}
-
-fn format_reqwest_error_chain(err: &reqwest::Error) -> String {
-    let mut message = err.to_string();
-    let mut source = err.source();
-    while let Some(err) = source {
-        message.push_str(": ");
-        message.push_str(&err.to_string());
-        source = err.source();
-    }
-    message
 }
 
 pub fn decrypt_asset_bundle_info(
@@ -2231,6 +2299,70 @@ mod tests {
             decrypt_asset_bundle_info(TEST_AES_KEY_HEX, TEST_AES_IV_HEX, &encrypted).unwrap();
         assert_eq!(decrypted.version.as_deref(), Some("1"));
         assert!(decrypted.bundles.contains_key("start/a"));
+    }
+
+    #[test]
+    fn build_download_tasks_skips_unchanged_and_queues_changed() {
+        let region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: String::new(),
+            asset_bundle_url_template: String::new(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::from([("production".to_string(), "abc".to_string())]),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let config = AppConfig::default();
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let ctx = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+
+        let detail = |hash: &str| AssetBundleDetail {
+            bundle_name: String::new(),
+            cache_file_name: String::new(),
+            cache_directory_name: String::new(),
+            hash: hash.to_string(),
+            category: AssetCategory::StartApp,
+            crc: 0,
+            file_size: 1,
+            dependencies: Vec::new(),
+            paths: Vec::new(),
+            is_builtin: false,
+            is_relocate: None,
+            md5_hash: None,
+            download_path: None,
+        };
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([
+                ("start/a".to_string(), detail("h1")),
+                ("start/aa".to_string(), detail("h2")),
+            ]),
+        };
+
+        // Recorded hash matches -> skipped; bundle absent from record -> queued.
+        let record = DownloadRecord::from([("start/a".to_string(), "h1".to_string())]);
+        let tasks = ctx.build_download_tasks(&info, &record);
+        let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
+        assert!(
+            !paths.contains(&"start/a"),
+            "unchanged bundle must be skipped"
+        );
+        assert!(paths.contains(&"start/aa"), "new bundle must be queued");
+
+        // Recorded hash differs -> re-queued.
+        let stale = DownloadRecord::from([("start/a".to_string(), "OLD".to_string())]);
+        let tasks = ctx.build_download_tasks(&info, &stale);
+        let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
+        assert!(
+            paths.contains(&"start/a"),
+            "changed bundle must be re-queued"
+        );
     }
 
     #[test]

@@ -56,7 +56,9 @@ pub(super) fn write_native_object_payload(
     if is_text_asset_acb_target(asset, &target) {
         path_state.acb_sources.push(NativeInMemoryMediaSource {
             target: target.clone(),
-            payload: read_output.payload.clone(),
+            // Deliberate copy: ACB sources outlive the whole export into the media
+            // post-process stage, so they must not pin the read-batch bundle.
+            payload: read_output.payload.to_vec(),
         });
         return Ok(());
     }
@@ -76,7 +78,7 @@ pub(super) fn write_native_object_payload(
         queue_native_image_payload_final_files(
             path_state,
             &target,
-            &read_output.payload,
+            read_output.payload.clone(),
             options.region,
         )
     } else {
@@ -522,7 +524,7 @@ pub(super) fn write_native_payload_file(
 pub(super) fn queue_native_image_payload_final_files(
     path_state: &mut NativeSemanticExportPathState,
     target: &Path,
-    payload: &[u8],
+    payload: bytes::Bytes,
     region: &RegionConfig,
 ) -> Vec<PathBuf> {
     let written_files = planned_image_output_files(target, region);
@@ -530,7 +532,7 @@ pub(super) fn queue_native_image_payload_final_files(
         .pending_image_writes
         .push(PendingNativeImageWrite {
             target: target.to_path_buf(),
-            payload: payload.to_vec(),
+            payload,
             region: region.clone(),
         });
     written_files
@@ -850,10 +852,10 @@ pub(super) fn write_payload_bundle(
 pub(super) fn queue_native_image_payload_bundle_final_files(
     path_state: &mut NativeSemanticExportPathState,
     target: &Path,
-    payload: &[u8],
+    payload: &bytes::Bytes,
     region: &RegionConfig,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
-    let entries = parse_payload_bundle_borrowed(payload)?;
+    let entries = parse_payload_bundle_shared(payload)?;
     let mut written_files = Vec::with_capacity(entries.len());
     for (name, bytes) in entries {
         let entry_target = payload_bundle_entry_target(target, &name).with_extension("png");
@@ -897,13 +899,115 @@ pub(super) fn safe_payload_bundle_path(name: &str) -> PathBuf {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn parse_payload_bundle(
     payload: &[u8],
 ) -> Result<Vec<(String, Vec<u8>)>, ExportPipelineError> {
     Ok(parse_payload_bundle_borrowed(payload)?
         .into_iter()
         .map(|(name, bytes)| (name, bytes.to_vec()))
+        .collect())
+}
+
+/// A read-only mmap of a worker payload spill file. The file is unlinked right
+/// after mapping; the pages (and therefore every `Bytes` slice into them) stay
+/// valid until the mapping drops.
+#[cfg(unix)]
+struct MappedSpilledPayload {
+    pointer: *mut libc::c_void,
+    len: usize,
+}
+
+// SAFETY: the mapping is PROT_READ and never mutated; concurrent reads from any
+// thread are safe, and munmap happens exactly once in Drop.
+#[cfg(unix)]
+unsafe impl Send for MappedSpilledPayload {}
+#[cfg(unix)]
+unsafe impl Sync for MappedSpilledPayload {}
+
+#[cfg(unix)]
+impl AsRef<[u8]> for MappedSpilledPayload {
+    fn as_ref(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.pointer as *const u8, self.len) }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MappedSpilledPayload {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.pointer, self.len);
+        }
+    }
+}
+
+/// Loads a worker payload spill file as shared `Bytes` and removes the file. On unix
+/// the file is mapped instead of read, so the parent-side heap copy of the payload
+/// disappears; when the worker spilled into tmpfs the bytes never touch disk at all.
+pub(super) fn map_spilled_payload(path: &Path) -> Result<bytes::Bytes, ExportPipelineError> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        let io_error = |source| ExportPipelineError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        let file = std::fs::File::open(path).map_err(io_error)?;
+        let len = file.metadata().map_err(io_error)?.len();
+        if len == 0 {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Ok(bytes::Bytes::new());
+        }
+        let mapped = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len as usize,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        drop(file);
+        if mapped == libc::MAP_FAILED {
+            // Extremely defensive: fall back to a plain read if the mapping fails.
+            let payload = std::fs::read(path).map_err(io_error)?;
+            let _ = std::fs::remove_file(path);
+            return Ok(payload.into());
+        }
+        let _ = std::fs::remove_file(path);
+        Ok(bytes::Bytes::from_owner(MappedSpilledPayload {
+            pointer: mapped,
+            len: len as usize,
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let payload = std::fs::read(path).map_err(|source| ExportPipelineError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let _ = std::fs::remove_file(path);
+        Ok(payload.into())
+    }
+}
+
+/// Bundle parse that returns refcounted sub-slices of the backing buffer instead
+/// of borrowed slices, so entries can outlive the parse without a heap copy.
+pub(super) fn parse_payload_bundle_shared(
+    payload: &bytes::Bytes,
+) -> Result<Vec<(String, bytes::Bytes)>, ExportPipelineError> {
+    let base = payload.as_ptr() as usize;
+    Ok(parse_payload_bundle_borrowed(payload)?
+        .into_iter()
+        .map(|(name, slice)| {
+            // Sub-slices returned by the borrowed parser always point inside
+            // `payload`, so the offset arithmetic cannot underflow or overflow.
+            let start = slice.as_ptr() as usize - base;
+            (name, payload.slice(start..start + slice.len()))
+        })
         .collect())
 }
 
@@ -942,19 +1046,7 @@ pub(super) fn parse_payload_bundle_borrowed(
     if payload.starts_with(NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC) {
         cursor += NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC.len();
         let count = read_bundle_u32(payload, &mut cursor)? as usize;
-        match parse_payload_bundle_grouped_entries(payload, cursor, count) {
-            Ok(entries) => return Ok(entries),
-            Err(grouped_error) => {
-                return parse_payload_bundle_interleaved_entries(payload, cursor, count, None)
-                    .map_err(|interleaved_error| ExportPipelineError::AssetStudioFfi {
-                        message: format!(
-                            "{}; legacy grouped parse also failed: {}",
-                            assetstudio_error_message(&interleaved_error),
-                            assetstudio_error_message(&grouped_error)
-                        ),
-                    });
-            }
-        }
+        return parse_payload_bundle_grouped_entries(payload, cursor, count);
     }
 
     Err(ExportPipelineError::AssetStudioFfi {
@@ -1074,13 +1166,6 @@ pub(super) fn finish_payload_bundle_parse(
         }
     }
     Ok(())
-}
-
-pub(super) fn assetstudio_error_message(error: &ExportPipelineError) -> String {
-    match error {
-        ExportPipelineError::AssetStudioFfi { message } => message.clone(),
-        other => other.to_string(),
-    }
 }
 
 pub(super) fn read_bundle_u32(

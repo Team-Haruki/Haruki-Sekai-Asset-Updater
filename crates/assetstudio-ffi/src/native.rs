@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::mem::size_of;
 use std::os::raw::{c_char, c_int, c_longlong, c_uchar};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use tracing::warn;
 
@@ -392,20 +391,6 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn native_call_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-}
-
-pub fn call_assetstudio_ffi_typed_request(
-    native_library_path: &str,
-    request: &AssetStudioFfiRequest,
-) -> Result<(c_int, AssetStudioFfiResponse, Vec<u8>), AssetStudioFfiError> {
-    let _lock = native_call_lock();
-    let library = LoadedAssetStudioFfiLibrary::load(native_library_path)?;
-    library.call_typed_request(request)
-}
-
 pub struct LoadedAssetStudioFfiLibrary {
     _library: libloading::Library,
     _native_dependency_handles: Vec<libloading::Library>,
@@ -745,6 +730,38 @@ impl LoadedAssetStudioFfiLibrary {
         Ok(response)
     }
 
+    /// Like [`call_typed_request`], but read payloads whose capacity hint exceeds
+    /// the plan's threshold are written by the native library straight into a spill
+    /// file (returned as [`CallPayload::File`]) instead of an in-memory bundle.
+    pub fn call_typed_request_with_spill(
+        &self,
+        request: &AssetStudioFfiRequest,
+        spill: Option<&PayloadSpillPlan>,
+    ) -> Result<(c_int, AssetStudioFfiResponse, CallPayload), AssetStudioFfiError> {
+        #[cfg(unix)]
+        if let (AssetStudioFfiRequest::ContextReadObjects(read_request), Some(plan)) =
+            (request, spill)
+        {
+            let hint = usize::try_from(read_request.payload_capacity_hint).unwrap_or(usize::MAX);
+            if hint > plan.threshold && !read_request.objects.is_empty() {
+                if let Some((status, response, payload)) = self
+                    .read_context_objects_into_spill_file(read_request, plan.directory.as_deref())?
+                {
+                    return Ok((
+                        status,
+                        AssetStudioFfiResponse::ContextReadObjects(response),
+                        payload,
+                    ));
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = spill;
+
+        let (status, response, payload) = self.call_typed_request(request)?;
+        Ok((status, response, CallPayload::Inline(payload)))
+    }
+
     pub fn call_typed_request(
         &self,
         request: &AssetStudioFfiRequest,
@@ -775,36 +792,6 @@ impl LoadedAssetStudioFfiLibrary {
                     status,
                     AssetStudioFfiResponse::ContextClose(response),
                     Vec::new(),
-                ))
-            }
-            AssetStudioFfiRequest::ContextReadObject(request) => {
-                let batch_request = AssetStudioFfiContextReadObjectsRequest {
-                    context_id: request.context_id,
-                    objects: vec![AssetStudioFfiContextReadObjectItemRequest {
-                        path_id: request.path_id,
-                        kind: request.kind.clone(),
-                        image_format: request.image_format.clone(),
-                    }],
-                };
-                let (status, batch_response, payload) =
-                    self.read_context_objects(&batch_request)?;
-                let response = batch_response.reads.into_iter().next().unwrap_or_else(|| {
-                    AssetStudioFfiObjectReadResponse {
-                        success: false,
-                        asset: None,
-                        payload_kind: None,
-                        payload_len: 0,
-                        suggested_extension: None,
-                        warnings: Vec::new(),
-                        phase_ms: HashMap::new(),
-                        error: Some("typed context_read_object returned no read item".to_string()),
-                        duration_ms: None,
-                    }
-                });
-                Ok((
-                    status,
-                    AssetStudioFfiResponse::ContextReadObject(response),
-                    payload,
                 ))
             }
             AssetStudioFfiRequest::ContextReadObjects(request) => {
@@ -966,42 +953,9 @@ impl LoadedAssetStudioFfiLibrary {
         &self,
         request: &AssetStudioFfiContextReadObjectsRequest,
     ) -> Result<(c_int, AssetStudioFfiObjectReadBatchResponse, Vec<u8>), AssetStudioFfiError> {
-        let mut kinds = Vec::with_capacity(request.objects.len());
-        let mut formats = Vec::with_capacity(request.objects.len());
-        let mut items = Vec::with_capacity(request.objects.len());
-        for item in &request.objects {
-            let kind = CString::new(item.kind.clone()).map_err(|source| {
-                AssetStudioFfiError::AssetStudioFfi {
-                    message: format!("native read kind contains nul byte: {source}"),
-                }
-            })?;
-            let format = CString::new(item.image_format.clone()).map_err(|source| {
-                AssetStudioFfiError::AssetStudioFfi {
-                    message: format!("native read image format contains nul byte: {source}"),
-                }
-            })?;
-            items.push(AssetStudioTypedObjectReadItemRequest {
-                path_id: item.path_id,
-                kind_utf8: kind.as_ptr().cast(),
-                kind_utf8_len: kind.as_bytes().len() as c_int,
-                image_format_utf8: format.as_ptr().cast(),
-                image_format_utf8_len: format.as_bytes().len() as c_int,
-            });
-            kinds.push(kind);
-            formats.push(format);
-        }
-        let typed_request = AssetStudioTypedObjectReadBatchIntoRequest {
-            struct_size: size_of::<AssetStudioTypedObjectReadBatchIntoRequest>() as c_int,
-            context_id: request.context_id,
-            items: items.as_ptr(),
-            count: items.len() as c_int,
-            flags: 0,
-            items_buffer: ptr::null_mut(),
-            items_buffer_len: 0,
-            payload: ptr::null_mut(),
-            payload_len: 0,
-            reserved: 0,
-        };
+        let storage = build_typed_read_items(request)?;
+        let typed_request =
+            typed_read_batch_request(request.context_id, &storage, ptr::null_mut(), 0);
         let mut response = AssetStudioTypedObjectReadBatchRetryResponse::default();
         let status =
             unsafe { (self.context_read_objects_direct_retry)(&typed_request, &mut response) };
@@ -1019,6 +973,434 @@ impl LoadedAssetStudioFfiLibrary {
             status.max(response.status)
         };
         Ok((call_status, output, payload))
+    }
+
+    /// Direct-write read: the payload block is written by the native library
+    /// straight into a mapped spill file laid out as a grouped V1 bundle. Returns
+    /// `Ok(None)` when the file/mapping could not be prepared, in which case the
+    /// caller should fall back to the in-memory path.
+    #[cfg(unix)]
+    fn read_context_objects_into_spill_file(
+        &self,
+        request: &AssetStudioFfiContextReadObjectsRequest,
+        directory: Option<&Path>,
+    ) -> Result<
+        Option<(c_int, AssetStudioFfiObjectReadBatchResponse, CallPayload)>,
+        AssetStudioFfiError,
+    > {
+        let names = request
+            .objects
+            .iter()
+            .map(|item| item.path_id.to_string())
+            .collect::<Vec<_>>();
+        let header_len = grouped_bundle_header_len(&names);
+        let Ok(hint) = usize::try_from(request.payload_capacity_hint) else {
+            return Ok(None);
+        };
+        let Some(capacity) = header_len.checked_add(hint) else {
+            return Ok(None);
+        };
+
+        let mut builder = tempfile::Builder::new();
+        builder
+            .prefix(WORKER_PAYLOAD_FILE_PREFIX)
+            .suffix(WORKER_PAYLOAD_FILE_SUFFIX);
+        let temp = match directory {
+            Some(directory) => builder.tempfile_in(directory),
+            None => builder.tempfile(),
+        };
+        // Preparation failures (missing dir, tmpfs full, mmap refusal) are not call
+        // failures: report None so the caller retries through the in-memory path.
+        let Ok(temp) = temp else {
+            return Ok(None);
+        };
+        let (file, path) = match temp.keep() {
+            Ok(kept) => kept,
+            Err(_) => return Ok(None),
+        };
+        // Reserve backing blocks before exposing the mapping to the decoder. A bare
+        // set_len leaves the file sparse, and on tmpfs a write into an unbacked page
+        // raises SIGBUS when space runs out — killing the process instead of failing
+        // the call. With the reservation, exhaustion surfaces here as ENOSPC and the
+        // caller retries through the in-memory path. The over-reservation is
+        // transient: the final set_len below releases everything past the real size.
+        if reserve_file_capacity(&file, capacity as u64).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return Ok(None);
+        }
+        if file.set_len(capacity as u64).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return Ok(None);
+        }
+        let mut mapping = match RwFileMapping::map(&file, capacity) {
+            Ok(mapping) => mapping,
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                return Ok(None);
+            }
+        };
+        let length_positions = write_grouped_bundle_header(mapping.as_mut_slice(), &names);
+
+        let cleanup = |mapping: RwFileMapping, path: &Path| {
+            drop(mapping);
+            let _ = std::fs::remove_file(path);
+        };
+
+        let storage = match build_typed_read_items(request) {
+            Ok(storage) => storage,
+            Err(error) => {
+                cleanup(mapping, &path);
+                return Err(error);
+            }
+        };
+        let payload_pointer = unsafe { (mapping.pointer as *mut c_uchar).add(header_len) };
+        let typed_request = typed_read_batch_request(
+            request.context_id,
+            &storage,
+            payload_pointer,
+            (capacity - header_len) as c_longlong,
+        );
+        let mut response = AssetStudioTypedObjectReadBatchRetryResponse::default();
+        let status =
+            unsafe { (self.context_read_objects_direct_retry)(&typed_request, &mut response) };
+        let output = typed_read_objects_response(request, status, &response);
+        let items = typed_read_items(&response);
+
+        if items.len() != request.objects.len() {
+            // Unexpected response shape: keep the proven in-memory bundle path while
+            // the native buffers are still alive.
+            let payload = typed_read_objects_payload_bundle(&response);
+            if response.result_handle != 0 {
+                unsafe {
+                    (self.result_free)(response.result_handle);
+                }
+            }
+            cleanup(mapping, &path);
+            let payload = payload?;
+            let call_status = if output.success {
+                0
+            } else {
+                status.max(response.status)
+            };
+            return Ok(Some((call_status, output, CallPayload::Inline(payload))));
+        }
+
+        let mut data_len = 0u64;
+        for (item, position) in items.iter().zip(&length_positions) {
+            let len = item.payload_len.max(0) as u64;
+            data_len = data_len.saturating_add(len);
+            patch_grouped_bundle_length(mapping.as_mut_slice(), *position, len);
+        }
+        let response_payload_len = response.payload_len.max(0) as u64;
+        let final_data_len = data_len.max(response_payload_len);
+
+        let payload_spilled = response.ownership_flags & TYPED_PAYLOAD_OWNERSHIP_FLAG != 0;
+        let mut copy_result = Ok(());
+        if payload_spilled && !response.payload.is_null() && response_payload_len > 0 {
+            // The capacity hint was too small: the native library kept the block in
+            // its own buffer. Grow the file and copy the block over (the only copy on
+            // this path, and only on hint misses).
+            copy_result = (|| -> std::io::Result<()> {
+                let required = header_len as u64 + response_payload_len;
+                if required > capacity as u64 {
+                    let remapped_len = usize::try_from(required).map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::OutOfMemory, "payload too large")
+                    })?;
+                    let previous = std::mem::replace(
+                        &mut mapping,
+                        RwFileMapping {
+                            pointer: libc::MAP_FAILED,
+                            len: 0,
+                        },
+                    );
+                    drop(previous);
+                    reserve_file_capacity(&file, required)?;
+                    file.set_len(required)?;
+                    mapping = RwFileMapping::map(&file, remapped_len)?;
+                }
+                let source = unsafe {
+                    std::slice::from_raw_parts(response.payload, response_payload_len as usize)
+                };
+                mapping.as_mut_slice()[header_len..header_len + source.len()]
+                    .copy_from_slice(source);
+                Ok(())
+            })();
+        }
+        // If the file cannot hold the grown payload (e.g. tmpfs lacks room), salvage
+        // the call through the in-memory bundle while the native buffers are still
+        // alive instead of failing the whole batch.
+        let inline_fallback = if copy_result.is_err() {
+            Some(typed_read_objects_payload_bundle(&response))
+        } else {
+            None
+        };
+        if response.result_handle != 0 {
+            unsafe {
+                (self.result_free)(response.result_handle);
+            }
+        }
+        if let Some(payload) = inline_fallback {
+            cleanup(mapping, &path);
+            let payload = payload?;
+            let call_status = if output.success {
+                0
+            } else {
+                status.max(response.status)
+            };
+            return Ok(Some((call_status, output, CallPayload::Inline(payload))));
+        }
+
+        drop(mapping);
+        let final_len = header_len as u64 + final_data_len;
+        if file.set_len(final_len).is_err() {
+            let _ = std::fs::remove_file(&path);
+            return Err(AssetStudioFfiError::AssetStudioFfi {
+                message: "failed to finalize payload spill file length".to_string(),
+            });
+        }
+
+        let call_status = if output.success {
+            0
+        } else {
+            status.max(response.status)
+        };
+        Ok(Some((
+            call_status,
+            output,
+            CallPayload::File {
+                path,
+                len: final_len,
+            },
+        )))
+    }
+}
+
+struct TypedReadItemStorage {
+    _kinds: Vec<CString>,
+    _formats: Vec<CString>,
+    items: Vec<AssetStudioTypedObjectReadItemRequest>,
+}
+
+fn build_typed_read_items(
+    request: &AssetStudioFfiContextReadObjectsRequest,
+) -> Result<TypedReadItemStorage, AssetStudioFfiError> {
+    let mut kinds = Vec::with_capacity(request.objects.len());
+    let mut formats = Vec::with_capacity(request.objects.len());
+    let mut items = Vec::with_capacity(request.objects.len());
+    for item in &request.objects {
+        let kind = CString::new(item.kind.clone()).map_err(|source| {
+            AssetStudioFfiError::AssetStudioFfi {
+                message: format!("native read kind contains nul byte: {source}"),
+            }
+        })?;
+        let format = CString::new(item.image_format.clone()).map_err(|source| {
+            AssetStudioFfiError::AssetStudioFfi {
+                message: format!("native read image format contains nul byte: {source}"),
+            }
+        })?;
+        items.push(AssetStudioTypedObjectReadItemRequest {
+            path_id: item.path_id,
+            kind_utf8: kind.as_ptr().cast(),
+            kind_utf8_len: kind.as_bytes().len() as c_int,
+            image_format_utf8: format.as_ptr().cast(),
+            image_format_utf8_len: format.as_bytes().len() as c_int,
+        });
+        kinds.push(kind);
+        formats.push(format);
+    }
+    Ok(TypedReadItemStorage {
+        _kinds: kinds,
+        _formats: formats,
+        items,
+    })
+}
+
+fn typed_read_batch_request(
+    context_id: i64,
+    storage: &TypedReadItemStorage,
+    payload: *mut c_uchar,
+    payload_len: c_longlong,
+) -> AssetStudioTypedObjectReadBatchIntoRequest {
+    AssetStudioTypedObjectReadBatchIntoRequest {
+        struct_size: size_of::<AssetStudioTypedObjectReadBatchIntoRequest>() as c_int,
+        context_id,
+        items: storage.items.as_ptr(),
+        count: storage.items.len() as c_int,
+        flags: 0,
+        items_buffer: ptr::null_mut(),
+        items_buffer_len: 0,
+        payload,
+        payload_len,
+        reserved: 0,
+    }
+}
+
+#[cfg(unix)]
+const NATIVE_AOT_PAYLOAD_BUNDLE_V1_MAGIC: &[u8] = b"HARUKI_ASSET_PAYLOAD_BUNDLE_V1";
+#[cfg(unix)]
+const TYPED_PAYLOAD_OWNERSHIP_FLAG: c_int = 2;
+
+/// Name prefix/suffix shared by every worker-created payload spill file, so a
+/// restarted worker can recognize and sweep stale ones left by a crash.
+pub const WORKER_PAYLOAD_FILE_PREFIX: &str = "haruki-assetstudio-worker-payload-";
+pub const WORKER_PAYLOAD_FILE_SUFFIX: &str = ".bin";
+
+/// Where and when the worker may spill read payloads to a file the parent maps.
+pub struct PayloadSpillPlan {
+    /// Preferred spill directory (tmpfs); `None` uses the system temp directory.
+    pub directory: Option<PathBuf>,
+    /// Direct-write applies only when the request's payload capacity hint exceeds this.
+    pub threshold: usize,
+}
+
+/// A typed call's payload: inline bytes for small results, or a spill file the
+/// native library wrote its payload block into (grouped V1 bundle layout).
+pub enum CallPayload {
+    Inline(Vec<u8>),
+    File { path: PathBuf, len: u64 },
+}
+
+#[cfg(unix)]
+fn grouped_bundle_header_len(names: &[String]) -> usize {
+    NATIVE_AOT_PAYLOAD_BUNDLE_V1_MAGIC.len()
+        + 4
+        + names.iter().map(|name| 4 + 8 + name.len()).sum::<usize>()
+}
+
+/// Writes a grouped V1 bundle header with zeroed payload lengths and returns the
+/// byte position of each length field so they can be patched after the read.
+#[cfg(unix)]
+fn write_grouped_bundle_header(buffer: &mut [u8], names: &[String]) -> Vec<usize> {
+    let magic = NATIVE_AOT_PAYLOAD_BUNDLE_V1_MAGIC;
+    let mut cursor = 0usize;
+    buffer[cursor..cursor + magic.len()].copy_from_slice(magic);
+    cursor += magic.len();
+    buffer[cursor..cursor + 4].copy_from_slice(&(names.len() as u32).to_le_bytes());
+    cursor += 4;
+    let mut length_positions = Vec::with_capacity(names.len());
+    for name in names {
+        buffer[cursor..cursor + 4].copy_from_slice(&(name.len() as u32).to_le_bytes());
+        cursor += 4;
+        length_positions.push(cursor);
+        buffer[cursor..cursor + 8].copy_from_slice(&0u64.to_le_bytes());
+        cursor += 8;
+        buffer[cursor..cursor + name.len()].copy_from_slice(name.as_bytes());
+        cursor += name.len();
+    }
+    debug_assert_eq!(cursor, grouped_bundle_header_len(names));
+    length_positions
+}
+
+#[cfg(unix)]
+fn patch_grouped_bundle_length(buffer: &mut [u8], position: usize, len: u64) {
+    buffer[position..position + 8].copy_from_slice(&len.to_le_bytes());
+}
+
+/// Reserves backing blocks for the first `len` bytes of `file`, so that later
+/// writes through a shared mapping cannot hit an unbacked page. Without the
+/// reservation, filesystem exhaustion (tmpfs in particular) surfaces as SIGBUS
+/// at write time; with it, exhaustion surfaces here as ENOSPC.
+#[cfg(target_os = "linux")]
+fn reserve_file_capacity(file: &std::fs::File, len: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if len == 0 {
+        return Ok(());
+    }
+    let len = i64::try_from(len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "spill capacity exceeds i64",
+        )
+    })?;
+    loop {
+        // posix_fallocate returns the error number directly instead of via errno.
+        match unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, len) } {
+            0 => return Ok(()),
+            libc::EINTR => continue,
+            error => return Err(std::io::Error::from_raw_os_error(error)),
+        }
+    }
+}
+
+/// See the Linux variant. macOS has no posix_fallocate; F_PREALLOCATE extends
+/// the allocation from the current end of file and leaves the size unchanged.
+#[cfg(target_os = "macos")]
+fn reserve_file_capacity(file: &std::fs::File, len: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let current = file.metadata()?.len();
+    if len <= current {
+        return Ok(());
+    }
+    let delta = i64::try_from(len - current).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "spill capacity exceeds i64",
+        )
+    })?;
+    let mut store = libc::fstore_t {
+        fst_flags: libc::F_ALLOCATEALL,
+        fst_posmode: libc::F_PEOFPOSMODE,
+        fst_offset: 0,
+        fst_length: delta,
+        fst_bytesalloc: 0,
+    };
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut store) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// No portable reservation on the remaining unix targets; keep the previous
+/// sparse-file behavior there.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn reserve_file_capacity(_file: &std::fs::File, _len: u64) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// A read/write shared mapping of a spill file. Writes are visible to any other
+/// process that maps or reads the same file through the unified page cache.
+#[cfg(unix)]
+struct RwFileMapping {
+    pointer: *mut libc::c_void,
+    len: usize,
+}
+
+#[cfg(unix)]
+impl RwFileMapping {
+    fn map(file: &std::fs::File, len: usize) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+
+        let pointer = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if pointer == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { pointer, len })
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.pointer as *mut u8, self.len) }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RwFileMapping {
+    fn drop(&mut self) {
+        if self.pointer != libc::MAP_FAILED && self.len > 0 {
+            unsafe {
+                libc::munmap(self.pointer, self.len);
+            }
+        }
     }
 }
 
@@ -1264,7 +1646,6 @@ fn typed_read_objects_response(
         reads,
         warnings: Vec::new(),
         phase_ms,
-        asset_type_counts: HashMap::new(),
         payload_kind_counts,
         payload_bytes_by_kind,
         payload_len: response.payload_len,
@@ -1282,9 +1663,6 @@ fn typed_read_objects_response(
         } else {
             0
         },
-        worker_id: None,
-        call_seq: None,
-        phase_stats: HashMap::new(),
         error: (!success).then(|| {
             format!(
                 "typed context_read_objects_direct_retry_v1 failed: requested={} status={} response_status={} error_code={}",
@@ -1414,4 +1792,60 @@ unsafe fn load_assetstudio_ffi_dependency(
     dependency_path: &Path,
 ) -> Result<libloading::Library, libloading::Error> {
     libloading::Library::new(dependency_path)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grouped_bundle_header_round_trips_through_patching() {
+        let names = vec!["7".to_string(), "12345".to_string(), "-9".to_string()];
+        let header_len = grouped_bundle_header_len(&names);
+        let mut buffer = vec![0u8; header_len + 6];
+        let positions = write_grouped_bundle_header(&mut buffer, &names);
+        assert_eq!(positions.len(), names.len());
+
+        patch_grouped_bundle_length(&mut buffer, positions[0], 3);
+        patch_grouped_bundle_length(&mut buffer, positions[1], 0);
+        patch_grouped_bundle_length(&mut buffer, positions[2], 3);
+        buffer[header_len..header_len + 3].copy_from_slice(b"abc");
+        buffer[header_len + 3..header_len + 6].copy_from_slice(b"xyz");
+
+        // Parse back with the grouped V1 layout rules used by the parent process.
+        let magic = NATIVE_AOT_PAYLOAD_BUNDLE_V1_MAGIC;
+        assert!(buffer.starts_with(magic));
+        let mut cursor = magic.len();
+        let count = u32::from_le_bytes(buffer[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+        assert_eq!(count, 3);
+        let mut entries = Vec::new();
+        for _ in 0..count {
+            let name_len =
+                u32::from_le_bytes(buffer[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            let payload_len =
+                u64::from_le_bytes(buffer[cursor..cursor + 8].try_into().unwrap()) as usize;
+            cursor += 8;
+            let name = String::from_utf8(buffer[cursor..cursor + name_len].to_vec()).unwrap();
+            cursor += name_len;
+            entries.push((name, payload_len));
+        }
+        assert_eq!(cursor, header_len);
+        assert_eq!(
+            entries,
+            vec![
+                ("7".to_string(), 3),
+                ("12345".to_string(), 0),
+                ("-9".to_string(), 3),
+            ]
+        );
+        let mut data_cursor = header_len;
+        let mut payloads = Vec::new();
+        for (_, len) in &entries {
+            payloads.push(buffer[data_cursor..data_cursor + len].to_vec());
+            data_cursor += len;
+        }
+        assert_eq!(payloads, vec![b"abc".to_vec(), Vec::new(), b"xyz".to_vec()]);
+    }
 }

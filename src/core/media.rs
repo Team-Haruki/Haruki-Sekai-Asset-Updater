@@ -135,13 +135,10 @@ pub async fn convert_m2v_bytes_to_mp4_with_backend(
         "m2v-bytes->mp4",
         || media_ffi::convert_m2v_bytes_to_mp4(m2v_bytes, mp4_file, frame_rate),
         || async {
+            // `temp_path` removes the file on drop (success or error), no manual cleanup needed.
             let temp_path = write_cli_input_temp_file(".m2v", m2v_bytes)?;
             convert_m2v_to_mp4_cli(&temp_path, mp4_file, false, ffmpeg_path, frame_rate, retry)
-                .await?;
-            remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
-                path: temp_path,
-                source,
-            })
+                .await
         },
     )
     .await
@@ -273,12 +270,9 @@ fn convert_wav_bytes_to_mp3_cli(
     ffmpeg_path: &str,
     retry: &RetryConfig,
 ) -> Result<(), ExportPipelineError> {
+    // `temp_path` removes the file on drop (success or error), no manual cleanup needed.
     let temp_path = write_cli_input_temp_file(".wav", wav_bytes)?;
-    convert_wav_to_mp3_cli(&temp_path, mp3_file, ffmpeg_path, retry)?;
-    remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
-        path: temp_path,
-        source,
-    })
+    convert_wav_to_mp3_cli(&temp_path, mp3_file, ffmpeg_path, retry)
 }
 
 pub fn convert_wav_to_flac_with_backend(
@@ -364,18 +358,19 @@ fn convert_wav_bytes_to_flac_cli(
     ffmpeg_path: &str,
     retry: &RetryConfig,
 ) -> Result<(), ExportPipelineError> {
+    // `temp_path` removes the file on drop (success or error), no manual cleanup needed.
     let temp_path = write_cli_input_temp_file(".wav", wav_bytes)?;
-    convert_wav_to_flac_cli(&temp_path, flac_file, ffmpeg_path, retry)?;
-    remove_file_if_exists(&temp_path).map_err(|source| ExportPipelineError::Io {
-        path: temp_path,
-        source,
-    })
+    convert_wav_to_flac_cli(&temp_path, flac_file, ffmpeg_path, retry)
 }
 
+/// Write `bytes` to a fresh temp file and return its [`tempfile::TempPath`] guard. The file is
+/// removed when the returned guard is dropped, so it is cleaned up on BOTH the success and the
+/// error path of the conversion that consumes it (previously `.keep()` detached the RAII guard and
+/// leaked the file on every conversion failure).
 fn write_cli_input_temp_file(
     suffix: &str,
     bytes: &[u8],
-) -> Result<std::path::PathBuf, ExportPipelineError> {
+) -> Result<tempfile::TempPath, ExportPipelineError> {
     let temp_root = std::env::temp_dir();
     let mut temp_file = tempfile::Builder::new()
         .suffix(suffix)
@@ -388,13 +383,7 @@ fn write_cli_input_temp_file(
         path: temp_file.path().to_path_buf(),
         source,
     })?;
-    temp_file
-        .into_temp_path()
-        .keep()
-        .map_err(|error| ExportPipelineError::Io {
-            path: error.path.to_path_buf(),
-            source: error.error,
-        })
+    Ok(temp_file.into_temp_path())
 }
 
 async fn run_media_backend<Ffi, Cli, CliFuture>(
@@ -524,9 +513,34 @@ fn is_retryable_command_error(err: &ExportPipelineError) -> bool {
                 | std::io::ErrorKind::ConnectionAborted
                 | std::io::ErrorKind::ConnectionRefused
         ),
-        ExportPipelineError::CommandFailed { .. } => true,
+        // Only retry a non-zero ffmpeg exit when the output hints at a transient/resource problem.
+        // Deterministic failures (corrupt/unsupported input, bad codec, invalid args) would fail
+        // identically on every attempt, so retrying just wastes the encode slot and wall-clock.
+        ExportPipelineError::CommandFailed { status, stderr, .. } => {
+            is_transient_command_failure(status, stderr)
+        }
         _ => false,
     }
+}
+
+fn is_transient_command_failure(status: &str, stderr: &str) -> bool {
+    const TRANSIENT_MARKERS: &[&str] = &[
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "temporarily unavailable",
+        "broken pipe",
+        "i/o error",
+        "input/output error",
+        "signal",
+        "killed",
+    ];
+    let haystack = format!("{status} {stderr}").to_lowercase();
+    TRANSIENT_MARKERS
+        .iter()
+        .any(|marker| haystack.contains(marker))
 }
 
 fn map_command_output(
