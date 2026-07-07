@@ -4,7 +4,10 @@ mod types;
 mod worker_pool;
 
 pub use frame::{read_worker_frame, write_worker_frame};
-pub use native::{call_assetstudio_ffi_typed_request, LoadedAssetStudioFfiLibrary};
+pub use native::{
+    call_assetstudio_ffi_typed_request, CallPayload, LoadedAssetStudioFfiLibrary, PayloadSpillPlan,
+    WORKER_PAYLOAD_FILE_PREFIX, WORKER_PAYLOAD_FILE_SUFFIX,
+};
 pub use types::{
     AssetStudioFfiAssetInfo, AssetStudioFfiContextCloseRequest, AssetStudioFfiContextCloseResponse,
     AssetStudioFfiContextListObjectsRequest, AssetStudioFfiContextListObjectsResponse,

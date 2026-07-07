@@ -132,6 +132,12 @@ pub struct AssetStudioFfiContextReadObjectRequest {
 pub struct AssetStudioFfiContextReadObjectsRequest {
     pub context_id: i64,
     pub objects: Vec<AssetStudioFfiContextReadObjectItemRequest>,
+    /// Expected upper bound for the packed payload block in bytes. When it exceeds
+    /// the worker's spill threshold, the worker maps a spill file up front and the
+    /// native library writes payloads straight into the mapping. 0 (the default for
+    /// older callers) keeps the in-memory path.
+    #[serde(default)]
+    pub payload_capacity_hint: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

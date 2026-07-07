@@ -764,7 +764,30 @@ pub(super) fn native_object_read_batch_request(
                 image_format: native_image_format_for_asset(asset, image_format),
             })
             .collect(),
+        payload_capacity_hint: native_object_read_payload_capacity_hint(asset_chunk, image_format),
     }
+}
+
+/// Generous upper bound for the batch's packed payload block. Images decode from
+/// compressed GPU formats to raw RGBA (up to ~16x for ASTC 8x8), other kinds stay
+/// close to their source size. The spill file backing this reservation is sparse,
+/// so overestimating is free; underestimating only costs one fallback copy in the
+/// worker.
+pub(super) fn native_object_read_payload_capacity_hint(
+    asset_chunk: &[&AssetStudioFfiAssetInfo],
+    image_format: &str,
+) -> u64 {
+    asset_chunk
+        .iter()
+        .map(|asset| {
+            let size = asset.size.max(0) as u64;
+            if is_native_aot_non_bmp_image_read(asset, image_format) {
+                size.saturating_mul(16).saturating_add(1024 * 1024)
+            } else {
+                size.saturating_mul(2).saturating_add(64 * 1024)
+            }
+        })
+        .fold(0u64, u64::saturating_add)
 }
 
 pub(super) fn native_image_format_for_asset(
