@@ -2661,6 +2661,56 @@ fn object_read_batch_preserves_diagnostics_and_payloads() {
 }
 
 #[test]
+fn object_read_batch_maps_spilled_payload_file_and_removes_it() {
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("ok".to_string()),
+        container: Some("assets/ok.bytes".to_string()),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 7,
+        unique_id: None,
+        size: 3,
+        source_file: None,
+    };
+    let mut payload = Vec::new();
+    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&1u32.to_le_bytes());
+    payload.extend_from_slice(&3u64.to_le_bytes());
+    payload.extend_from_slice(b"7");
+    payload.extend_from_slice(b"abc");
+    let spill_dir = tempfile::tempdir().unwrap();
+    let payload_file = spill_dir.path().join("spilled-payload.bin");
+    std::fs::write(&payload_file, &payload).unwrap();
+    let output = WorkerOutput {
+            status: "0".to_string(),
+            status_success: true,
+            response: AssetStudioFfiResponse::ContextReadObjects(
+                sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}],"warnings":[],"payload_len":3,"object_count":1,"payload_bundle_bytes":0,"failed_count":0,"read_payload_ms":1,"worker_id":null,"call_seq":null,"phase_stats":{},"error":null,"duration_ms":1}"#).unwrap(),
+            ),
+            stderr: String::new(),
+            payload: Vec::new(),
+            payload_file: Some(payload_file.clone()),
+        };
+    let assets = [&asset];
+
+    let parsed =
+        parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(output, &assets).unwrap();
+
+    assert_eq!(parsed.results.len(), 1);
+    let NativeObjectReadParseResult::Read(read) = &parsed.results[0] else {
+        panic!("expected successful batch object read");
+    };
+    // The payload slice is served straight from the (already unlinked) mapping.
+    assert_eq!(read.payload.as_ref(), b"abc");
+    assert!(
+        !payload_file.exists(),
+        "spilled payload file should be removed after mapping"
+    );
+}
+
+#[test]
 fn object_read_batch_diagnostics_record_max_phase_stats() {
     let asset = AssetStudioFfiAssetInfo {
         index: 0,

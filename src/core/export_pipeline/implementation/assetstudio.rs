@@ -642,26 +642,18 @@ pub(super) fn parse_assetstudio_ffi_object_read_worker_output_recoverable(
             },
         ));
     }
-    let payload = if !output.payload.is_empty() {
+    let payload: bytes::Bytes = if !output.payload.is_empty() {
         if let Some(payload_file) = output.payload_file {
             let _ = remove_file_if_exists(&payload_file);
         }
-        output.payload
+        output.payload.into()
     } else if let Some(payload_file) = output.payload_file {
-        let payload = std::fs::read(&payload_file).map_err(|source| ExportPipelineError::Io {
-            path: payload_file.clone(),
-            source,
-        })?;
-        let _ = remove_file_if_exists(&payload_file);
-        payload
+        map_spilled_payload(&payload_file)?
     } else {
-        Vec::new()
+        bytes::Bytes::new()
     };
     Ok(NativeObjectReadParseResult::Read(Box::new(
-        AssetStudioFfiObjectReadOutput {
-            response,
-            payload: payload.into(),
-        },
+        AssetStudioFfiObjectReadOutput { response, payload },
     )))
 }
 
@@ -872,20 +864,18 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
         warn!(warning = %warning, "assetstudio ffi object read batch warning");
     }
 
-    let payload = if !output.payload.is_empty() {
+    let payload: bytes::Bytes = if !output.payload.is_empty() {
         if let Some(payload_file) = output.payload_file {
             let _ = remove_file_if_exists(&payload_file);
         }
-        output.payload
+        output.payload.into()
     } else if let Some(payload_file) = output.payload_file {
-        let payload = std::fs::read(&payload_file).map_err(|source| ExportPipelineError::Io {
-            path: payload_file.clone(),
-            source,
-        })?;
-        let _ = remove_file_if_exists(&payload_file);
-        payload
+        // Spilled payloads are mapped, not read: the worker wrote them into tmpfs
+        // (when available) and the mapping is shared straight through to the
+        // per-object Bytes slices and the image encoders.
+        map_spilled_payload(&payload_file)?
     } else {
-        Vec::new()
+        bytes::Bytes::new()
     };
 
     if !(output.status_success && response.success) && response.reads.len() != assets.len() {
@@ -941,11 +931,10 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
         });
     }
 
-    // Wrap the bundle once; per-object payloads become refcounted sub-slices of it
-    // instead of per-object heap copies. Images are sub-chunked into single-object
-    // batches upstream, so a retained image slice pins a bundle of roughly its own
-    // size rather than a large mixed batch.
-    let payload = bytes::Bytes::from(payload);
+    // Per-object payloads become refcounted sub-slices of the bundle instead of
+    // per-object heap copies. Images are sub-chunked into single-object batches
+    // upstream, so a retained image slice pins a bundle of roughly its own size
+    // rather than a large mixed batch.
     let payloads = if payload.is_empty() {
         HashMap::new()
     } else {

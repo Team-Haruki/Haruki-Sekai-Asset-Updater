@@ -2,8 +2,9 @@ use std::io::Write;
 use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, ExitCode};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -14,7 +15,11 @@ use haruki_assetstudio_ffi::{
 use serde::{Deserialize, Serialize};
 
 const MAX_FRAME_SIZE: u64 = 256 * 1024 * 1024;
-const PAYLOAD_FILE_THRESHOLD: usize = 128 * 1024 * 1024;
+// Payloads above the threshold are spilled to a file (preferably tmpfs) instead of
+// being streamed through the stdout pipe; the parent maps the file zero-copy. The
+// pipe costs one write plus one read copy per payload, so keep only small payloads
+// (typetree/text batches) inline.
+const DEFAULT_PAYLOAD_FILE_THRESHOLD: usize = 8 * 1024 * 1024;
 const FFI_CALL_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
@@ -207,7 +212,7 @@ fn server_response_with_payload(
     payload: Vec<u8>,
 ) -> io::Result<ServerResponseWithPayload> {
     let payload_len = payload.len();
-    if payload_len > PAYLOAD_FILE_THRESHOLD {
+    if payload_len > payload_file_threshold() {
         let payload_file = spill_payload_to_temp_file(&payload)?;
         Ok(ServerResponse {
             id,
@@ -231,11 +236,65 @@ fn server_response_with_payload(
     }
 }
 
+fn payload_file_threshold() -> usize {
+    static THRESHOLD: OnceLock<usize> = OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("HARUKI_ASSET_STUDIO_FFI_PAYLOAD_FILE_THRESHOLD")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(DEFAULT_PAYLOAD_FILE_THRESHOLD)
+    })
+}
+
+/// Preferred spill directory: explicit override, else tmpfs on Linux so the parent's
+/// mmap never touches disk. `None` falls back to the system temp directory.
+fn payload_spill_dir() -> Option<PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        if let Ok(dir) = std::env::var("HARUKI_ASSET_STUDIO_FFI_PAYLOAD_DIR") {
+            let dir = PathBuf::from(dir.trim());
+            if !dir.as_os_str().is_empty() && dir.is_dir() {
+                return Some(dir);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let shm = PathBuf::from("/dev/shm");
+            if shm.is_dir() {
+                return Some(shm);
+            }
+        }
+        None
+    })
+    .clone()
+}
+
 fn spill_payload_to_temp_file(payload: &[u8]) -> io::Result<PathBuf> {
-    let mut file = tempfile::Builder::new()
+    if let Some(dir) = payload_spill_dir() {
+        match spill_payload_into_dir(payload, Some(&dir)) {
+            Ok(path) => return Ok(path),
+            Err(error) => {
+                // tmpfs may be smaller than the payload (e.g. a container's default
+                // /dev/shm); fall back to the system temp directory.
+                write_process_trace(
+                    "server_payload_spill_dir_fallback",
+                    &format!("dir={} error={error}", dir.display()),
+                );
+            }
+        }
+    }
+    spill_payload_into_dir(payload, None)
+}
+
+fn spill_payload_into_dir(payload: &[u8], dir: Option<&Path>) -> io::Result<PathBuf> {
+    let mut builder = tempfile::Builder::new();
+    builder
         .prefix("haruki-assetstudio-worker-payload-")
-        .suffix(".bin")
-        .tempfile()?;
+        .suffix(".bin");
+    let mut file = match dir {
+        Some(dir) => builder.tempfile_in(dir)?,
+        None => builder.tempfile()?,
+    };
     file.write_all(payload)?;
     file.flush()?;
     let temp_path = file.into_temp_path();
@@ -454,7 +513,10 @@ fn now_ms() -> u128 {
 mod tests {
     use std::io::{self, Cursor};
 
-    use super::{read_frame, spill_payload_to_temp_file, write_frame, MAX_FRAME_SIZE};
+    use super::{
+        read_frame, spill_payload_into_dir, spill_payload_to_temp_file, write_frame,
+        MAX_FRAME_SIZE,
+    };
 
     #[test]
     fn server_frame_round_trips_payload() {
@@ -491,6 +553,18 @@ mod tests {
 
         let payload_file = spill_payload_to_temp_file(payload).unwrap();
 
+        assert_eq!(std::fs::read(&payload_file).unwrap(), payload);
+        std::fs::remove_file(&payload_file).unwrap();
+    }
+
+    #[test]
+    fn server_payload_spill_uses_explicit_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = b"directed-payload";
+
+        let payload_file = spill_payload_into_dir(payload, Some(dir.path())).unwrap();
+
+        assert_eq!(payload_file.parent(), Some(dir.path()));
         assert_eq!(std::fs::read(&payload_file).unwrap(), payload);
         std::fs::remove_file(&payload_file).unwrap();
     }
