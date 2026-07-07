@@ -37,6 +37,7 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 pub enum AssetCategory {
     StartApp,
     OnDemand,
+    LivePv,
     Other(String),
 }
 
@@ -50,6 +51,7 @@ impl<'de> Deserialize<'de> for AssetCategory {
         Ok(match raw.as_str() {
             "StartApp" | "startApp" => Self::StartApp,
             "OnDemand" | "onDemand" => Self::OnDemand,
+            "Live_pv" | "live_pv" | "LivePv" | "livePv" => Self::LivePv,
             other => Self::Other(other.to_string()),
         })
     }
@@ -1254,7 +1256,7 @@ impl AssetExecutionContext {
             }
             let category_patterns = match &detail.category {
                 AssetCategory::StartApp => &start_app_patterns,
-                AssetCategory::OnDemand => &on_demand_patterns,
+                AssetCategory::OnDemand | AssetCategory::LivePv => &on_demand_patterns,
                 AssetCategory::Other(_) => continue,
             };
             if category_patterns.is_empty() || !matches_any(category_patterns, bundle_name) {
@@ -1397,7 +1399,7 @@ impl AssetExecutionContext {
 
         let category = match task.category {
             AssetCategory::StartApp => "StartApp",
-            AssetCategory::OnDemand => "OnDemand",
+            AssetCategory::OnDemand | AssetCategory::LivePv => "OnDemand",
             AssetCategory::Other(_) => "OnDemand",
         };
         let export_started = Instant::now();
@@ -1991,7 +1993,9 @@ pub fn should_download_bundle(
 ) -> bool {
     let compiled = match category {
         AssetCategory::StartApp => compile_patterns(&region.filters.start_app),
-        AssetCategory::OnDemand => compile_patterns(&region.filters.on_demand),
+        AssetCategory::OnDemand | AssetCategory::LivePv => {
+            compile_patterns(&region.filters.on_demand)
+        }
         AssetCategory::Other(_) => return false,
     };
     if compiled.is_empty() {
@@ -2081,7 +2085,7 @@ mod tests {
             },
             filters: crate::core::config::RegionFiltersConfig {
                 start_app: vec!["^start/".to_string()],
-                on_demand: vec!["^ond/".to_string()],
+                on_demand: vec!["^ond/".to_string(), "^live_pv/model/".to_string()],
                 skip: vec!["^skip/".to_string()],
                 priority: vec!["^start/a".to_string(), "^ond/".to_string()],
             },
@@ -2395,10 +2399,20 @@ mod tests {
             "ond/a",
             &AssetCategory::OnDemand
         ));
+        assert!(should_download_bundle(
+            &region,
+            "live_pv/model/characterv2/body/99/0018/ladies_s",
+            &AssetCategory::LivePv
+        ));
         assert!(!should_download_bundle(
             &region,
             "other/a",
             &AssetCategory::OnDemand
+        ));
+        assert!(!should_download_bundle(
+            &region,
+            "character/member/001",
+            &AssetCategory::LivePv
         ));
     }
 
