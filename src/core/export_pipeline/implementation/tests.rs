@@ -846,7 +846,7 @@ fn native_image_object_payload_is_flushed_after_export_queue() {
             error: None,
             duration_ms: None,
         },
-        payload,
+        payload: payload.into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -905,7 +905,7 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
             error: None,
             duration_ms: None,
         },
-        payload: b"acb!".to_vec(),
+        payload: bytes::Bytes::from_static(b"acb!"),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -965,7 +965,7 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
             error: None,
             duration_ms: None,
         },
-        payload: b"score".to_vec(),
+        payload: bytes::Bytes::from_static(b"score"),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1033,7 +1033,7 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
             error: None,
             duration_ms: None,
         },
-        payload: b"usm!".to_vec(),
+        payload: bytes::Bytes::from_static(b"usm!"),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1097,7 +1097,7 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
             error: None,
             duration_ms: None,
         },
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1167,7 +1167,7 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
             error: None,
             duration_ms: None,
         },
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1228,7 +1228,7 @@ fn monoscript_typetree_routes_to_container_subasset_path() {
             error: None,
             duration_ms: None,
         },
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1778,7 +1778,7 @@ fn manifest_records_native_surrogate_image_public_png_path() {
             error: None,
             duration_ms: None,
         },
-        payload: Vec::new(),
+        payload: bytes::Bytes::new(),
     };
 
     write_assetstudio_export_manifest_entry(dir.path(), &target, &asset, &read_output).unwrap();
@@ -1835,7 +1835,7 @@ fn manifest_records_animator_bundle_public_fbx_path() {
             error: None,
             duration_ms: None,
         },
-        payload,
+        payload: payload.into(),
     };
 
     write_assetstudio_export_manifest_entry(dir.path(), &target, &asset, &read_output).unwrap();
@@ -2025,7 +2025,7 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
             error: None,
             duration_ms: None,
         },
-        payload: br#"{"m_Name":"004026_shiho01"}"#.to_vec(),
+        payload: bytes::Bytes::from_static(br#"{"m_Name":"004026_shiho01"}"#),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -2087,11 +2087,11 @@ fn native_object_export_keeps_distinct_semantic_duplicates() {
             error: None,
             duration_ms: None,
         },
-        payload: br#"{"m_GameObject":1}"#.to_vec(),
+        payload: bytes::Bytes::from_static(br#"{"m_GameObject":1}"#),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
-    read_output.payload = br#"{"m_GameObject":2}"#.to_vec();
+    read_output.payload = bytes::Bytes::from_static(br#"{"m_GameObject":2}"#);
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
     let first = dir
@@ -2548,7 +2548,7 @@ fn object_read_prefers_in_memory_worker_payload() {
     let NativeObjectReadParseResult::Read(read) = parsed else {
         panic!("expected successful object read");
     };
-    assert_eq!(read.payload, b"abc");
+    assert_eq!(read.payload.as_ref(), b"abc");
     assert_eq!(read.response.payload_len, 3);
 }
 
@@ -2584,7 +2584,7 @@ fn object_read_loads_payload_file_and_removes_it() {
     let NativeObjectReadParseResult::Read(read) = parsed else {
         panic!("expected successful object read");
     };
-    assert_eq!(read.payload, b"abc");
+    assert_eq!(read.payload.as_ref(), b"abc");
     assert!(!payload_file.exists());
 }
 
@@ -2651,7 +2651,7 @@ fn object_read_batch_preserves_diagnostics_and_payloads() {
     let NativeObjectReadParseResult::Read(read) = &parsed.results[0] else {
         panic!("expected successful batch object read");
     };
-    assert_eq!(read.payload, b"abc");
+    assert_eq!(read.payload.as_ref(), b"abc");
     assert_eq!(read.response.payload_len, 3);
     let NativeObjectReadParseResult::Skipped(skipped) = &parsed.results[1] else {
         panic!("expected skipped batch object read");

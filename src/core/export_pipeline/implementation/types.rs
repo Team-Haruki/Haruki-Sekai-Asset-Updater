@@ -137,7 +137,9 @@ pub(super) enum NativeSemanticPathClaim {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingNativeImageWrite {
     pub(super) target: PathBuf,
-    pub(super) payload: Vec<u8>,
+    /// Shared slice of the read-batch payload bundle (see
+    /// `parse_payload_bundle_shared`); cloning is a refcount bump.
+    pub(super) payload: bytes::Bytes,
     pub(super) region: RegionConfig,
 }
 

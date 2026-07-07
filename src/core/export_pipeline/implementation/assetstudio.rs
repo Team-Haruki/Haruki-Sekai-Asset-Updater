@@ -447,7 +447,13 @@ where
                     };
                     merge_phase_ms(&mut summary.phase_ms, &read_output.response.phase_ms);
                     if is_playable_mono_typetree(asset, &read_output) {
-                        playable_outputs.push(((*asset).clone(), (*read_output).clone()));
+                        // Deep-copy the (small) typetree payload: playable outputs are
+                        // held until the end of the path export and must not pin the
+                        // whole read-batch bundle their Bytes slice points into.
+                        let mut playable_output = (*read_output).clone();
+                        playable_output.payload =
+                            bytes::Bytes::from(playable_output.payload.to_vec());
+                        playable_outputs.push(((*asset).clone(), playable_output));
                     } else {
                         write_native_object_payload(options, &mut path_state, asset, &read_output)?;
                     }
@@ -652,7 +658,10 @@ pub(super) fn parse_assetstudio_ffi_object_read_worker_output_recoverable(
         Vec::new()
     };
     Ok(NativeObjectReadParseResult::Read(Box::new(
-        AssetStudioFfiObjectReadOutput { response, payload },
+        AssetStudioFfiObjectReadOutput {
+            response,
+            payload: payload.into(),
+        },
     )))
 }
 
@@ -932,10 +941,15 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
         });
     }
 
+    // Wrap the bundle once; per-object payloads become refcounted sub-slices of it
+    // instead of per-object heap copies. Images are sub-chunked into single-object
+    // batches upstream, so a retained image slice pins a bundle of roughly its own
+    // size rather than a large mixed batch.
+    let payload = bytes::Bytes::from(payload);
     let payloads = if payload.is_empty() {
         HashMap::new()
     } else {
-        parse_payload_bundle_borrowed(&payload)?
+        parse_payload_bundle_shared(&payload)?
             .into_iter()
             .collect::<HashMap<_, _>>()
     };
@@ -989,7 +1003,7 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
 
         let object_payload = payloads
             .get(&asset.path_id.to_string())
-            .map(|payload| payload.to_vec())
+            .cloned()
             .unwrap_or_default();
         results.push(NativeObjectReadParseResult::Read(Box::new(
             AssetStudioFfiObjectReadOutput {

@@ -12,6 +12,7 @@ resolver = "2"
 [dependencies]
 aes = "0.9"
 axum = { version = "0.8", features = ["macros", "json"] }
+bytes = "1"
 cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.6", features = ["derive"] }

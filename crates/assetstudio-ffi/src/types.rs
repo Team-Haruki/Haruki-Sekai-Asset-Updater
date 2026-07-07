@@ -207,7 +207,8 @@ pub struct NativeBatchPhaseStats {
 #[derive(Debug, Clone)]
 pub struct AssetStudioFfiObjectReadOutput {
     pub response: AssetStudioFfiObjectReadResponse,
-    pub payload: Vec<u8>,
+    /// Shared slice of the read-batch payload bundle; cloning is a refcount bump.
+    pub payload: bytes::Bytes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

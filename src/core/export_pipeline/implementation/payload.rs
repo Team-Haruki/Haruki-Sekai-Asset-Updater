@@ -56,7 +56,9 @@ pub(super) fn write_native_object_payload(
     if is_text_asset_acb_target(asset, &target) {
         path_state.acb_sources.push(NativeInMemoryMediaSource {
             target: target.clone(),
-            payload: read_output.payload.clone(),
+            // Deliberate copy: ACB sources outlive the whole export into the media
+            // post-process stage, so they must not pin the read-batch bundle.
+            payload: read_output.payload.to_vec(),
         });
         return Ok(());
     }
@@ -76,7 +78,7 @@ pub(super) fn write_native_object_payload(
         queue_native_image_payload_final_files(
             path_state,
             &target,
-            &read_output.payload,
+            read_output.payload.clone(),
             options.region,
         )
     } else {
@@ -522,7 +524,7 @@ pub(super) fn write_native_payload_file(
 pub(super) fn queue_native_image_payload_final_files(
     path_state: &mut NativeSemanticExportPathState,
     target: &Path,
-    payload: &[u8],
+    payload: bytes::Bytes,
     region: &RegionConfig,
 ) -> Vec<PathBuf> {
     let written_files = planned_image_output_files(target, region);
@@ -530,7 +532,7 @@ pub(super) fn queue_native_image_payload_final_files(
         .pending_image_writes
         .push(PendingNativeImageWrite {
             target: target.to_path_buf(),
-            payload: payload.to_vec(),
+            payload,
             region: region.clone(),
         });
     written_files
@@ -850,10 +852,10 @@ pub(super) fn write_payload_bundle(
 pub(super) fn queue_native_image_payload_bundle_final_files(
     path_state: &mut NativeSemanticExportPathState,
     target: &Path,
-    payload: &[u8],
+    payload: &bytes::Bytes,
     region: &RegionConfig,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
-    let entries = parse_payload_bundle_borrowed(payload)?;
+    let entries = parse_payload_bundle_shared(payload)?;
     let mut written_files = Vec::with_capacity(entries.len());
     for (name, bytes) in entries {
         let entry_target = payload_bundle_entry_target(target, &name).with_extension("png");
@@ -904,6 +906,23 @@ pub(super) fn parse_payload_bundle(
     Ok(parse_payload_bundle_borrowed(payload)?
         .into_iter()
         .map(|(name, bytes)| (name, bytes.to_vec()))
+        .collect())
+}
+
+/// Bundle parse that returns refcounted sub-slices of the backing buffer instead
+/// of borrowed slices, so entries can outlive the parse without a heap copy.
+pub(super) fn parse_payload_bundle_shared(
+    payload: &bytes::Bytes,
+) -> Result<Vec<(String, bytes::Bytes)>, ExportPipelineError> {
+    let base = payload.as_ptr() as usize;
+    Ok(parse_payload_bundle_borrowed(payload)?
+        .into_iter()
+        .map(|(name, slice)| {
+            // Sub-slices returned by the borrowed parser always point inside
+            // `payload`, so the offset arithmetic cannot underflow or overflow.
+            let start = slice.as_ptr() as usize - base;
+            (name, payload.slice(start..start + slice.len()))
+        })
         .collect())
 }
 

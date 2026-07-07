@@ -1109,6 +1109,7 @@ dependencies = [
 name = "haruki-assetstudio-ffi"
 version = "6.0.5"
 dependencies = [
+ "bytes",
  "clap",
  "libc",
  "libloading 0.9.0",
@@ -1126,6 +1127,7 @@ version = "6.0.5"
 dependencies = [
  "aes 0.9.1",
  "axum",
+ "bytes",
  "cbc 0.2.1",
  "chrono",
  "clap",
