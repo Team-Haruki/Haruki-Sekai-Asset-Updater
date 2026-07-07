@@ -1019,12 +1019,13 @@ fn warn_media_fallback_backend_options(media: &MediaBackendConfig) {
 fn validate_asset_studio_ffi_read_kind(field: &str, value: &str) -> Result<(), ConfigError> {
     match value.trim().to_lowercase().as_str() {
         "auto" | "raw" | "typetree_json" | "image" | "image_archive" | "audio" | "video"
-        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx"
-        | "pjsk_model_package" | "pjsk_animation_clip_decoded" => Ok(()),
+        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx" => {
+            Ok(())
+        }
         other => Err(ConfigError::InvalidValue {
             field: field.to_string(),
             value: other.to_string(),
-            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, fbx, pjsk_model_package, or pjsk_animation_clip_decoded".to_string(),
+            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, or fbx".to_string(),
         }),
     }
 }
@@ -2361,19 +2362,22 @@ asset_studio:
     }
 
     #[test]
-    fn accepts_pjsk_asset_studio_ffi_read_kinds() {
-        let mut config = AppConfig::default();
-        config
-            .backends
-            .asset_studio
-            .read_kinds
-            .insert("Animator".to_string(), "pjsk_model_package".to_string());
-        config.backends.asset_studio.read_kinds.insert(
-            "AnimationClip".to_string(),
-            "pjsk_animation_clip_decoded".to_string(),
-        );
-
-        config.validate().unwrap();
+    fn rejects_unimplemented_pjsk_read_kinds() {
+        // The FFI dylib never implemented these kinds; model packages and motion
+        // clips flow through the haruki_3d raw-bundle pipeline instead. Accepting
+        // them here would silently drop every Animator/AnimationClip export.
+        for (asset_type, kind) in [
+            ("Animator", "pjsk_model_package"),
+            ("AnimationClip", "pjsk_animation_clip_decoded"),
+        ] {
+            let mut config = AppConfig::default();
+            config
+                .backends
+                .asset_studio
+                .read_kinds
+                .insert(asset_type.to_string(), kind.to_string());
+            config.validate().unwrap_err();
+        }
     }
 
     #[test]
@@ -2489,14 +2493,12 @@ haruki_3d:
         let asset_studio = &config.backends.asset_studio;
         assert_eq!(
             asset_studio.read_kinds.get("Animator").map(String::as_str),
-            Some("pjsk_model_package")
+            Some("fbx")
         );
         assert_eq!(
-            asset_studio
-                .read_kinds
-                .get("AnimationClip")
-                .map(String::as_str),
-            Some("pjsk_animation_clip_decoded")
+            asset_studio.read_kinds.get("AnimationClip"),
+            None,
+            "motion clips are consumed by the haruki_3d raw-bundle pipeline, not FFI reads"
         );
 
         let jp = config.regions.get("jp").expect("jp region exists");
