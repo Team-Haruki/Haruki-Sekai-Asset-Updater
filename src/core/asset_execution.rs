@@ -1749,25 +1749,23 @@ impl AssetExecutionContext {
             .chain(runtime_json_output_args())
             .collect(),
         ];
-        if !haruki_3d.role_character3d_ids.is_empty() {
-            let mut role_args = vec![
-                "--emit-role-runtimes".to_string(),
-                "--master".to_string(),
-                haruki_3d.master_dir.clone(),
-                "--asset-root".to_string(),
-                asset_root_arg,
-                "--out".to_string(),
-                haruki_3d.output_dir.clone(),
-            ];
-            role_args.push("--part-package-process-concurrency".to_string());
-            role_args.push(haruki_3d.process_concurrency.to_string());
-            for id in &haruki_3d.role_character3d_ids {
-                role_args.push("--role-character3d-id".to_string());
-                role_args.push(id.to_string());
-            }
-            role_args.extend(runtime_json_output_args());
-            exporter_commands.push(role_args);
+        let mut role_args = vec![
+            "--emit-role-runtimes".to_string(),
+            "--master".to_string(),
+            haruki_3d.master_dir.clone(),
+            "--asset-root".to_string(),
+            asset_root_arg,
+            "--out".to_string(),
+            haruki_3d.output_dir.clone(),
+        ];
+        role_args.push("--part-package-process-concurrency".to_string());
+        role_args.push(haruki_3d.process_concurrency.to_string());
+        for id in &haruki_3d.role_character3d_ids {
+            role_args.push("--role-character3d-id".to_string());
+            role_args.push(id.to_string());
         }
+        role_args.extend(runtime_json_output_args());
+        exporter_commands.push(role_args);
         exporter_commands
     }
 
@@ -2317,6 +2315,39 @@ mod tests {
         );
         assert!(commands[2].contains(&"5".to_string()));
         assert!(commands[2].contains(&"7".to_string()));
+    }
+
+    #[test]
+    fn haruki_3d_background_export_runs_role_runtimes_without_role_id_filter() {
+        let config = crate::core::config::Haruki3dExportConfig {
+            master_dir: "/master".to_string(),
+            output_dir: "/runtime".to_string(),
+            manifest_file: "/runtime/manifest.json".to_string(),
+            process_concurrency: 48,
+            role_character3d_ids: Vec::new(),
+            ..crate::core::config::Haruki3dExportConfig::default()
+        };
+        let commands = AssetExecutionContext::build_haruki_3d_exporter_commands(
+            &config,
+            Path::new("/work/AssetBundles"),
+        );
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[2][0], "--emit-role-runtimes");
+        assert!(
+            commands[2]
+                .windows(2)
+                .any(|pair| pair == ["--part-package-process-concurrency", "48"]),
+            "role runtime command should still pass haruki_3d.process_concurrency"
+        );
+        assert_eq!(
+            commands[2]
+                .iter()
+                .filter(|value| value.as_str() == "--role-character3d-id")
+                .count(),
+            0,
+            "empty role_character3d_ids should let the exporter choose its default role set"
+        );
     }
 
     #[test]
