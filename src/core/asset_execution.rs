@@ -1644,6 +1644,12 @@ impl AssetExecutionContext {
             );
             let output_path = raw_bundle_output_path(&asset_root, &task.bundle_path)?;
             if output_path.exists() {
+                Self::send_progress(
+                    &progress,
+                    ExecutionProgressUpdate::BundleCompleted {
+                        bundle: task.bundle_path.clone(),
+                    },
+                );
                 continue;
             }
             let body = self.get_with_retry(&self.render_bundle_url(task)?).await?;
@@ -1661,6 +1667,17 @@ impl AssetExecutionContext {
         let exporter_commands = Self::build_haruki_3d_exporter_commands(&haruki_3d, &asset_root);
 
         for args in exporter_commands {
+            let phase_message = format!(
+                "running Haruki 3D exporter: {}",
+                args.first().map(String::as_str).unwrap_or("unknown")
+            );
+            Self::send_progress(
+                &progress,
+                ExecutionProgressUpdate::Phase {
+                    phase: JobPhase::Exporting3dRuntime,
+                    message: phase_message,
+                },
+            );
             let output = tokio::process::Command::new(&haruki_3d.exporter_path)
                 .args(&args)
                 .output()
@@ -1742,6 +1759,8 @@ impl AssetExecutionContext {
                 "--out".to_string(),
                 haruki_3d.output_dir.clone(),
             ];
+            role_args.push("--part-package-process-concurrency".to_string());
+            role_args.push(haruki_3d.process_concurrency.to_string());
             for id in &haruki_3d.role_character3d_ids {
                 role_args.push("--role-character3d-id".to_string());
                 role_args.push(id.to_string());
@@ -2283,6 +2302,12 @@ mod tests {
             "part package command should pass haruki_3d.process_concurrency"
         );
         assert_eq!(commands[2][0], "--emit-role-runtimes");
+        assert!(
+            commands[2]
+                .windows(2)
+                .any(|pair| pair == ["--part-package-process-concurrency", "16"]),
+            "role runtime command should pass haruki_3d.process_concurrency"
+        );
         assert_eq!(
             commands[2]
                 .iter()
