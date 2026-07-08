@@ -212,7 +212,7 @@ jobs:
         if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
         uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Install Linux NativeAOT dependencies
         if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true' && runner.os == 'Linux'
@@ -227,10 +227,10 @@ jobs:
           dotnet publish AssetStudio/AssetStudioFFI/AssetStudioFFI.csproj \
             -c Release \
             -r "${{ matrix.rid }}" \
-            -f net9.0 \
+            -f net10.0 \
             --self-contained true \
             -o assetstudio-publish \
-            -p:TargetFrameworks=net9.0 \
+            -p:TargetFrameworks=net10.0 \
             -p:PublishAot=true \
             -p:InvariantGlobalization=true
 
