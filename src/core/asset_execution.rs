@@ -1696,8 +1696,14 @@ impl AssetExecutionContext {
         asset_root: &Path,
     ) -> Vec<Vec<String>> {
         let asset_root_arg = asset_root.to_string_lossy().to_string();
-        let mut exporter_commands = vec![
+        let runtime_json_output_args = || {
             vec![
+                "--runtime-json-output".to_string(),
+                "msgpack-br".to_string(),
+            ]
+        };
+        let mut exporter_commands = vec![
+            [
                 "--emit-costume-registries".to_string(),
                 "--master".to_string(),
                 haruki_3d.master_dir.clone(),
@@ -1705,8 +1711,11 @@ impl AssetExecutionContext {
                 asset_root_arg.clone(),
                 "--out".to_string(),
                 haruki_3d.output_dir.clone(),
-            ],
-            vec![
+            ]
+            .into_iter()
+            .chain(runtime_json_output_args())
+            .collect(),
+            [
                 "--emit-part-packages".to_string(),
                 "--master".to_string(),
                 haruki_3d.master_dir.clone(),
@@ -1718,7 +1727,10 @@ impl AssetExecutionContext {
                 haruki_3d.manifest_file.clone(),
                 "--part-package-process-concurrency".to_string(),
                 haruki_3d.process_concurrency.to_string(),
-            ],
+            ]
+            .into_iter()
+            .chain(runtime_json_output_args())
+            .collect(),
         ];
         if !haruki_3d.role_character3d_ids.is_empty() {
             let mut role_args = vec![
@@ -1734,6 +1746,7 @@ impl AssetExecutionContext {
                 role_args.push("--role-character3d-id".to_string());
                 role_args.push(id.to_string());
             }
+            role_args.extend(runtime_json_output_args());
             exporter_commands.push(role_args);
         }
         exporter_commands
@@ -2255,6 +2268,14 @@ mod tests {
         assert_eq!(commands.len(), 3);
         assert_eq!(commands[0][0], "--emit-costume-registries");
         assert_eq!(commands[1][0], "--emit-part-packages");
+        for command in &commands {
+            assert!(
+                command
+                    .windows(2)
+                    .any(|pair| pair == ["--runtime-json-output", "msgpack-br"]),
+                "Haruki 3D exporter command should write runtime JSON as msgpack-br: {command:?}"
+            );
+        }
         assert!(
             commands[1]
                 .windows(2)
