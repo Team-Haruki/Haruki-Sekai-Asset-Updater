@@ -50,6 +50,7 @@
   `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`,
   `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
   `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`,
+  `HARUKI_ASSET_STUDIO_FFI_WORKER_IDLE_TIMEOUT_SECONDS`,
   `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE`,
   `HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT`,
   `HARUKI_ASSET_HTTP_VERSION`,
@@ -138,8 +139,12 @@ You can also download the standalone AssetStudioFFI archive or build the
   `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` and, when the worker cannot be inferred
   from the service binary directory, `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`.
   `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
-  `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`, and
+  `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`,
+  `HARUKI_ASSET_STUDIO_FFI_WORKER_IDLE_TIMEOUT_SECONDS`, and
   `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE` tune worker pool throughput.
+- Idle workers exit after `backends.asset_studio.worker_idle_timeout_seconds`
+  (60 seconds by default). Set it to `0` only when permanent warm workers are
+  intentionally preferred over returning idle memory to the operating system.
 - `backends.asset_studio.mode` is always `worker_pool` for production crash
   isolation. The former in-process `direct` mode was removed; configuring it
   fails config loading with a clear error.

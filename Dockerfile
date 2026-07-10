@@ -92,6 +92,7 @@ COPY --from=assetstudio-builder /app/assetstudio-ffi /app/assetstudio
 RUN mkdir -p logs
 
 ENV TZ=Asia/Shanghai \
+    MALLOC_ARENA_MAX=4 \
     DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true \
     HARUKI_MEDIA_BACKEND=ffi \
     HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so \

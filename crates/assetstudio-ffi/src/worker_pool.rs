@@ -1,19 +1,26 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::BufReader;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex as TokioMutex, OwnedSemaphorePermit, Semaphore};
-use tracing::{debug, info};
+use tokio::sync::{Mutex as TokioMutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
+use tracing::{debug, info, warn};
 
 use crate::frame::{read_worker_frame, write_worker_frame};
 use crate::types::*;
+
+#[cfg(not(test))]
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
+const WORKER_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct WorkerServerRequest {
@@ -47,8 +54,11 @@ pub struct AssetStudioWorkerPool {
     native_library_path: String,
     process_concurrency: usize,
     max_calls_per_worker: usize,
+    idle_timeout: Duration,
     semaphore: Arc<Semaphore>,
-    available: TokioMutex<Vec<PooledWorker>>,
+    state: TokioMutex<WorkerPoolState>,
+    activity: Notify,
+    reaper_runtimes: Mutex<HashSet<tokio::runtime::Id>>,
     next_id: AtomicU64,
     next_worker_id: AtomicU64,
     stats: Arc<WorkerPoolStats>,
@@ -62,6 +72,22 @@ pub struct WorkerPoolStatsSnapshot {
     pub protocol_errors: u64,
     pub completed_calls: u64,
     pub max_call_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WorkerPoolMaintenanceStatsSnapshot {
+    pub idle_reaped: u64,
+    pub graceful_shutdowns: u64,
+    pub forced_shutdowns: u64,
+    pub allocator_trim_attempts: u64,
+    pub idle_reap_deferred: u64,
+}
+
+struct WorkerPoolState {
+    available: Vec<PooledWorker>,
+    last_activity: Instant,
+    activity_generation: u64,
+    cleaned_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +105,11 @@ struct WorkerPoolStats {
     protocol_errors: AtomicUsize,
     completed_calls: AtomicUsize,
     max_call_ms: AtomicU64,
+    idle_reaped: AtomicUsize,
+    graceful_shutdowns: AtomicUsize,
+    forced_shutdowns: AtomicUsize,
+    allocator_trim_attempts: AtomicUsize,
+    idle_reap_deferred: AtomicUsize,
 }
 
 impl WorkerPoolStats {
@@ -95,6 +126,16 @@ impl WorkerPoolStats {
             protocol_errors: self.protocol_errors.load(Ordering::Relaxed) as u64,
             completed_calls: self.completed_calls.load(Ordering::Relaxed) as u64,
             max_call_ms: self.max_call_ms.load(Ordering::Relaxed),
+        }
+    }
+
+    fn maintenance_snapshot(&self) -> WorkerPoolMaintenanceStatsSnapshot {
+        WorkerPoolMaintenanceStatsSnapshot {
+            idle_reaped: self.idle_reaped.load(Ordering::Relaxed) as u64,
+            graceful_shutdowns: self.graceful_shutdowns.load(Ordering::Relaxed) as u64,
+            forced_shutdowns: self.forced_shutdowns.load(Ordering::Relaxed) as u64,
+            allocator_trim_attempts: self.allocator_trim_attempts.load(Ordering::Relaxed) as u64,
+            idle_reap_deferred: self.idle_reap_deferred.load(Ordering::Relaxed) as u64,
         }
     }
 }
@@ -116,11 +157,28 @@ impl AssetStudioWorkerPool {
         process_concurrency: usize,
         max_calls_per_worker: usize,
     ) -> Arc<Self> {
-        let process_concurrency = process_concurrency.max(1);
-        let key = format!(
-            "{}\0{}\0{}\0{}",
+        Self::shared_with_idle_timeout(
+            worker_path,
+            native_library_path,
             process_concurrency,
             max_calls_per_worker,
+            Duration::from_secs(60),
+        )
+    }
+
+    pub fn shared_with_idle_timeout(
+        worker_path: &Path,
+        native_library_path: &str,
+        process_concurrency: usize,
+        max_calls_per_worker: usize,
+        idle_timeout: Duration,
+    ) -> Arc<Self> {
+        let process_concurrency = process_concurrency.max(1);
+        let key = format!(
+            "{}\0{}\0{}\0{}\0{}",
+            process_concurrency,
+            max_calls_per_worker,
+            idle_timeout.as_nanos(),
             worker_path.display(),
             native_library_path
         );
@@ -130,7 +188,7 @@ impl AssetStudioWorkerPool {
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap();
-        pools
+        let pool = pools
             .entry(key)
             .or_insert_with(|| {
                 Arc::new(AssetStudioWorkerPool {
@@ -138,17 +196,29 @@ impl AssetStudioWorkerPool {
                     native_library_path: native_library_path.to_string(),
                     process_concurrency,
                     max_calls_per_worker,
+                    idle_timeout,
                     semaphore: Arc::new(Semaphore::new(process_concurrency)),
-                    available: TokioMutex::new(Vec::with_capacity(process_concurrency)),
+                    state: TokioMutex::new(WorkerPoolState {
+                        available: Vec::with_capacity(process_concurrency),
+                        last_activity: Instant::now(),
+                        activity_generation: 0,
+                        cleaned_generation: 0,
+                    }),
+                    activity: Notify::new(),
+                    reaper_runtimes: Mutex::new(HashSet::new()),
                     next_id: AtomicU64::new(1),
                     next_worker_id: AtomicU64::new(1),
                     stats: Arc::new(WorkerPoolStats::default()),
                 })
             })
-            .clone()
+            .clone();
+        drop(pools);
+        pool.start_idle_reaper();
+        pool
     }
 
     pub async fn acquire(self: &Arc<Self>) -> Result<WorkerLease, AssetStudioFfiError> {
+        self.start_idle_reaper();
         let permit = self
             .semaphore
             .clone()
@@ -157,7 +227,7 @@ impl AssetStudioWorkerPool {
             .map_err(|source| {
                 AssetStudioFfiError::message(format!("ffi worker pool limiter closed: {source}"))
             })?;
-        let worker = match self.available.lock().await.pop() {
+        let worker = match self.take_available_worker().await {
             Some(worker) => worker,
             None => self.spawn_worker().await?,
         };
@@ -169,6 +239,7 @@ impl AssetStudioWorkerPool {
     }
 
     pub async fn acquire_exclusive(self: &Arc<Self>) -> Result<WorkerLease, AssetStudioFfiError> {
+        self.start_idle_reaper();
         let permit = self
             .semaphore
             .clone()
@@ -179,12 +250,188 @@ impl AssetStudioWorkerPool {
                     "ffi worker pool exclusive limiter closed: {source}"
                 ))
             })?;
+        self.record_activity().await;
         let worker = self.spawn_worker().await?;
         Ok(WorkerLease {
             pool: self.clone(),
             worker: Some(worker),
             _permit: permit,
         })
+    }
+
+    pub async fn idle_worker_count(&self) -> usize {
+        self.state.lock().await.available.len()
+    }
+
+    pub fn stats_snapshot(&self) -> WorkerPoolStatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    pub fn maintenance_stats_snapshot(&self) -> WorkerPoolMaintenanceStatsSnapshot {
+        self.stats.maintenance_snapshot()
+    }
+
+    async fn take_available_worker(&self) -> Option<PooledWorker> {
+        let worker = {
+            let mut state = self.state.lock().await;
+            record_pool_activity(&mut state);
+            state.available.pop()
+        };
+        self.activity.notify_waiters();
+        worker
+    }
+
+    async fn record_activity(&self) {
+        {
+            let mut state = self.state.lock().await;
+            record_pool_activity(&mut state);
+        }
+        self.activity.notify_waiters();
+    }
+
+    fn start_idle_reaper(self: &Arc<Self>) {
+        if self.idle_timeout.is_zero() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            warn!("assetstudio ffi idle reaper requires a Tokio runtime");
+            return;
+        };
+        let runtime_id = runtime.id();
+        {
+            let mut runtimes = self.reaper_runtimes.lock().unwrap();
+            if !runtimes.insert(runtime_id) {
+                return;
+            }
+        }
+        let pool = Arc::downgrade(self);
+        let guard = IdleReaperGuard {
+            pool: pool.clone(),
+            runtime_id,
+        };
+        runtime.spawn(async move {
+            let _guard = guard;
+            while let Some(pool) = pool.upgrade() {
+                pool.wait_for_idle_deadline().await;
+            }
+        });
+    }
+
+    async fn wait_for_idle_deadline(&self) {
+        let (deadline, generation) = {
+            let state = self.state.lock().await;
+            if state.cleaned_generation == state.activity_generation {
+                drop(state);
+                self.activity.notified().await;
+                return;
+            }
+            (
+                state.last_activity + self.idle_timeout,
+                state.activity_generation,
+            )
+        };
+
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline.into()) => {
+                self.reap_if_still_idle(generation).await;
+            }
+            _ = self.activity.notified() => {}
+        }
+    }
+
+    async fn reap_if_still_idle(&self, generation: u64) {
+        let Ok(permit) = self
+            .semaphore
+            .clone()
+            .try_acquire_many_owned(self.process_concurrency as u32)
+        else {
+            self.stats
+                .idle_reap_deferred
+                .fetch_add(1, Ordering::Relaxed);
+            tokio::select! {
+                _ = self.activity.notified() => {}
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            return;
+        };
+
+        let workers = {
+            let mut state = self.state.lock().await;
+            if state.activity_generation != generation
+                || state.cleaned_generation == state.activity_generation
+                || state.last_activity.elapsed() < self.idle_timeout
+            {
+                return;
+            }
+            state.cleaned_generation = state.activity_generation;
+            std::mem::take(&mut state.available)
+        };
+
+        let worker_count = workers.len();
+        if worker_count > 0 {
+            self.stats
+                .idle_reaped
+                .fetch_add(worker_count, Ordering::Relaxed);
+        }
+        drop(permit);
+        self.shutdown_workers(workers).await;
+        self.trim_process_allocator_if_still_idle(generation).await;
+
+        info!(
+            idle_workers_reaped = worker_count,
+            idle_timeout_ms = self.idle_timeout.as_millis() as u64,
+            "assetstudio ffi worker pool released idle resources"
+        );
+    }
+
+    async fn shutdown_workers(&self, workers: Vec<PooledWorker>) {
+        let mut tasks = JoinSet::new();
+        for worker in workers {
+            tasks.spawn(worker.shutdown());
+        }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(WorkerShutdown::Graceful) => {
+                    self.stats
+                        .graceful_shutdowns
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(WorkerShutdown::Forced) | Err(_) => {
+                    self.stats.forced_shutdowns.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    async fn trim_process_allocator(&self) {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            self.stats
+                .allocator_trim_attempts
+                .fetch_add(1, Ordering::Relaxed);
+            let trimmed = tokio::task::spawn_blocking(|| unsafe { libc::malloc_trim(0) != 0 })
+                .await
+                .unwrap_or(false);
+            debug!(
+                trimmed,
+                "requested glibc allocator trim after worker pool idle"
+            );
+        }
+    }
+
+    async fn trim_process_allocator_if_still_idle(&self, generation: u64) {
+        let Ok(permit) = self
+            .semaphore
+            .clone()
+            .try_acquire_many_owned(self.process_concurrency as u32)
+        else {
+            return;
+        };
+        let still_idle = self.state.lock().await.activity_generation == generation;
+        drop(permit);
+        if still_idle {
+            self.trim_process_allocator().await;
+        }
     }
 
     async fn spawn_worker(&self) -> Result<PooledWorker, AssetStudioFfiError> {
@@ -240,7 +487,8 @@ impl AssetStudioWorkerPool {
         })
     }
 
-    async fn return_or_recycle_worker(&self, mut worker: PooledWorker) {
+    async fn return_or_recycle_worker(&self, worker: PooledWorker) {
+        self.record_activity().await;
         if self.max_calls_per_worker > 0 && worker.completed_calls >= self.max_calls_per_worker {
             let recycled = self.stats.recycled.fetch_add(1, Ordering::Relaxed) + 1;
             info!(
@@ -250,11 +498,44 @@ impl AssetStudioWorkerPool {
                 recycled_workers = recycled,
                 "recycling assetstudio ffi worker after configured call limit"
             );
-            worker.kill();
+            self.spawn_forced_shutdown(worker);
             return;
         }
-        self.available.lock().await.push(worker);
+        self.state.lock().await.available.push(worker);
     }
+
+    fn spawn_forced_shutdown(&self, mut worker: PooledWorker) {
+        self.stats.killed.fetch_add(1, Ordering::Relaxed);
+        self.stats.forced_shutdowns.fetch_add(1, Ordering::Relaxed);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(worker.force_shutdown());
+            }
+            Err(_) => worker.start_kill(),
+        }
+    }
+}
+
+struct IdleReaperGuard {
+    pool: Weak<AssetStudioWorkerPool>,
+    runtime_id: tokio::runtime::Id,
+}
+
+impl Drop for IdleReaperGuard {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.upgrade() {
+            pool.reaper_runtimes
+                .lock()
+                .unwrap()
+                .remove(&self.runtime_id);
+            pool.activity.notify_waiters();
+        }
+    }
+}
+
+fn record_pool_activity(state: &mut WorkerPoolState) {
+    state.last_activity = Instant::now();
+    state.activity_generation = state.activity_generation.wrapping_add(1);
 }
 
 pub struct WorkerLease {
@@ -288,8 +569,8 @@ impl WorkerLease {
     }
 
     pub fn kill(mut self) {
-        if let Some(mut worker) = self.worker.take() {
-            worker.kill();
+        if let Some(worker) = self.worker.take() {
+            self.pool.spawn_forced_shutdown(worker);
         }
     }
 }
@@ -304,7 +585,42 @@ struct PooledWorker {
     stats: Arc<WorkerPoolStats>,
 }
 
+enum WorkerShutdown {
+    Graceful,
+    Forced,
+}
+
 impl PooledWorker {
+    async fn shutdown(self) -> WorkerShutdown {
+        let PooledWorker {
+            mut child,
+            stdin,
+            stdout,
+            ..
+        } = self;
+        drop(stdin);
+        drop(stdout);
+
+        match tokio::time::timeout(WORKER_SHUTDOWN_TIMEOUT, child.wait()).await {
+            Ok(Ok(_)) => WorkerShutdown::Graceful,
+            Ok(Err(_)) | Err(_) => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(WORKER_KILL_WAIT_TIMEOUT, child.wait()).await;
+                WorkerShutdown::Forced
+            }
+        }
+    }
+
+    async fn force_shutdown(self) {
+        let PooledWorker { mut child, .. } = self;
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(WORKER_KILL_WAIT_TIMEOUT, child.wait()).await;
+    }
+
+    fn start_kill(&mut self) {
+        let _ = self.child.start_kill();
+    }
+
     async fn call(
         &mut self,
         id: u64,
@@ -422,17 +738,6 @@ impl PooledWorker {
             stderr: source.to_string(),
         }
     }
-
-    fn kill(&mut self) {
-        let killed = self.stats.killed.fetch_add(1, Ordering::Relaxed) + 1;
-        debug!(
-            worker_id = self.worker_id,
-            completed_calls = self.completed_calls,
-            killed_workers = killed,
-            "killing assetstudio ffi worker"
-        );
-        let _ = self.child.start_kill();
-    }
 }
 
 pub fn configured_worker_path(
@@ -477,4 +782,206 @@ fn native_library_working_dir(native_library_path: &str) -> Option<&Path> {
 
 fn absolute_command_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn worker_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    async fn wait_for_stat(mut ready: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker pool statistic did not reach the expected value");
+    }
+
+    #[tokio::test]
+    async fn idle_worker_is_reaped_only_after_its_lease_is_returned() {
+        let worker_path = worker_fixture("cooperative-worker.sh");
+
+        let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
+            &worker_path,
+            "/tmp/idle-return-assetstudio.so",
+            1,
+            0,
+            Duration::from_millis(50),
+        );
+        let lease = pool.acquire().await.unwrap();
+
+        wait_for_stat(|| pool.maintenance_stats_snapshot().idle_reap_deferred > 0).await;
+        assert_eq!(pool.idle_worker_count().await, 0);
+        assert_eq!(pool.maintenance_stats_snapshot().idle_reaped, 0);
+
+        lease.finish_success().await;
+        assert_eq!(pool.idle_worker_count().await, 1);
+
+        wait_for_stat(|| pool.maintenance_stats_snapshot().graceful_shutdowns > 0).await;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        wait_for_stat(|| pool.maintenance_stats_snapshot().allocator_trim_attempts > 0).await;
+
+        let stats = pool.maintenance_stats_snapshot();
+        assert_eq!(pool.idle_worker_count().await, 0);
+        assert_eq!(stats.idle_reaped, 1);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        assert_eq!(stats.allocator_trim_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn idle_reaper_never_blocks_new_worker_acquisition() {
+        let worker_path = worker_fixture("cooperative-worker.sh");
+        let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
+            &worker_path,
+            "/tmp/nonblocking-acquire-assetstudio.so",
+            2,
+            0,
+            Duration::from_millis(50),
+        );
+        let first = pool.acquire().await.unwrap();
+        wait_for_stat(|| pool.maintenance_stats_snapshot().idle_reap_deferred > 0).await;
+
+        let second = tokio::time::timeout(Duration::from_millis(250), pool.acquire())
+            .await
+            .expect("idle reaper blocked a new worker lease")
+            .unwrap();
+
+        first.finish_success().await;
+        second.finish_success().await;
+        wait_for_stat(|| pool.maintenance_stats_snapshot().graceful_shutdowns >= 2).await;
+        assert_eq!(pool.idle_worker_count().await, 0);
+        assert_eq!(pool.maintenance_stats_snapshot().idle_reaped, 2);
+    }
+
+    #[tokio::test]
+    async fn cleanup_releases_pool_capacity_before_forcing_a_stubborn_worker() {
+        let worker_path = worker_fixture("stubborn-worker.sh");
+        let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
+            &worker_path,
+            "/tmp/stubborn-cleanup-assetstudio.so",
+            1,
+            0,
+            Duration::from_millis(50),
+        );
+        pool.acquire().await.unwrap().finish_success().await;
+        wait_for_stat(|| pool.maintenance_stats_snapshot().idle_reaped > 0).await;
+
+        let replacement = tokio::time::timeout(Duration::from_millis(250), pool.acquire())
+            .await
+            .expect("idle worker shutdown held the pool permit")
+            .unwrap();
+        wait_for_stat(|| pool.maintenance_stats_snapshot().forced_shutdowns > 0).await;
+        tokio::task::yield_now().await;
+        assert_eq!(pool.maintenance_stats_snapshot().allocator_trim_attempts, 0);
+
+        replacement.finish_success().await;
+        wait_for_stat(|| pool.maintenance_stats_snapshot().forced_shutdowns >= 2).await;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        wait_for_stat(|| pool.maintenance_stats_snapshot().allocator_trim_attempts > 0).await;
+    }
+
+    #[tokio::test]
+    async fn zero_idle_timeout_keeps_the_worker_available() {
+        let worker_path = worker_fixture("cooperative-worker.sh");
+        let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
+            &worker_path,
+            "/tmp/zero-timeout-assetstudio.so",
+            1,
+            0,
+            Duration::ZERO,
+        );
+
+        pool.acquire().await.unwrap().finish_success().await;
+
+        assert_eq!(pool.idle_worker_count().await, 1);
+        assert_eq!(pool.maintenance_stats_snapshot().idle_reaped, 0);
+
+        let workers = std::mem::take(&mut pool.state.lock().await.available);
+        pool.shutdown_workers(workers).await;
+    }
+
+    #[tokio::test]
+    async fn call_limit_still_recycles_a_worker_immediately() {
+        let worker_path = worker_fixture("cooperative-worker.sh");
+        let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
+            &worker_path,
+            "/tmp/call-limit-assetstudio.so",
+            1,
+            1,
+            Duration::from_secs(60),
+        );
+        let mut lease = pool.acquire().await.unwrap();
+        lease.worker.as_mut().unwrap().completed_calls = 1;
+
+        lease.finish_success().await;
+
+        assert_eq!(pool.idle_worker_count().await, 0);
+        assert_eq!(pool.stats_snapshot().recycled, 1);
+        assert_eq!(pool.maintenance_stats_snapshot().forced_shutdowns, 1);
+    }
+
+    #[test]
+    fn shared_keeps_the_original_four_argument_api() {
+        let worker_path = worker_fixture("cooperative-worker.sh");
+
+        let pool =
+            AssetStudioWorkerPool::shared(&worker_path, "/tmp/compat-api-assetstudio.so", 1, 0);
+
+        assert_eq!(pool.idle_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn idle_reaper_can_restart_after_its_runtime_stops() {
+        let worker_path = worker_fixture("cooperative-worker.sh");
+        let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
+            &worker_path,
+            "/tmp/runtime-restart-assetstudio.so",
+            1,
+            0,
+            Duration::from_millis(50),
+        );
+        assert!(pool.reaper_runtimes.lock().unwrap().is_empty());
+
+        let first_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let first_id = first_runtime.handle().id();
+        first_runtime.block_on(async {
+            pool.start_idle_reaper();
+            tokio::task::yield_now().await;
+            assert!(pool.reaper_runtimes.lock().unwrap().contains(&first_id));
+        });
+
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let second_id = second_runtime.handle().id();
+        second_runtime.block_on(async {
+            pool.start_idle_reaper();
+            tokio::task::yield_now().await;
+            let runtimes = pool.reaper_runtimes.lock().unwrap();
+            assert!(runtimes.contains(&first_id));
+            assert!(runtimes.contains(&second_id));
+        });
+        drop(first_runtime);
+        {
+            let runtimes = pool.reaper_runtimes.lock().unwrap();
+            assert!(!runtimes.contains(&first_id));
+            assert!(runtimes.contains(&second_id));
+        }
+
+        drop(second_runtime);
+        assert!(pool.reaper_runtimes.lock().unwrap().is_empty());
+    }
 }

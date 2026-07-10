@@ -15,11 +15,12 @@ pub(super) async fn run_assetstudio_ffi_object_export(
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
     let worker_path =
         configured_worker_path(app_config.backends.asset_studio.worker_path.as_deref())?;
-    let pool = AssetStudioWorkerPool::shared(
+    let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
         &worker_path,
         native_library_path,
         app_config.effective_asset_studio_ffi_process_concurrency(),
         app_config.backends.asset_studio.worker_max_calls,
+        Duration::from_secs(app_config.backends.asset_studio.worker_idle_timeout_seconds as u64),
     );
     let open_request = AssetStudioFfiContextOpenRequest {
         input_path: asset_bundle_file.to_string_lossy().to_string(),

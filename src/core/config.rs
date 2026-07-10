@@ -288,6 +288,10 @@ impl AppConfig {
             self.backends.asset_studio.worker_max_calls =
                 parse_usize_env("backends.asset_studio.worker_max_calls", &value)?;
         }
+        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_IDLE_TIMEOUT_SECONDS") {
+            self.backends.asset_studio.worker_idle_timeout_seconds =
+                parse_usize_env("backends.asset_studio.worker_idle_timeout_seconds", &value)?;
+        }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE") {
             self.backends.asset_studio.read_batch_size =
                 parse_positive_usize("backends.asset_studio.read_batch_size", &value)?;
@@ -1181,6 +1185,7 @@ pub struct AssetStudioBackendConfig {
     pub worker_path: Option<String>,
     pub process_concurrency: usize,
     pub worker_max_calls: usize,
+    pub worker_idle_timeout_seconds: usize,
     pub read_batch_size: usize,
     pub image_format: Option<String>,
     pub read_kinds: BTreeMap<String, String>,
@@ -1450,6 +1455,7 @@ impl Default for AssetStudioBackendConfig {
             worker_path: None,
             process_concurrency: 0,
             worker_max_calls: 256,
+            worker_idle_timeout_seconds: 60,
             read_batch_size: 64,
             image_format: None,
             read_kinds: BTreeMap::new(),
@@ -2136,6 +2142,7 @@ regions:
         assert_eq!(config.backends.image.jpeg_quality, 95);
         assert_eq!(asset_studio.process_concurrency, 0);
         assert_eq!(asset_studio.worker_max_calls, 256);
+        assert_eq!(asset_studio.worker_idle_timeout_seconds, 60);
         assert_eq!(asset_studio.read_batch_size, 64);
         assert_eq!(asset_studio.image_format, None);
         assert!(asset_studio.read_kinds.is_empty());
@@ -2173,6 +2180,7 @@ asset_studio:
   worker_path: /tmp/assetstudio-ffi-worker
   process_concurrency: 6
   worker_max_calls: 128
+  worker_idle_timeout_seconds: 90
   read_batch_size: 16
   image_format: raw_rgba
   read_kinds:
@@ -2197,6 +2205,7 @@ asset_studio:
         );
         assert_eq!(asset_studio.process_concurrency, 6);
         assert_eq!(asset_studio.worker_max_calls, 128);
+        assert_eq!(asset_studio.worker_idle_timeout_seconds, 90);
         assert_eq!(asset_studio.read_batch_size, 16);
         assert_eq!(asset_studio.image_format.as_deref(), Some("raw_rgba"));
         assert_eq!(
@@ -2716,6 +2725,8 @@ regions:
         let old_process_concurrency =
             std::env::var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY").ok();
         let old_worker_max_calls = std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS").ok();
+        let old_worker_idle_timeout =
+            std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_IDLE_TIMEOUT_SECONDS").ok();
         let old_read_batch_size = std::env::var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE").ok();
         let old_image_format = std::env::var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT").ok();
         let old_media_encode_concurrency = std::env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY").ok();
@@ -2741,6 +2752,7 @@ regions:
         );
         std::env::set_var("HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY", "7");
         std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS", "64");
+        std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_IDLE_TIMEOUT_SECONDS", "45");
         std::env::set_var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE", "48");
         std::env::set_var("HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT", "raw_rgba");
         std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", "9");
@@ -2787,6 +2799,7 @@ backends:
         );
         assert_eq!(config.backends.asset_studio.process_concurrency, 7);
         assert_eq!(config.backends.asset_studio.worker_max_calls, 64);
+        assert_eq!(config.backends.asset_studio.worker_idle_timeout_seconds, 45);
         assert_eq!(config.backends.asset_studio.read_batch_size, 48);
         assert_eq!(
             config.backends.asset_studio.image_format.as_deref(),
@@ -2831,6 +2844,12 @@ backends:
         match old_worker_max_calls {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS", value),
             None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS"),
+        }
+        match old_worker_idle_timeout {
+            Some(value) => {
+                std::env::set_var("HARUKI_ASSET_STUDIO_FFI_WORKER_IDLE_TIMEOUT_SECONDS", value)
+            }
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_WORKER_IDLE_TIMEOUT_SECONDS"),
         }
         match old_read_batch_size {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE", value),
