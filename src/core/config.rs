@@ -2572,11 +2572,12 @@ haruki_3d:
             "jp asset_studio_types should request AnimationClip exports"
         );
 
-        let raw_bundles = jp
-            .export
-            .raw_bundles
-            .as_ref()
-            .expect("jp raw bundle retention configured");
+        assert!(
+            jp.export.raw_bundles.is_none(),
+            "the default example must not enable legacy raw bundle retention"
+        );
+
+        let haruki_3d = &jp.export.haruki_3d;
         for expected in [
             "live_pv/model/characterv2/body/",
             "live_pv/model/characterv2/face/",
@@ -2587,15 +2588,14 @@ haruki_3d:
             "character/motion/costume_setting/",
         ] {
             assert!(
-                raw_bundles
+                haruki_3d
                     .include
                     .iter()
                     .any(|value| value.contains(expected)),
-                "raw_bundles.include should retain {expected}"
+                "haruki_3d.include should retain {expected}"
             );
         }
 
-        let haruki_3d = &jp.export.haruki_3d;
         assert!(
             haruki_3d.master_dir.contains("haruki-sekai-master/master"),
             "haruki_3d.master_dir should point at the upstream masterdata checkout"

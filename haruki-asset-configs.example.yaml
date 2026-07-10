@@ -174,17 +174,6 @@ regions:
         direct_mp4: true
       audio:
         formats: ["mp3"] # wav | flac | mp3
-      raw_bundles:
-        output_dir: "./Data/jp-assets/AssetBundles"
-        include:
-          - "^live_pv/model/characterv2/body/"
-          - "^live_pv/model/characterv2/face/"
-          - "^live_pv/model/characterv2/head_optional/"
-          - "^live_pv/model/characterv2/color_variation/body/"
-          - "^live_pv/model/characterv2/color_variation/face/"
-          - "^live_pv/model/characterv2/color_variation/head_optional/"
-          - "^character/motion/costume_setting/"
-        exclude: []
       haruki_3d:
         enabled: false
         exporter_path: "/app/haruki-3d/exporter/Haruki-3D-Exporter"
