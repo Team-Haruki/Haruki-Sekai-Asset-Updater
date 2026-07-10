@@ -37,7 +37,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"unsafe"
 )
 
@@ -108,16 +107,9 @@ func goString(base *C.uint8_t, offset C.int32_t, length C.int32_t) string {
 }
 
 func load(path string) (*Library, error) {
-	os.Setenv("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", path)
-	dir := filepath.Dir(path)
-	for _, name := range []string{"libTexture2DDecoderNative.dylib", "libTexture2DDecoderNative.so", "Texture2DDecoderNative.dll"} {
-		dep := filepath.Join(dir, name)
-		if _, err := os.Stat(dep); err == nil {
-			cp := C.CString(dep)
-			C.dlopen(cp, C.RTLD_NOW|C.RTLD_GLOBAL)
-			C.free(unsafe.Pointer(cp))
-		}
-	}
+	// Shipped native dependencies (Texture2DDecoderNative, AssetStudioFBXNative,
+	// ooz, fmod) are resolved by the library itself from its own directory; set
+	// HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH only for out-of-tree layouts.
 	cp := C.CString(path)
 	h := C.dlopen(cp, C.RTLD_NOW|C.RTLD_GLOBAL)
 	C.free(unsafe.Pointer(cp))

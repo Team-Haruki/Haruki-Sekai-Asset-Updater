@@ -197,6 +197,13 @@ def list_all_objects(worker: AssetStudioWorker, context_id: int) -> list[dict[st
 
 def read_texture2d(worker: AssetStudioWorker, context_id: int, assets: list[dict[str, Any]]) -> dict[str, Any]:
     textures = [asset for asset in assets if asset.get("type") == "Texture2D"]
+    # Upper bound for the packed payload block; compressed GPU formats can expand
+    # up to ~16x when decoded to raw RGBA. Above the worker's spill threshold this
+    # makes the worker stream payloads through a sparse temp file instead of
+    # memory. 0 keeps the in-memory path.
+    payload_capacity_hint = sum(
+        max(0, int(asset.get("size") or 0)) * 16 + 1024 * 1024 for asset in textures
+    )
     output = worker.call(
         "context_read_objects",
         {
@@ -205,6 +212,7 @@ def read_texture2d(worker: AssetStudioWorker, context_id: int, assets: list[dict
                 {"path_id": asset["path_id"], "kind": "image", "image_format": "raw_rgba"}
                 for asset in textures
             ],
+            "payload_capacity_hint": payload_capacity_hint,
         },
     )
     body = response_body(output, "context_read_objects")

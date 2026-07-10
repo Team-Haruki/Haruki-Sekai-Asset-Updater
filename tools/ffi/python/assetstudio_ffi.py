@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import ctypes as C
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -400,12 +399,9 @@ def _read_str(response: ReadBatchRetryResponse, offset: int, length: int) -> str
 class AssetStudioFFI:
     def __init__(self, library_path: str | Path):
         self.library_path = str(library_path)
-        os.environ["HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH"] = self.library_path
-        lib_dir = Path(self.library_path).parent
-        for name in ["libTexture2DDecoderNative.dylib", "libTexture2DDecoderNative.so", "Texture2DDecoderNative.dll"]:
-            dep = lib_dir / name
-            if dep.exists():
-                C.CDLL(str(dep))
+        # Shipped native dependencies (Texture2DDecoderNative, AssetStudioFBXNative,
+        # ooz, fmod) are resolved by the library itself from its own directory; set
+        # HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH only for out-of-tree layouts.
         self.lib = C.CDLL(self.library_path)
         self._bind_symbols()
         self.verify_layout()

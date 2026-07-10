@@ -300,7 +300,14 @@ func ListAllObjects(worker *AssetStudioWorker, contextID int64) ([]AssetInfo, er
 }
 
 func ReadTexture2D(worker *AssetStudioWorker, contextID int64, assets []AssetInfo) (map[string]any, error) {
-	var objects []map[string]any
+	// Non-nil so an empty batch marshals as [] rather than null; the worker
+	// rejects null for the objects array.
+	objects := []map[string]any{}
+	// Upper bound for the packed payload block; compressed GPU formats can
+	// expand up to ~16x when decoded to raw RGBA. Above the worker's spill
+	// threshold this makes the worker stream payloads through a sparse temp
+	// file instead of memory. 0 keeps the in-memory path.
+	var payloadCapacityHint uint64
 	for _, asset := range assets {
 		if asset.Type == "Texture2D" {
 			objects = append(objects, map[string]any{
@@ -308,11 +315,15 @@ func ReadTexture2D(worker *AssetStudioWorker, contextID int64, assets []AssetInf
 				"kind":         "image",
 				"image_format": "raw_rgba",
 			})
+			if asset.Size > 0 {
+				payloadCapacityHint += uint64(asset.Size)*16 + 1024*1024
+			}
 		}
 	}
 	result, err := worker.Call("context_read_objects", map[string]any{
-		"context_id": contextID,
-		"objects":    objects,
+		"context_id":            contextID,
+		"objects":               objects,
+		"payload_capacity_hint": payloadCapacityHint,
 	})
 	if err != nil {
 		return nil, err
