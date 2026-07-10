@@ -1490,6 +1490,9 @@ impl AssetExecutionContext {
     }
 
     fn matches_raw_bundle_filters(&self, bundle_path: &str) -> bool {
+        if !self.region.export.haruki_3d.enabled {
+            return false;
+        }
         let Some(raw_bundles) = self.region.export.raw_bundles.as_ref() else {
             return false;
         };
@@ -2168,6 +2171,41 @@ mod tests {
     }
 
     #[test]
+    fn raw_bundle_filters_require_haruki_3d_enabled() {
+        let mut region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: "https://example.com/info".to_string(),
+            asset_bundle_url_template: "https://example.com/{bundle_path}".to_string(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::new(),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        region.export.raw_bundles = Some(RawBundleExportConfig {
+            output_dir: None,
+            include: vec!["^live_pv/model/characterv2/body/".to_string()],
+            exclude: Vec::new(),
+        });
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let config = AppConfig::default();
+
+        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        assert!(
+            !executor.matches_raw_bundle_filters("live_pv/model/characterv2/body/01"),
+            "raw bundles must not match while 3D is disabled"
+        );
+
+        region.export.haruki_3d.enabled = true;
+        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        assert!(executor.matches_raw_bundle_filters("live_pv/model/characterv2/body/01"));
+    }
+
+    #[test]
     fn haruki_3d_tasks_follow_downloaded_record_hashes() {
         let temp = tempdir().unwrap();
         let mut region = test_region(RegionProviderConfig::ColorfulPalette {
@@ -2617,6 +2655,10 @@ mod tests {
                     include: vec!["^start/".to_string()],
                     exclude: Vec::new(),
                 }),
+                haruki_3d: crate::core::config::Haruki3dExportConfig {
+                    enabled: true,
+                    ..crate::core::config::Haruki3dExportConfig::default()
+                },
                 ..crate::core::config::RegionExportConfig::default()
             },
             ..RegionConfig::default()
@@ -2787,6 +2829,10 @@ mod tests {
                     include: vec!["^ond/".to_string()],
                     exclude: Vec::new(),
                 }),
+                haruki_3d: crate::core::config::Haruki3dExportConfig {
+                    enabled: true,
+                    ..crate::core::config::Haruki3dExportConfig::default()
+                },
                 ..crate::core::config::RegionExportConfig::default()
             },
             ..RegionConfig::default()
@@ -2937,6 +2983,10 @@ mod tests {
                     include: vec!["^start/".to_string()],
                     exclude: Vec::new(),
                 }),
+                haruki_3d: crate::core::config::Haruki3dExportConfig {
+                    enabled: true,
+                    ..crate::core::config::Haruki3dExportConfig::default()
+                },
                 ..crate::core::config::RegionExportConfig::default()
             },
             ..RegionConfig::default()
