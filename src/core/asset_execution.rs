@@ -721,8 +721,7 @@ impl AssetExecutionContext {
                 message: "building prefetch task list".to_string(),
             },
         );
-        let mut tasks = self.build_download_tasks(&info, &DownloadRecord::new())?;
-        tasks = self.filter_raw_bundle_tasks(tasks);
+        let tasks = self.build_raw_bundle_filter_tasks(&info);
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::DownloadsPlanned { total: tasks.len() },
@@ -1367,6 +1366,11 @@ impl AssetExecutionContext {
         // is used to build any filesystem path, so a name like "../../etc/foo" can't escape the
         // temp/export directories.
         let safe_bundle_path = validate_relative_bundle_path(&task.bundle_path)?.to_path_buf();
+        let raw_bundle_target = if self.matches_raw_bundle_filters(&task.bundle_path) {
+            Some(self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?)
+        } else {
+            None
+        };
         let haruki_3d_work_target = if self.matches_haruki_3d_filters(&task.bundle_path) {
             match haruki_3d_work_root {
                 Some(work_root) => Some(raw_bundle_output_path(work_root, &task.bundle_path)?),
@@ -1379,13 +1383,16 @@ impl AssetExecutionContext {
             .join(&self.region_name)
             .join(&safe_bundle_path);
 
-        // Deobfuscation (a full-buffer transform) and the 3D staging/temp-file writes are
+        // Deobfuscation (a full-buffer transform), retention/staging, and temp-file writes are
         // CPU/blocking work. Run them on a blocking thread so the async runtime workers (which also
         // serve HTTP and other jobs) aren't stalled while many bundles process concurrently.
         let blocking_started = Instant::now();
         let temp_file_for_blocking = temp_file.clone();
         tokio::task::spawn_blocking(move || -> Result<(), AssetExecutionError> {
             let deobfuscated = deobfuscate(&body);
+            if let Some(raw_path) = raw_bundle_target {
+                Self::write_raw_bundle(&raw_path, &deobfuscated)?;
+            }
             if let Some(work_path) = haruki_3d_work_target {
                 Self::write_haruki_3d_work_bundle(&work_path, &deobfuscated)?;
             }
@@ -1507,17 +1514,7 @@ impl AssetExecutionContext {
         Ok(())
     }
 
-    fn filter_raw_bundle_tasks(&self, tasks: Vec<DownloadTask>) -> Vec<DownloadTask> {
-        tasks
-            .into_iter()
-            .filter(|task| self.matches_raw_bundle_filters(&task.bundle_path))
-            .collect()
-    }
-
     fn matches_raw_bundle_filters(&self, bundle_path: &str) -> bool {
-        if !self.region.export.haruki_3d.enabled {
-            return false;
-        }
         let Some(raw_bundles) = self.region.export.raw_bundles.as_ref() else {
             return false;
         };
@@ -1780,6 +1777,29 @@ impl AssetExecutionContext {
 
     fn build_haruki_3d_tasks(&self, info: &AssetBundleInfo) -> Vec<DownloadTask> {
         self.build_haruki_3d_filter_tasks(info)
+    }
+
+    fn build_raw_bundle_filter_tasks(&self, info: &AssetBundleInfo) -> Vec<DownloadTask> {
+        let mut tasks = Vec::new();
+        for (bundle_name, detail) in &info.bundles {
+            if !self.matches_raw_bundle_filters(bundle_name) {
+                continue;
+            }
+            let bundle_hash = match self.region.provider {
+                RegionProviderConfig::Nuverse { .. } => detail.crc.to_string(),
+                RegionProviderConfig::ColorfulPalette { .. } => detail.hash.clone(),
+            };
+            tasks.push(DownloadTask {
+                download_path: download_path_for_region(&self.region.provider, bundle_name, detail),
+                bundle_path: bundle_name.clone(),
+                bundle_hash,
+                category: detail.category.clone(),
+                file_size: detail.file_size,
+                priority: usize::MAX,
+            });
+        }
+        tasks.sort_by(|a, b| a.bundle_path.cmp(&b.bundle_path));
+        tasks
     }
 
     fn build_haruki_3d_download_tasks(
@@ -2192,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_bundle_filters_require_haruki_3d_enabled() {
+    fn raw_bundle_filters_are_independent_of_haruki_3d() {
         let mut region = test_region(RegionProviderConfig::ColorfulPalette {
             asset_info_url_template: "https://example.com/info".to_string(),
             asset_bundle_url_template: "https://example.com/{bundle_path}".to_string(),
@@ -2206,6 +2226,8 @@ mod tests {
             include: vec!["^live_pv/model/characterv2/body/".to_string()],
             exclude: Vec::new(),
         });
+        region.filters.on_demand.clear();
+        region.filters.skip = vec![".*".to_string()];
         let request = AssetUpdateRequest {
             region: "jp".to_string(),
             asset_version: Some("1".to_string()),
@@ -2217,13 +2239,43 @@ mod tests {
 
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
         assert!(
-            !executor.matches_raw_bundle_filters("live_pv/model/characterv2/body/01"),
-            "raw bundles must not match while 3D is disabled"
+            executor.matches_raw_bundle_filters("live_pv/model/characterv2/body/01"),
+            "raw bundle retention must remain independent while 3D is disabled"
         );
+        assert!(!executor.matches_raw_bundle_filters("live_pv/model/characterv2/face/01"));
 
-        region.export.haruki_3d.enabled = true;
-        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
-        assert!(executor.matches_raw_bundle_filters("live_pv/model/characterv2/body/01"));
+        let detail = |bundle_name: &str| AssetBundleDetail {
+            bundle_name: bundle_name.to_string(),
+            cache_file_name: String::new(),
+            cache_directory_name: String::new(),
+            hash: format!("{bundle_name}-hash"),
+            category: AssetCategory::OnDemand,
+            crc: 0,
+            file_size: 1,
+            dependencies: Vec::new(),
+            paths: Vec::new(),
+            is_builtin: false,
+            is_relocate: None,
+            md5_hash: None,
+            download_path: None,
+        };
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([
+                (
+                    "live_pv/model/characterv2/body/01".to_string(),
+                    detail("live_pv/model/characterv2/body/01"),
+                ),
+                (
+                    "live_pv/model/characterv2/face/01".to_string(),
+                    detail("live_pv/model/characterv2/face/01"),
+                ),
+            ]),
+        };
+        let tasks = executor.build_raw_bundle_filter_tasks(&info);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].bundle_path, "live_pv/model/characterv2/body/01");
     }
 
     #[test]
