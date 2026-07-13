@@ -22,7 +22,7 @@ hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
 libc = "0.2"
 mime_guess = "2.0"
-opendal = { version = "0.57.0", default-features = false, features = [
+opendal = { version = "0.58.0", default-features = false, features = [
     "executors-tokio",
     "reqwest-rustls-tls",
     "services-fs",
