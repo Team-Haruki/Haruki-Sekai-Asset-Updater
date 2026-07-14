@@ -1725,36 +1725,43 @@ impl AssetExecutionContext {
                 "msgpack-br".to_string(),
             ]
         };
-        let mut exporter_commands = vec![
-            [
-                "--emit-costume-registries".to_string(),
-                "--master".to_string(),
-                haruki_3d.master_dir.clone(),
-                "--asset-root".to_string(),
-                asset_root_arg.clone(),
-                "--out".to_string(),
-                haruki_3d.output_dir.clone(),
-            ]
-            .into_iter()
-            .chain(runtime_json_output_args())
-            .collect(),
-            [
-                "--emit-part-packages".to_string(),
-                "--master".to_string(),
-                haruki_3d.master_dir.clone(),
-                "--asset-root".to_string(),
-                asset_root_arg.clone(),
-                "--out".to_string(),
-                haruki_3d.output_dir.clone(),
-                "--manifest".to_string(),
-                haruki_3d.manifest_file.clone(),
-                "--part-package-process-concurrency".to_string(),
-                haruki_3d.process_concurrency.to_string(),
-            ]
-            .into_iter()
-            .chain(runtime_json_output_args())
-            .collect(),
-        ];
+        let registry_args = [
+            "--emit-costume-registries".to_string(),
+            "--master".to_string(),
+            haruki_3d.master_dir.clone(),
+            "--asset-root".to_string(),
+            asset_root_arg.clone(),
+            "--out".to_string(),
+            haruki_3d.output_dir.clone(),
+        ]
+        .into_iter()
+        .chain(runtime_json_output_args())
+        .collect();
+        let mut part_args: Vec<String> = [
+            "--emit-part-packages".to_string(),
+            "--master".to_string(),
+            haruki_3d.master_dir.clone(),
+            "--asset-root".to_string(),
+            asset_root_arg.clone(),
+            "--out".to_string(),
+            haruki_3d.output_dir.clone(),
+            "--manifest".to_string(),
+            haruki_3d.manifest_file.clone(),
+            "--part-package-process-concurrency".to_string(),
+            haruki_3d.process_concurrency.to_string(),
+        ]
+        .into_iter()
+        .chain(runtime_json_output_args())
+        .collect();
+        if !haruki_3d.shared_content_store.trim().is_empty() {
+            part_args.push("--shared-content-store".to_string());
+            part_args.push(haruki_3d.shared_content_store.clone());
+        }
+        if !haruki_3d.compiled_content_store.trim().is_empty() {
+            part_args.push("--compiled-content-store".to_string());
+            part_args.push(haruki_3d.compiled_content_store.clone());
+        }
+        let mut exporter_commands = vec![registry_args, part_args];
         let mut role_args = vec![
             "--emit-role-runtimes".to_string(),
             "--master".to_string(),
@@ -2385,6 +2392,8 @@ mod tests {
             master_dir: "/master".to_string(),
             output_dir: "/runtime".to_string(),
             manifest_file: "/runtime/manifest.json".to_string(),
+            shared_content_store: "/runtime-cas".to_string(),
+            compiled_content_store: "/runtime-compiled".to_string(),
             process_concurrency: 16,
             role_character3d_ids: vec![5, 7],
             ..crate::core::config::Haruki3dExportConfig::default()
@@ -2411,6 +2420,12 @@ mod tests {
                 .any(|pair| pair == ["--part-package-process-concurrency", "16"]),
             "part package command should pass haruki_3d.process_concurrency"
         );
+        assert!(commands[1]
+            .windows(2)
+            .any(|pair| pair == ["--shared-content-store", "/runtime-cas"]));
+        assert!(commands[1]
+            .windows(2)
+            .any(|pair| pair == ["--compiled-content-store", "/runtime-compiled"]));
         assert_eq!(commands[2][0], "--emit-role-runtimes");
         assert!(
             commands[2]

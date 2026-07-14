@@ -181,6 +181,8 @@ regions:
         work_dir: "/app/data/3d-work"
         manifest_file: "/app/data/3d-output/haruki-3d-export-manifest.json"
         output_dir: "/app/data/3d-output"
+        shared_content_store: "/app/data/3d-output-cas"
+        compiled_content_store: "/app/data/3d-compiled-cache"
         process_concurrency: 0 # 0 = exporter auto CPU count; set a fixed value such as 16 for bounded full 3D export
         role_character3d_ids:
           - 5
