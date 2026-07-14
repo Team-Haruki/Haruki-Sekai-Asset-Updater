@@ -184,6 +184,7 @@ regions:
         shared_content_store: "/app/data/3d-output-cas"
         compiled_content_store: "/app/data/3d-compiled-cache"
         process_concurrency: 0 # 0 = exporter auto CPU count; set a fixed value such as 16 for bounded full 3D export
+        convert_model_textures: false # textures are exported separately; avoid duplicate ModelConverter PNG work
         role_character3d_ids:
           - 5
         include:

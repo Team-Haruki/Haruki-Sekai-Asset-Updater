@@ -1725,6 +1725,12 @@ impl AssetExecutionContext {
                 "msgpack-br".to_string(),
             ]
         };
+        let model_texture_args = || {
+            vec![
+                "--convert-model-textures".to_string(),
+                haruki_3d.convert_model_textures.to_string(),
+            ]
+        };
         let registry_args = [
             "--emit-costume-registries".to_string(),
             "--master".to_string(),
@@ -1736,6 +1742,7 @@ impl AssetExecutionContext {
         ]
         .into_iter()
         .chain(runtime_json_output_args())
+        .chain(model_texture_args())
         .collect();
         let mut part_args: Vec<String> = [
             "--emit-part-packages".to_string(),
@@ -1752,6 +1759,7 @@ impl AssetExecutionContext {
         ]
         .into_iter()
         .chain(runtime_json_output_args())
+        .chain(model_texture_args())
         .collect();
         if !haruki_3d.shared_content_store.trim().is_empty() {
             part_args.push("--shared-content-store".to_string());
@@ -1778,6 +1786,7 @@ impl AssetExecutionContext {
             role_args.push(id.to_string());
         }
         role_args.extend(runtime_json_output_args());
+        role_args.extend(model_texture_args());
         exporter_commands.push(role_args);
         exporter_commands
     }
@@ -2412,6 +2421,12 @@ mod tests {
                     .windows(2)
                     .any(|pair| pair == ["--runtime-json-output", "msgpack-br"]),
                 "Haruki 3D exporter command should write runtime JSON as msgpack-br: {command:?}"
+            );
+            assert!(
+                command
+                    .windows(2)
+                    .any(|pair| pair == ["--convert-model-textures", "false"]),
+                "Haruki 3D exporter command should disable redundant model texture conversion: {command:?}"
             );
         }
         assert!(
