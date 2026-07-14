@@ -119,6 +119,7 @@ struct DownloadTask {
     category: AssetCategory,
     file_size: i64,
     priority: usize,
+    export_payloads: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +217,7 @@ struct NativeBundlePostProcessJob {
 }
 
 enum BundleWorkOutput {
+    Completed,
     NativePostProcess(Box<NativeBundlePostProcessJob>),
 }
 
@@ -432,7 +434,7 @@ impl AssetExecutionContext {
                     )
                     .await
                 {
-                    Ok(mut job) => {
+                    Ok(Some(mut job)) => {
                         let backlog_wait_started = Instant::now();
                         let backlog_permit = post_process_backlog_semaphore
                             .acquire_owned()
@@ -444,6 +446,7 @@ impl AssetExecutionContext {
                         job._memory_permit = memory_permit.take();
                         Ok(BundleWorkOutput::NativePostProcess(Box::new(job)))
                     }
+                    Ok(None) => Ok(BundleWorkOutput::Completed),
                     Err(error) => Err(error),
                 };
                 let mut phase_ms = HashMap::new();
@@ -475,7 +478,7 @@ impl AssetExecutionContext {
             }
             tokio::select! {
                 Some(result) = joins.join_next(), if !joins.is_empty() => {
-                    let (bundle_path, _bundle_hash, result) = match result {
+                    let (bundle_path, bundle_hash, result) = match result {
                         Ok(tuple) => tuple,
                         Err(join_err) => {
                             // A download/export sub-task panicked or was aborted. Count it as a
@@ -491,6 +494,20 @@ impl AssetExecutionContext {
                         }
                     };
                     match result {
+                        Ok(BundleWorkOutput::Completed) => {
+                            Self::record_completed_bundle(
+                                &progress,
+                                &record_path,
+                                &mut downloaded_assets,
+                                &mut completed,
+                                &mut pending_save_count,
+                                batch_save_size,
+                                &self.region_name,
+                                bundle_path,
+                                bundle_hash,
+                            )
+                            .await;
+                        }
                         Ok(BundleWorkOutput::NativePostProcess(job)) => {
                             let app_config = app_config_cloned.clone();
                             let region = self.region.clone();
@@ -1294,6 +1311,7 @@ impl AssetExecutionContext {
                 category: detail.category.clone(),
                 file_size: detail.file_size,
                 priority,
+                export_payloads: true,
             });
         }
 
@@ -1317,7 +1335,13 @@ impl AssetExecutionContext {
                 .cmp(&b.bundle_path)
                 .then_with(|| a.priority.cmp(&b.priority))
         });
-        tasks.dedup_by(|a, b| a.bundle_path == b.bundle_path);
+        tasks.dedup_by(|a, b| {
+            if a.bundle_path != b.bundle_path {
+                return false;
+            }
+            b.export_payloads |= a.export_payloads;
+            true
+        });
         tasks.sort_by(|a, b| {
             a.priority
                 .cmp(&b.priority)
@@ -1332,7 +1356,7 @@ impl AssetExecutionContext {
         task: &DownloadTask,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
         haruki_3d_work_root: Option<&Path>,
-    ) -> Result<NativeBundlePostProcessJob, AssetExecutionError> {
+    ) -> Result<Option<NativeBundlePostProcessJob>, AssetExecutionError> {
         let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
             AssetExecutionError::MissingAssetSaveDir {
                 region: self.region_name.clone(),
@@ -1387,7 +1411,7 @@ impl AssetExecutionContext {
         // CPU/blocking work. Run them on a blocking thread so the async runtime workers (which also
         // serve HTTP and other jobs) aren't stalled while many bundles process concurrently.
         let blocking_started = Instant::now();
-        let temp_file_for_blocking = temp_file.clone();
+        let temp_file_for_blocking = task.export_payloads.then(|| temp_file.clone());
         tokio::task::spawn_blocking(move || -> Result<(), AssetExecutionError> {
             let deobfuscated = deobfuscate(&body);
             if let Some(raw_path) = raw_bundle_target {
@@ -1396,20 +1420,22 @@ impl AssetExecutionContext {
             if let Some(work_path) = haruki_3d_work_target {
                 Self::write_haruki_3d_work_bundle(&work_path, &deobfuscated)?;
             }
-            if let Some(parent) = temp_file_for_blocking.parent() {
-                std::fs::create_dir_all(parent).map_err(|source| {
-                    AssetExecutionError::CreateTempDir {
-                        path: parent.to_path_buf(),
+            if let Some(temp_file) = temp_file_for_blocking {
+                if let Some(parent) = temp_file.parent() {
+                    std::fs::create_dir_all(parent).map_err(|source| {
+                        AssetExecutionError::CreateTempDir {
+                            path: parent.to_path_buf(),
+                            source,
+                        }
+                    })?;
+                }
+                std::fs::write(&temp_file, deobfuscated).map_err(|source| {
+                    AssetExecutionError::WriteTempFile {
+                        path: temp_file,
                         source,
                     }
                 })?;
             }
-            std::fs::write(&temp_file_for_blocking, deobfuscated).map_err(|source| {
-                AssetExecutionError::WriteTempFile {
-                    path: temp_file_for_blocking.clone(),
-                    source,
-                }
-            })?;
             Ok(())
         })
         .await
@@ -1421,13 +1447,19 @@ impl AssetExecutionContext {
                 elapsed_ms: blocking_started.elapsed().as_millis(),
             },
         );
-        Self::send_progress(
-            progress,
-            ExecutionProgressUpdate::BundleTempWritten {
-                bundle: task.bundle_path.clone(),
-                elapsed_ms: blocking_started.elapsed().as_millis(),
-            },
-        );
+        if task.export_payloads {
+            Self::send_progress(
+                progress,
+                ExecutionProgressUpdate::BundleTempWritten {
+                    bundle: task.bundle_path.clone(),
+                    elapsed_ms: blocking_started.elapsed().as_millis(),
+                },
+            );
+        }
+
+        if !task.export_payloads {
+            return Ok(None);
+        }
 
         let category = match task.category {
             AssetCategory::StartApp => "StartApp",
@@ -1446,7 +1478,7 @@ impl AssetExecutionContext {
         .await;
         let _ = remove_file_if_exists(&temp_file);
 
-        Ok(NativeBundlePostProcessJob {
+        Ok(Some(NativeBundlePostProcessJob {
             bundle_path: task.bundle_path.clone(),
             bundle_hash: task.bundle_hash.clone(),
             export_started,
@@ -1454,7 +1486,7 @@ impl AssetExecutionContext {
             backlog_wait_ms: 0,
             _backlog_permit: None,
             _memory_permit: None,
-        })
+        }))
     }
 
     async fn prefetch_bundle(
@@ -1812,6 +1844,7 @@ impl AssetExecutionContext {
                 category: detail.category.clone(),
                 file_size: detail.file_size,
                 priority: usize::MAX,
+                export_payloads: false,
             });
         }
         tasks.sort_by(|a, b| a.bundle_path.cmp(&b.bundle_path));
@@ -1856,6 +1889,7 @@ impl AssetExecutionContext {
                 category: detail.category.clone(),
                 file_size: detail.file_size,
                 priority: usize::MAX,
+                export_payloads: false,
             });
         }
         tasks.sort_by(|a, b| a.bundle_path.cmp(&b.bundle_path));
@@ -2589,7 +2623,7 @@ mod tests {
     }
 
     #[test]
-    fn build_download_tasks_appends_distinct_haruki_3d_filter_matches() {
+    fn build_download_tasks_routes_3d_only_matches_to_staging() {
         let temp = tempdir().unwrap();
         let mut region = test_region(RegionProviderConfig::ColorfulPalette {
             asset_info_url_template: String::new(),
@@ -2655,6 +2689,14 @@ mod tests {
             paths,
             vec!["start/a", "live_pv/model/characterv2/body/01"],
             "3D matches with missing staging must be merged once after ordinary download filtering"
+        );
+        assert!(
+            tasks[0].export_payloads,
+            "ordinary tasks must export payloads"
+        );
+        assert!(
+            !tasks[1].export_payloads,
+            "3D-only tasks must only stage raw bundles"
         );
     }
 
