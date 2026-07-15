@@ -12,6 +12,7 @@ use reqwest::header::{
     USER_AGENT,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -372,6 +373,14 @@ impl AssetExecutionContext {
         let mut post_process_joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
         let haruki_3d_work_root = self.haruki_3d_work_asset_root();
+        let bundle_hash_index_path = haruki_3d_work_root
+            .as_ref()
+            .map(|root| root.join(".haruki-bundle-sha256.json"));
+        let bundle_hash_index = bundle_hash_index_path
+            .as_ref()
+            .map(load_download_record)
+            .transpose()?
+            .map(|record| Arc::new(std::sync::Mutex::new(record)));
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::Phase {
@@ -399,6 +408,7 @@ impl AssetExecutionContext {
             let progress = progress.clone();
             let cancel_flag = cancel_flag.clone();
             let haruki_3d_work_root = haruki_3d_work_root.clone();
+            let bundle_hash_index = bundle_hash_index.clone();
             joins.spawn(async move {
                 let download_slot_wait_started = Instant::now();
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
@@ -431,6 +441,7 @@ impl AssetExecutionContext {
                         &task,
                         &progress,
                         haruki_3d_work_root.as_deref(),
+                        bundle_hash_index.as_ref(),
                     )
                     .await
                 {
@@ -503,6 +514,8 @@ impl AssetExecutionContext {
                                 &mut pending_save_count,
                                 batch_save_size,
                                 &self.region_name,
+                                bundle_hash_index_path.as_ref(),
+                                bundle_hash_index.as_ref(),
                                 bundle_path,
                                 bundle_hash,
                             )
@@ -622,6 +635,8 @@ impl AssetExecutionContext {
                                 &mut pending_save_count,
                                 batch_save_size,
                                 &self.region_name,
+                                bundle_hash_index_path.as_ref(),
+                                bundle_hash_index.as_ref(),
                                 bundle_path,
                                 bundle_hash,
                             )
@@ -662,6 +677,11 @@ impl AssetExecutionContext {
         );
         // Persist the record BEFORE honoring cancellation: every bundle that finished already ran
         // its export/upload side effects, so dropping them here would force a redundant re-run.
+        Self::save_bundle_hash_index_checkpoint(
+            bundle_hash_index_path.as_ref(),
+            bundle_hash_index.as_ref(),
+        )
+        .await?;
         Self::save_download_record_on_blocking_thread(
             record_path.clone(),
             downloaded_assets.clone(),
@@ -900,6 +920,8 @@ impl AssetExecutionContext {
         pending_save_count: &mut usize,
         batch_save_size: usize,
         region_name: &str,
+        bundle_hash_index_path: Option<&PathBuf>,
+        bundle_hash_index: Option<&Arc<std::sync::Mutex<DownloadRecord>>>,
         bundle_path: String,
         bundle_hash: String,
     ) {
@@ -926,12 +948,22 @@ impl AssetExecutionContext {
                 batch = *pending_save_count,
                 "batch-flushing download record"
             );
-            match Self::save_download_record_on_blocking_thread(
-                record_path.to_string(),
-                downloaded_assets.clone(),
+            let save_result = match Self::save_bundle_hash_index_checkpoint(
+                bundle_hash_index_path,
+                bundle_hash_index,
             )
             .await
             {
+                Ok(()) => {
+                    Self::save_download_record_on_blocking_thread(
+                        record_path.to_string(),
+                        downloaded_assets.clone(),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            match save_result {
                 Ok(()) => Self::send_progress(
                     progress,
                     ExecutionProgressUpdate::RecordSaved {
@@ -956,6 +988,23 @@ impl AssetExecutionContext {
             .await
             .map_err(|source| AssetExecutionError::BlockingTask(source.to_string()))?
             .map_err(AssetExecutionError::from)
+    }
+
+    async fn save_bundle_hash_index_checkpoint(
+        path: Option<&PathBuf>,
+        index: Option<&Arc<std::sync::Mutex<DownloadRecord>>>,
+    ) -> Result<(), AssetExecutionError> {
+        let (Some(path), Some(index)) = (path, index) else {
+            return Ok(());
+        };
+        let record = index
+            .lock()
+            .map_err(|_| {
+                AssetExecutionError::BlockingTask("bundle hash index lock poisoned".to_string())
+            })?
+            .clone();
+        Self::save_download_record_on_blocking_thread(path.to_string_lossy().into_owned(), record)
+            .await
     }
 
     async fn finish_native_bundle_post_process(
@@ -1356,6 +1405,7 @@ impl AssetExecutionContext {
         task: &DownloadTask,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
         haruki_3d_work_root: Option<&Path>,
+        bundle_hash_index: Option<&Arc<std::sync::Mutex<DownloadRecord>>>,
     ) -> Result<Option<NativeBundlePostProcessJob>, AssetExecutionError> {
         let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
             AssetExecutionError::MissingAssetSaveDir {
@@ -1412,6 +1462,8 @@ impl AssetExecutionContext {
         // serve HTTP and other jobs) aren't stalled while many bundles process concurrently.
         let blocking_started = Instant::now();
         let temp_file_for_blocking = task.export_payloads.then(|| temp_file.clone());
+        let bundle_hash_index = bundle_hash_index.cloned();
+        let bundle_hash_index_key = bundle_hash_index_key(&task.bundle_path)?;
         tokio::task::spawn_blocking(move || -> Result<(), AssetExecutionError> {
             let deobfuscated = deobfuscate(&body);
             if let Some(raw_path) = raw_bundle_target {
@@ -1419,6 +1471,17 @@ impl AssetExecutionContext {
             }
             if let Some(work_path) = haruki_3d_work_target {
                 Self::write_haruki_3d_work_bundle(&work_path, &deobfuscated)?;
+                if let Some(index) = bundle_hash_index {
+                    let digest = hex::encode(Sha256::digest(&deobfuscated));
+                    index
+                        .lock()
+                        .map_err(|_| {
+                            AssetExecutionError::BlockingTask(
+                                "bundle hash index lock poisoned".to_string(),
+                            )
+                        })?
+                        .insert(bundle_hash_index_key, digest);
+                }
             }
             if let Some(temp_file) = temp_file_for_blocking {
                 if let Some(parent) = temp_file.parent() {
@@ -1716,6 +1779,7 @@ impl AssetExecutionContext {
                     message: phase_message,
                 },
             );
+            let exporter_started = Instant::now();
             let output = tokio::process::Command::new(&haruki_3d.exporter_path)
                 .args(&args)
                 .output()
@@ -1735,6 +1799,22 @@ impl AssetExecutionContext {
                     stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
                 });
             }
+            tracing::info!(
+                region = %self.region_name,
+                stage = %args.first().map(String::as_str).unwrap_or("unknown"),
+                elapsed_ms = exporter_started.elapsed().as_millis(),
+                "Haruki 3D exporter stage completed"
+            );
+            let metrics = exporter_metric_lines(&output.stdout);
+            if !metrics.is_empty() {
+                tracing::info!(region = %self.region_name, %metrics, "Haruki 3D exporter metrics");
+            }
+            tracing::debug!(
+                region = %self.region_name,
+                stdout = %String::from_utf8_lossy(&output.stdout).trim(),
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "Haruki 3D exporter stage output"
+            );
         }
 
         if haruki_3d.cleanup_work_dir_after_success {
@@ -1801,6 +1881,13 @@ impl AssetExecutionContext {
             part_args.push("--compiled-content-store".to_string());
             part_args.push(haruki_3d.compiled_content_store.clone());
         }
+        part_args.push("--bundle-hash-index".to_string());
+        part_args.push(
+            asset_root
+                .join(".haruki-bundle-sha256.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let mut exporter_commands = vec![registry_args, part_args];
         let mut role_args = vec![
             "--emit-role-runtimes".to_string(),
@@ -1966,6 +2053,20 @@ fn raw_bundle_output_path(root: &Path, bundle_path: &str) -> Result<PathBuf, Ass
         path.set_extension("bundle");
     }
     Ok(path)
+}
+
+fn bundle_hash_index_key(bundle_path: &str) -> Result<String, AssetExecutionError> {
+    Ok(raw_bundle_output_path(Path::new(""), bundle_path)?
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
+fn exporter_metric_lines(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter(|line| line.contains(" metrics:") || line.starts_with("Planned "))
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 #[derive(Clone)]
@@ -2181,9 +2282,9 @@ mod tests {
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
     use super::{
-        decrypt_asset_bundle_info, deobfuscate, post_process_backlog_capacity,
-        raw_bundle_output_path, should_download_bundle, AssetBundleDetail, AssetBundleInfo,
-        AssetCategory, AssetExecutionContext,
+        bundle_hash_index_key, decrypt_asset_bundle_info, deobfuscate, exporter_metric_lines,
+        post_process_backlog_capacity, raw_bundle_output_path, should_download_bundle,
+        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -2475,6 +2576,11 @@ mod tests {
         assert!(commands[1]
             .windows(2)
             .any(|pair| pair == ["--compiled-content-store", "/runtime-compiled"]));
+        assert!(commands[1].windows(2).any(|pair| pair
+            == [
+                "--bundle-hash-index",
+                "/work/AssetBundles/.haruki-bundle-sha256.json"
+            ]));
         assert_eq!(commands[2][0], "--emit-role-runtimes");
         assert!(
             commands[2]
@@ -2770,6 +2876,46 @@ mod tests {
         assert!(raw_bundle_output_path(root, "../escape").is_err());
         assert!(raw_bundle_output_path(root, "safe/../escape").is_err());
         assert!(raw_bundle_output_path(root, "safe/./escape").is_err());
+    }
+
+    #[test]
+    fn bundle_hash_index_uses_exporter_relative_bundle_path() {
+        assert_eq!(
+            bundle_hash_index_key("live_pv/model/characterv2/body/01/0001").unwrap(),
+            "live_pv/model/characterv2/body/01/0001.bundle"
+        );
+        assert_eq!(
+            bundle_hash_index_key("character/motion/01.bundle").unwrap(),
+            "character/motion/01.bundle"
+        );
+    }
+
+    #[test]
+    fn exporter_metrics_keep_summary_lines_only() {
+        let stdout = b"Started worker\nPart export metrics: built=3, restored=7\nnoise\nPart export parent metrics: totalMs=42\n";
+        assert_eq!(
+            exporter_metric_lines(stdout),
+            "Part export metrics: built=3, restored=7 | Part export parent metrics: totalMs=42"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_hash_index_checkpoint_is_durable() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("bundle-hashes.json");
+        let index = Arc::new(std::sync::Mutex::new(DownloadRecord::from([(
+            "live_pv/model/body.bundle".to_string(),
+            "ab".repeat(32),
+        )])));
+
+        AssetExecutionContext::save_bundle_hash_index_checkpoint(Some(&path), Some(&index))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            crate::core::download_records::load_download_record(&path).unwrap(),
+            index.lock().unwrap().clone()
+        );
     }
 
     #[tokio::test]
