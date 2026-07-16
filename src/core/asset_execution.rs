@@ -1831,12 +1831,6 @@ impl AssetExecutionContext {
         asset_root: &Path,
     ) -> Vec<Vec<String>> {
         let asset_root_arg = asset_root.to_string_lossy().to_string();
-        let runtime_json_output_args = || {
-            vec![
-                "--runtime-json-output".to_string(),
-                "msgpack-br".to_string(),
-            ]
-        };
         let model_texture_args = || {
             vec![
                 "--convert-model-textures".to_string(),
@@ -1853,7 +1847,6 @@ impl AssetExecutionContext {
             haruki_3d.output_dir.clone(),
         ]
         .into_iter()
-        .chain(runtime_json_output_args())
         .chain(model_texture_args())
         .collect();
         let mut part_args: Vec<String> = [
@@ -1870,7 +1863,6 @@ impl AssetExecutionContext {
             haruki_3d.process_concurrency.to_string(),
         ]
         .into_iter()
-        .chain(runtime_json_output_args())
         .chain(model_texture_args())
         .collect();
         if !haruki_3d.shared_content_store.trim().is_empty() {
@@ -1904,7 +1896,6 @@ impl AssetExecutionContext {
             role_args.push("--role-character3d-id".to_string());
             role_args.push(id.to_string());
         }
-        role_args.extend(runtime_json_output_args());
         role_args.extend(model_texture_args());
         exporter_commands.push(role_args);
         exporter_commands
@@ -2552,10 +2543,8 @@ mod tests {
         assert_eq!(commands[1][0], "--emit-part-packages");
         for command in &commands {
             assert!(
-                command
-                    .windows(2)
-                    .any(|pair| pair == ["--runtime-json-output", "msgpack-br"]),
-                "Haruki 3D exporter command should write runtime JSON as msgpack-br: {command:?}"
+                !command.iter().any(|arg| arg == "--runtime-json-output"),
+                "Haruki 3D exporter command should use the exporter's fixed msgpack-br runtime format: {command:?}"
             );
             assert!(
                 command
