@@ -210,7 +210,7 @@ jobs:
 
       - name: Install .NET SDK
         if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
