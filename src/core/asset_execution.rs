@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -121,6 +121,7 @@ struct DownloadTask {
     file_size: i64,
     priority: usize,
     export_payloads: bool,
+    stage_haruki_3d: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +300,11 @@ impl AssetExecutionContext {
                 region: self.region_name.clone(),
             })?;
         let mut downloaded_assets = load_download_record(&record_path)?;
+        let haruki_3d_downloaded_assets = self
+            .haruki_3d_download_record_path()
+            .map(load_download_record)
+            .transpose()?
+            .unwrap_or_default();
 
         Self::send_progress(
             &progress,
@@ -321,7 +327,8 @@ impl AssetExecutionContext {
                 message: "building download task list".to_string(),
             },
         );
-        let tasks = self.build_download_tasks(&info, &downloaded_assets)?;
+        let tasks =
+            self.build_download_tasks(&info, &downloaded_assets, &haruki_3d_downloaded_assets)?;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::DownloadsPlanned { total: tasks.len() },
@@ -344,6 +351,7 @@ impl AssetExecutionContext {
         }
 
         let mut completed = 0usize;
+        let mut completed_standard = 0usize;
         let mut failed = 0usize;
         let mut pending_save_count = 0usize;
         let batch_save_size = app_config.execution.batch_save_size;
@@ -373,9 +381,7 @@ impl AssetExecutionContext {
         let mut post_process_joins = JoinSet::new();
         let app_config_cloned = app_config.clone();
         let haruki_3d_work_root = self.haruki_3d_work_asset_root();
-        let bundle_hash_index_path = haruki_3d_work_root
-            .as_ref()
-            .map(|root| root.join(".haruki-bundle-sha256.json"));
+        let bundle_hash_index_path = self.haruki_3d_bundle_hash_index_path();
         let bundle_hash_index = bundle_hash_index_path
             .as_ref()
             .map(load_download_record)
@@ -420,6 +426,7 @@ impl AssetExecutionContext {
                     return (
                         task.bundle_path.clone(),
                         task.bundle_hash.clone(),
+                        task.export_payloads,
                         Err(AssetExecutionError::Cancelled),
                     );
                 }
@@ -435,6 +442,7 @@ impl AssetExecutionContext {
                 );
                 let bundle_path = task.bundle_path.clone();
                 let bundle_hash = task.bundle_hash.clone();
+                let record_standard = task.export_payloads;
                 let result = match ctx
                     .download_and_export_bundle_payloads(
                         &app_config,
@@ -476,7 +484,7 @@ impl AssetExecutionContext {
                         phase_ms,
                     },
                 );
-                (bundle_path, bundle_hash, result)
+                (bundle_path, bundle_hash, record_standard, result)
             });
         }
 
@@ -489,7 +497,7 @@ impl AssetExecutionContext {
             }
             tokio::select! {
                 Some(result) = joins.join_next(), if !joins.is_empty() => {
-                    let (bundle_path, bundle_hash, result) = match result {
+                    let (bundle_path, bundle_hash, record_standard, result) = match result {
                         Ok(tuple) => tuple,
                         Err(join_err) => {
                             // A download/export sub-task panicked or was aborted. Count it as a
@@ -511,6 +519,7 @@ impl AssetExecutionContext {
                                 &record_path,
                                 &mut downloaded_assets,
                                 &mut completed,
+                                &mut completed_standard,
                                 &mut pending_save_count,
                                 batch_save_size,
                                 &self.region_name,
@@ -518,6 +527,7 @@ impl AssetExecutionContext {
                                 bundle_hash_index.as_ref(),
                                 bundle_path,
                                 bundle_hash,
+                                record_standard,
                             )
                             .await;
                         }
@@ -584,7 +594,7 @@ impl AssetExecutionContext {
                                         ]),
                                     },
                                 );
-                                (bundle_path, bundle_hash, result)
+                                (bundle_path, bundle_hash, true, result)
                             });
                         }
                         Err(AssetExecutionError::Cancelled) => {
@@ -611,7 +621,7 @@ impl AssetExecutionContext {
                     }
                 }
                 Some(result) = post_process_joins.join_next(), if !post_process_joins.is_empty() => {
-                    let (bundle_path, bundle_hash, result) = match result {
+                    let (bundle_path, bundle_hash, record_standard, result) = match result {
                         Ok(tuple) => tuple,
                         Err(join_err) => {
                             // Post-process sub-task panicked or was aborted: count as failed
@@ -632,6 +642,7 @@ impl AssetExecutionContext {
                                 &record_path,
                                 &mut downloaded_assets,
                                 &mut completed,
+                                &mut completed_standard,
                                 &mut pending_save_count,
                                 batch_save_size,
                                 &self.region_name,
@@ -639,6 +650,7 @@ impl AssetExecutionContext {
                                 bundle_hash_index.as_ref(),
                                 bundle_path,
                                 bundle_hash,
+                                record_standard,
                             )
                             .await;
                         }
@@ -725,7 +737,7 @@ impl AssetExecutionContext {
             failed_downloads: failed,
             // Number of record entries actually added/updated this run (not the whole record size),
             // keeping the semantics consistent with the empty-task early-return path above.
-            updated_record_entries: completed,
+            updated_record_entries: completed_standard,
             chart_hash_sync_performed,
         })
     }
@@ -917,6 +929,7 @@ impl AssetExecutionContext {
         record_path: &str,
         downloaded_assets: &mut DownloadRecord,
         completed: &mut usize,
+        completed_standard: &mut usize,
         pending_save_count: &mut usize,
         batch_save_size: usize,
         region_name: &str,
@@ -924,9 +937,13 @@ impl AssetExecutionContext {
         bundle_hash_index: Option<&Arc<std::sync::Mutex<DownloadRecord>>>,
         bundle_path: String,
         bundle_hash: String,
+        record_standard: bool,
     ) {
         *completed += 1;
-        downloaded_assets.insert(bundle_path.clone(), bundle_hash);
+        if record_standard {
+            *completed_standard += 1;
+            downloaded_assets.insert(bundle_path.clone(), bundle_hash);
+        }
         *pending_save_count += 1;
         if progress.is_none() {
             tracing::info!(
@@ -1308,11 +1325,12 @@ impl AssetExecutionContext {
         &self,
         info: &AssetBundleInfo,
         downloaded_assets: &DownloadRecord,
+        haruki_3d_downloaded_assets: &DownloadRecord,
     ) -> Result<Vec<DownloadTask>, AssetExecutionError> {
         self.append_haruki_3d_download_tasks(
             self.build_standard_download_tasks(info, downloaded_assets),
             info,
-            downloaded_assets,
+            haruki_3d_downloaded_assets,
         )
     }
 
@@ -1361,6 +1379,7 @@ impl AssetExecutionContext {
                 file_size: detail.file_size,
                 priority,
                 export_payloads: true,
+                stage_haruki_3d: false,
             });
         }
 
@@ -1389,6 +1408,7 @@ impl AssetExecutionContext {
                 return false;
             }
             b.export_payloads |= a.export_payloads;
+            b.stage_haruki_3d |= a.stage_haruki_3d;
             true
         });
         tasks.sort_by(|a, b| {
@@ -1445,7 +1465,7 @@ impl AssetExecutionContext {
         } else {
             None
         };
-        let haruki_3d_work_target = if self.matches_haruki_3d_filters(&task.bundle_path) {
+        let haruki_3d_work_target = if task.stage_haruki_3d {
             match haruki_3d_work_root {
                 Some(work_root) => Some(raw_bundle_output_path(work_root, &task.bundle_path)?),
                 None => None,
@@ -1640,13 +1660,29 @@ impl AssetExecutionContext {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("current")
             .replace(['/', '\\', ':'], "_");
-        let work_dir = Self::haruki_3d_work_dir(haruki_3d);
         Some(
-            Path::new(&work_dir)
-                .join(&self.region_name)
+            self.haruki_3d_state_root()?
                 .join(run_id)
                 .join("AssetBundles"),
         )
+    }
+
+    fn haruki_3d_state_root(&self) -> Option<PathBuf> {
+        let haruki_3d = &self.region.export.haruki_3d;
+        if !haruki_3d.enabled {
+            return None;
+        }
+        Some(Path::new(&Self::haruki_3d_work_dir(haruki_3d)).join(&self.region_name))
+    }
+
+    fn haruki_3d_download_record_path(&self) -> Option<PathBuf> {
+        self.haruki_3d_state_root()
+            .map(|root| root.join("downloaded_assets.json"))
+    }
+
+    fn haruki_3d_bundle_hash_index_path(&self) -> Option<PathBuf> {
+        self.haruki_3d_state_root()
+            .map(|root| root.join("bundle_sha256.json"))
     }
 
     fn haruki_3d_work_dir(haruki_3d: &crate::core::config::Haruki3dExportConfig) -> String {
@@ -1731,9 +1767,27 @@ impl AssetExecutionContext {
         }
         let info = self.fetch_asset_bundle_info().await?;
         let tasks = self.build_haruki_3d_tasks(&info);
+        let record_path = self.haruki_3d_download_record_path().ok_or_else(|| {
+            AssetExecutionError::BlockingTask("3D download record path is unavailable".to_string())
+        })?;
+        let downloaded_assets = load_download_record(&record_path)?;
+        let pending_tasks: Vec<_> = tasks
+            .iter()
+            .filter(|task| {
+                downloaded_assets
+                    .get(&task.bundle_path)
+                    .is_none_or(|hash| hash != &task.bundle_hash)
+            })
+            .collect();
+        let pending_paths: HashSet<_> = pending_tasks
+            .iter()
+            .map(|task| task.bundle_path.as_str())
+            .collect();
         Self::send_progress(
             &progress,
-            ExecutionProgressUpdate::DownloadsPlanned { total: tasks.len() },
+            ExecutionProgressUpdate::DownloadsPlanned {
+                total: pending_tasks.len(),
+            },
         );
         let asset_root = self.haruki_3d_work_asset_root();
         let Some(asset_root) = asset_root else {
@@ -1744,7 +1798,17 @@ impl AssetExecutionContext {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| asset_root.clone());
 
-        for task in &tasks {
+        if pending_tasks.is_empty() && Path::new(&haruki_3d.manifest_file).is_file() {
+            if haruki_3d.cleanup_work_dir_after_success {
+                Self::remove_haruki_3d_work_dir(&work_run_dir)?;
+            }
+            return Ok(Haruki3dExportSummary {
+                matched_bundles: tasks.len(),
+                downloaded_bundles: 0,
+            });
+        }
+
+        for task in &pending_tasks {
             self.ensure_not_cancelled(&cancel_flag)?;
             Self::send_progress(
                 &progress,
@@ -1765,7 +1829,37 @@ impl AssetExecutionContext {
             return Err(AssetExecutionError::MissingHaruki3dStagingBundle { path: output_path });
         }
 
-        let exporter_commands = Self::build_haruki_3d_exporter_commands(&haruki_3d, &asset_root);
+        for task in &tasks {
+            if pending_paths.contains(task.bundle_path.as_str()) {
+                continue;
+            }
+            let output_path = raw_bundle_output_path(&asset_root, &task.bundle_path)?;
+            if !output_path.exists() {
+                Self::write_haruki_3d_work_bundle(&output_path, &[])?;
+            }
+        }
+        let sparse_input_marker = asset_root.join(".haruki-sparse-input");
+        if pending_tasks.len() < tasks.len() {
+            Self::write_haruki_3d_work_bundle(&sparse_input_marker, &[])?;
+        } else if sparse_input_marker.exists() {
+            std::fs::remove_file(&sparse_input_marker).map_err(|source| {
+                AssetExecutionError::RemoveHaruki3dStagingDir {
+                    path: sparse_input_marker.clone(),
+                    source,
+                }
+            })?;
+        }
+
+        let bundle_hash_index_path = self.haruki_3d_bundle_hash_index_path().ok_or_else(|| {
+            AssetExecutionError::BlockingTask(
+                "3D bundle hash index path is unavailable".to_string(),
+            )
+        })?;
+        let exporter_commands = Self::build_haruki_3d_exporter_commands(
+            &haruki_3d,
+            &asset_root,
+            &bundle_hash_index_path,
+        );
 
         for args in exporter_commands {
             let phase_message = format!(
@@ -1817,18 +1911,25 @@ impl AssetExecutionContext {
             );
         }
 
+        let completed_record = tasks
+            .iter()
+            .map(|task| (task.bundle_path.clone(), task.bundle_hash.clone()))
+            .collect();
+        save_download_record(&record_path, &completed_record)?;
+
         if haruki_3d.cleanup_work_dir_after_success {
             Self::remove_haruki_3d_work_dir(&work_run_dir)?;
         }
         Ok(Haruki3dExportSummary {
             matched_bundles: tasks.len(),
-            downloaded_bundles: 0,
+            downloaded_bundles: pending_tasks.len(),
         })
     }
 
     fn build_haruki_3d_exporter_commands(
         haruki_3d: &crate::core::config::Haruki3dExportConfig,
         asset_root: &Path,
+        bundle_hash_index: &Path,
     ) -> Vec<Vec<String>> {
         let asset_root_arg = asset_root.to_string_lossy().to_string();
         let model_texture_args = || {
@@ -1874,12 +1975,7 @@ impl AssetExecutionContext {
             part_args.push(haruki_3d.compiled_content_store.clone());
         }
         part_args.push("--bundle-hash-index".to_string());
-        part_args.push(
-            asset_root
-                .join(".haruki-bundle-sha256.json")
-                .to_string_lossy()
-                .into_owned(),
-        );
+        part_args.push(bundle_hash_index.to_string_lossy().into_owned());
         let mut exporter_commands = vec![registry_args, part_args];
         let mut role_args = vec![
             "--emit-role-runtimes".to_string(),
@@ -1923,6 +2019,7 @@ impl AssetExecutionContext {
                 file_size: detail.file_size,
                 priority: usize::MAX,
                 export_payloads: false,
+                stage_haruki_3d: false,
             });
         }
         tasks.sort_by(|a, b| a.bundle_path.cmp(&b.bundle_path));
@@ -1934,17 +2031,19 @@ impl AssetExecutionContext {
         info: &AssetBundleInfo,
         downloaded_assets: &DownloadRecord,
     ) -> Result<Vec<DownloadTask>, AssetExecutionError> {
-        let Some(asset_root) = self.haruki_3d_work_asset_root() else {
+        if self.haruki_3d_work_asset_root().is_none() {
             return Ok(Vec::new());
-        };
+        }
         let mut tasks = Vec::new();
         for task in self.build_haruki_3d_filter_tasks(info) {
             let has_current_record = downloaded_assets
                 .get(&task.bundle_path)
                 .is_some_and(|existing| existing == &task.bundle_hash);
-            let staging_bundle = raw_bundle_output_path(&asset_root, &task.bundle_path)?;
-            if !has_current_record || !staging_bundle.exists() {
-                tasks.push(task);
+            if !has_current_record {
+                tasks.push(DownloadTask {
+                    stage_haruki_3d: true,
+                    ..task
+                });
             }
         }
         Ok(tasks)
@@ -1968,6 +2067,7 @@ impl AssetExecutionContext {
                 file_size: detail.file_size,
                 priority: usize::MAX,
                 export_payloads: false,
+                stage_haruki_3d: true,
             });
         }
         tasks.sort_by(|a, b| a.bundle_path.cmp(&b.bundle_path));
@@ -2519,6 +2619,20 @@ mod tests {
                 .join("6.0.9")
                 .join("AssetBundles")
         );
+        assert_eq!(
+            executor.haruki_3d_download_record_path().unwrap(),
+            temp.path()
+                .join("3d-work")
+                .join("jp")
+                .join("downloaded_assets.json")
+        );
+        assert_eq!(
+            executor.haruki_3d_bundle_hash_index_path().unwrap(),
+            temp.path()
+                .join("3d-work")
+                .join("jp")
+                .join("bundle_sha256.json")
+        );
     }
 
     #[test]
@@ -2536,6 +2650,7 @@ mod tests {
         let commands = AssetExecutionContext::build_haruki_3d_exporter_commands(
             &config,
             Path::new("/work/AssetBundles"),
+            Path::new("/work/bundle_sha256.json"),
         );
 
         assert_eq!(commands.len(), 3);
@@ -2565,11 +2680,9 @@ mod tests {
         assert!(commands[1]
             .windows(2)
             .any(|pair| pair == ["--compiled-content-store", "/runtime-compiled"]));
-        assert!(commands[1].windows(2).any(|pair| pair
-            == [
-                "--bundle-hash-index",
-                "/work/AssetBundles/.haruki-bundle-sha256.json"
-            ]));
+        assert!(commands[1]
+            .windows(2)
+            .any(|pair| pair == ["--bundle-hash-index", "/work/bundle_sha256.json"]));
         assert_eq!(commands[2][0], "--emit-role-runtimes");
         assert!(
             commands[2]
@@ -2601,6 +2714,7 @@ mod tests {
         let commands = AssetExecutionContext::build_haruki_3d_exporter_commands(
             &config,
             Path::new("/work/AssetBundles"),
+            Path::new("/work/bundle_sha256.json"),
         );
 
         assert_eq!(commands.len(), 3);
@@ -2699,7 +2813,9 @@ mod tests {
 
         // Recorded hash matches -> skipped; bundle absent from record -> queued.
         let record = DownloadRecord::from([("start/a".to_string(), "h1".to_string())]);
-        let tasks = ctx.build_download_tasks(&info, &record).unwrap();
+        let tasks = ctx
+            .build_download_tasks(&info, &record, &DownloadRecord::new())
+            .unwrap();
         let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
         assert!(
             !paths.contains(&"start/a"),
@@ -2709,7 +2825,9 @@ mod tests {
 
         // Recorded hash differs -> re-queued.
         let stale = DownloadRecord::from([("start/a".to_string(), "OLD".to_string())]);
-        let tasks = ctx.build_download_tasks(&info, &stale).unwrap();
+        let tasks = ctx
+            .build_download_tasks(&info, &stale, &DownloadRecord::new())
+            .unwrap();
         let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
         assert!(
             paths.contains(&"start/a"),
@@ -2774,11 +2892,9 @@ mod tests {
             ]),
         };
 
-        let record = DownloadRecord::from([(
-            "live_pv/model/characterv2/body/01".to_string(),
-            "live_pv/model/characterv2/body/01-hash".to_string(),
-        )]);
-        let tasks = executor.build_download_tasks(&info, &record).unwrap();
+        let tasks = executor
+            .build_download_tasks(&info, &DownloadRecord::new(), &DownloadRecord::new())
+            .unwrap();
         let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
         assert_eq!(
             paths,
@@ -2786,13 +2902,58 @@ mod tests {
             "3D matches with missing staging must be merged once after ordinary download filtering"
         );
         assert!(
-            tasks[0].export_payloads,
+            tasks[0].export_payloads && tasks[0].stage_haruki_3d,
             "ordinary tasks must export payloads"
         );
         assert!(
-            !tasks[1].export_payloads,
+            !tasks[1].export_payloads && tasks[1].stage_haruki_3d,
             "3D-only tasks must only stage raw bundles"
         );
+
+        let haruki_3d_record = DownloadRecord::from([(
+            "live_pv/model/characterv2/body/01".to_string(),
+            "live_pv/model/characterv2/body/01-hash".to_string(),
+        )]);
+        let tasks = executor
+            .build_download_tasks(&info, &DownloadRecord::new(), &haruki_3d_record)
+            .unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.bundle_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["start/a"],
+            "the independent 3D record must skip an unchanged bundle even after staging cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn three_d_only_completion_does_not_pollute_standard_download_record() {
+        let mut record = DownloadRecord::new();
+        let mut completed = 0;
+        let mut completed_standard = 0;
+        let mut pending_save_count = 0;
+
+        AssetExecutionContext::record_completed_bundle(
+            &None,
+            "/unused/downloaded_assets.json",
+            &mut record,
+            &mut completed,
+            &mut completed_standard,
+            &mut pending_save_count,
+            0,
+            "jp",
+            None,
+            None,
+            "live_pv/model/characterv2/body/01".to_string(),
+            "3d-hash".to_string(),
+            false,
+        )
+        .await;
+
+        assert_eq!(completed, 1);
+        assert_eq!(completed_standard, 0);
+        assert!(record.is_empty());
     }
 
     #[test]

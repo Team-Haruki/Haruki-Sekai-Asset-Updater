@@ -178,6 +178,9 @@ regions:
         enabled: false
         exporter_path: "/app/haruki-3d/exporter/Haruki-3D-Exporter"
         master_dir: "/app/data/haruki-sekai-master/master"
+        # Per-region 3D state is kept under <work_dir>/<region>/: downloaded_assets.json is the
+        # independent successful-export ledger, bundle_sha256.json is the compiled-cache index,
+        # and version-named subdirectories are disposable raw-bundle staging.
         work_dir: "/app/data/3d-work"
         manifest_file: "/app/data/3d-output/haruki-3d-export-manifest.json"
         output_dir: "/app/data/3d-output"
@@ -196,7 +199,7 @@ regions:
           - "^live_pv/model/characterv2/color_variation/head_optional/"
           - "^character/motion/costume_setting/"
         exclude: []
-        cleanup_work_dir_after_success: true
+        cleanup_work_dir_after_success: true # removes only the completed version staging directory; persistent ledgers remain
         cleanup_work_dir_after_failure: true
     upload:
       enabled: false
