@@ -1799,6 +1799,16 @@ impl AssetExecutionContext {
             .unwrap_or_else(|| asset_root.clone());
 
         if pending_tasks.is_empty() && Path::new(&haruki_3d.manifest_file).is_file() {
+            let catalog_args = Self::build_haruki_3d_runtime_catalog_command(&haruki_3d);
+            if let Err(error) = self
+                .run_haruki_3d_exporter_stage(&haruki_3d, &catalog_args, &progress)
+                .await
+            {
+                if haruki_3d.cleanup_work_dir_after_failure {
+                    Self::remove_haruki_3d_work_dir(&work_run_dir)?;
+                }
+                return Err(error);
+            }
             if haruki_3d.cleanup_work_dir_after_success {
                 Self::remove_haruki_3d_work_dir(&work_run_dir)?;
             }
@@ -1862,53 +1872,26 @@ impl AssetExecutionContext {
         );
 
         for args in exporter_commands {
-            let phase_message = format!(
-                "running Haruki 3D exporter: {}",
-                args.first().map(String::as_str).unwrap_or("unknown")
-            );
-            Self::send_progress(
-                &progress,
-                ExecutionProgressUpdate::Phase {
-                    phase: JobPhase::Exporting3dRuntime,
-                    message: phase_message,
-                },
-            );
-            let exporter_started = Instant::now();
-            let output = tokio::process::Command::new(&haruki_3d.exporter_path)
-                .args(&args)
-                .output()
+            if let Err(error) = self
+                .run_haruki_3d_exporter_stage(&haruki_3d, &args, &progress)
                 .await
-                .map_err(|source| AssetExecutionError::Haruki3dExporterSpawn {
-                    program: haruki_3d.exporter_path.clone(),
-                    source,
-                })?;
-
-            if !output.status.success() {
+            {
                 if haruki_3d.cleanup_work_dir_after_failure {
                     Self::remove_haruki_3d_work_dir(&work_run_dir)?;
                 }
-                return Err(AssetExecutionError::Haruki3dExporterFailed {
-                    program: haruki_3d.exporter_path.clone(),
-                    status: output.status.to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                });
+                return Err(error);
             }
-            tracing::info!(
-                region = %self.region_name,
-                stage = %args.first().map(String::as_str).unwrap_or("unknown"),
-                elapsed_ms = exporter_started.elapsed().as_millis(),
-                "Haruki 3D exporter stage completed"
-            );
-            let metrics = exporter_metric_lines(&output.stdout);
-            if !metrics.is_empty() {
-                tracing::info!(region = %self.region_name, %metrics, "Haruki 3D exporter metrics");
+        }
+
+        let catalog_args = Self::build_haruki_3d_runtime_catalog_command(&haruki_3d);
+        if let Err(error) = self
+            .run_haruki_3d_exporter_stage(&haruki_3d, &catalog_args, &progress)
+            .await
+        {
+            if haruki_3d.cleanup_work_dir_after_failure {
+                Self::remove_haruki_3d_work_dir(&work_run_dir)?;
             }
-            tracing::debug!(
-                region = %self.region_name,
-                stdout = %String::from_utf8_lossy(&output.stdout).trim(),
-                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                "Haruki 3D exporter stage output"
-            );
+            return Err(error);
         }
 
         let completed_record = tasks
@@ -1924,6 +1907,67 @@ impl AssetExecutionContext {
             matched_bundles: tasks.len(),
             downloaded_bundles: pending_tasks.len(),
         })
+    }
+
+    async fn run_haruki_3d_exporter_stage(
+        &self,
+        haruki_3d: &crate::core::config::Haruki3dExportConfig,
+        args: &[String],
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+    ) -> Result<(), AssetExecutionError> {
+        let stage = args.first().map(String::as_str).unwrap_or("unknown");
+        Self::send_progress(
+            progress,
+            ExecutionProgressUpdate::Phase {
+                phase: JobPhase::Exporting3dRuntime,
+                message: format!("running Haruki 3D exporter: {stage}"),
+            },
+        );
+        let exporter_started = Instant::now();
+        let output = tokio::process::Command::new(&haruki_3d.exporter_path)
+            .args(args)
+            .output()
+            .await
+            .map_err(|source| AssetExecutionError::Haruki3dExporterSpawn {
+                program: haruki_3d.exporter_path.clone(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(AssetExecutionError::Haruki3dExporterFailed {
+                program: haruki_3d.exporter_path.clone(),
+                status: output.status.to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        tracing::info!(
+            region = %self.region_name,
+            %stage,
+            elapsed_ms = exporter_started.elapsed().as_millis(),
+            "Haruki 3D exporter stage completed"
+        );
+        let metrics = exporter_metric_lines(&output.stdout);
+        if !metrics.is_empty() {
+            tracing::info!(region = %self.region_name, %metrics, "Haruki 3D exporter metrics");
+        }
+        tracing::debug!(
+            region = %self.region_name,
+            stdout = %String::from_utf8_lossy(&output.stdout).trim(),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "Haruki 3D exporter stage output"
+        );
+        Ok(())
+    }
+
+    fn build_haruki_3d_runtime_catalog_command(
+        haruki_3d: &crate::core::config::Haruki3dExportConfig,
+    ) -> Vec<String> {
+        vec![
+            "--emit-runtime-role-catalog".to_string(),
+            "--master".to_string(),
+            haruki_3d.master_dir.clone(),
+            "--out".to_string(),
+            haruki_3d.output_dir.clone(),
+        ]
     }
 
     fn build_haruki_3d_exporter_commands(
@@ -2651,6 +2695,16 @@ mod tests {
             &config,
             Path::new("/work/AssetBundles"),
             Path::new("/work/bundle_sha256.json"),
+        );
+        assert_eq!(
+            AssetExecutionContext::build_haruki_3d_runtime_catalog_command(&config),
+            vec![
+                "--emit-runtime-role-catalog",
+                "--master",
+                "/master",
+                "--out",
+                "/runtime",
+            ]
         );
 
         assert_eq!(commands.len(), 3);
