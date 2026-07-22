@@ -305,6 +305,7 @@ impl AssetExecutionContext {
             .map(load_download_record)
             .transpose()?
             .unwrap_or_default();
+        let can_reuse_haruki_3d_download_record = self.can_reuse_haruki_3d_download_record().await;
 
         Self::send_progress(
             &progress,
@@ -327,8 +328,12 @@ impl AssetExecutionContext {
                 message: "building download task list".to_string(),
             },
         );
-        let tasks =
-            self.build_download_tasks(&info, &downloaded_assets, &haruki_3d_downloaded_assets)?;
+        let tasks = self.build_download_tasks(
+            &info,
+            &downloaded_assets,
+            &haruki_3d_downloaded_assets,
+            can_reuse_haruki_3d_download_record,
+        )?;
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::DownloadsPlanned { total: tasks.len() },
@@ -1326,11 +1331,13 @@ impl AssetExecutionContext {
         info: &AssetBundleInfo,
         downloaded_assets: &DownloadRecord,
         haruki_3d_downloaded_assets: &DownloadRecord,
+        can_reuse_haruki_3d_download_record: bool,
     ) -> Result<Vec<DownloadTask>, AssetExecutionError> {
         self.append_haruki_3d_download_tasks(
             self.build_standard_download_tasks(info, downloaded_assets),
             info,
             haruki_3d_downloaded_assets,
+            can_reuse_haruki_3d_download_record,
         )
     }
 
@@ -1396,8 +1403,13 @@ impl AssetExecutionContext {
         mut tasks: Vec<DownloadTask>,
         info: &AssetBundleInfo,
         downloaded_assets: &DownloadRecord,
+        can_reuse_download_record: bool,
     ) -> Result<Vec<DownloadTask>, AssetExecutionError> {
-        tasks.extend(self.build_haruki_3d_download_tasks(info, downloaded_assets)?);
+        tasks.extend(self.build_haruki_3d_download_tasks(
+            info,
+            downloaded_assets,
+            can_reuse_download_record,
+        )?);
         tasks.sort_by(|a, b| {
             a.bundle_path
                 .cmp(&b.bundle_path)
@@ -1771,12 +1783,14 @@ impl AssetExecutionContext {
             AssetExecutionError::BlockingTask("3D download record path is unavailable".to_string())
         })?;
         let downloaded_assets = load_download_record(&record_path)?;
+        let can_reuse_download_record = self.can_reuse_haruki_3d_download_record().await;
         let pending_tasks: Vec<_> = tasks
             .iter()
             .filter(|task| {
-                downloaded_assets
-                    .get(&task.bundle_path)
-                    .is_none_or(|hash| hash != &task.bundle_hash)
+                !can_reuse_download_record
+                    || downloaded_assets
+                        .get(&task.bundle_path)
+                        .is_none_or(|hash| hash != &task.bundle_hash)
             })
             .collect();
         let pending_paths: HashSet<_> = pending_tasks
@@ -1798,7 +1812,7 @@ impl AssetExecutionContext {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| asset_root.clone());
 
-        if pending_tasks.is_empty() && Path::new(&haruki_3d.manifest_file).is_file() {
+        if pending_tasks.is_empty() && can_reuse_download_record {
             let catalog_args = Self::build_haruki_3d_runtime_catalog_command(&haruki_3d);
             if let Err(error) = self
                 .run_haruki_3d_exporter_stage(&haruki_3d, &catalog_args, &progress)
@@ -2074,15 +2088,17 @@ impl AssetExecutionContext {
         &self,
         info: &AssetBundleInfo,
         downloaded_assets: &DownloadRecord,
+        can_reuse_download_record: bool,
     ) -> Result<Vec<DownloadTask>, AssetExecutionError> {
         if self.haruki_3d_work_asset_root().is_none() {
             return Ok(Vec::new());
         }
         let mut tasks = Vec::new();
         for task in self.build_haruki_3d_filter_tasks(info) {
-            let has_current_record = downloaded_assets
-                .get(&task.bundle_path)
-                .is_some_and(|existing| existing == &task.bundle_hash);
+            let has_current_record = can_reuse_download_record
+                && downloaded_assets
+                    .get(&task.bundle_path)
+                    .is_some_and(|existing| existing == &task.bundle_hash);
             if !has_current_record {
                 tasks.push(DownloadTask {
                     stage_haruki_3d: true,
@@ -2091,6 +2107,19 @@ impl AssetExecutionContext {
             }
         }
         Ok(tasks)
+    }
+
+    async fn can_reuse_haruki_3d_download_record(&self) -> bool {
+        let manifest_file = self.region.export.haruki_3d.manifest_file.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(bytes) = std::fs::read(manifest_file) else {
+                return false;
+            };
+            sonic_rs::from_slice::<HashMap<String, sonic_rs::Value>>(&bytes)
+                .is_ok_and(|entries| !entries.is_empty())
+        })
+        .await
+        .unwrap_or(false)
     }
 
     fn build_haruki_3d_filter_tasks(&self, info: &AssetBundleInfo) -> Vec<DownloadTask> {
@@ -2868,7 +2897,7 @@ mod tests {
         // Recorded hash matches -> skipped; bundle absent from record -> queued.
         let record = DownloadRecord::from([("start/a".to_string(), "h1".to_string())]);
         let tasks = ctx
-            .build_download_tasks(&info, &record, &DownloadRecord::new())
+            .build_download_tasks(&info, &record, &DownloadRecord::new(), false)
             .unwrap();
         let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
         assert!(
@@ -2880,7 +2909,7 @@ mod tests {
         // Recorded hash differs -> re-queued.
         let stale = DownloadRecord::from([("start/a".to_string(), "OLD".to_string())]);
         let tasks = ctx
-            .build_download_tasks(&info, &stale, &DownloadRecord::new())
+            .build_download_tasks(&info, &stale, &DownloadRecord::new(), false)
             .unwrap();
         let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
         assert!(
@@ -2889,8 +2918,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_download_tasks_routes_3d_only_matches_to_staging() {
+    #[tokio::test]
+    async fn build_download_tasks_routes_3d_only_matches_to_staging() {
         let temp = tempdir().unwrap();
         let mut region = test_region(RegionProviderConfig::ColorfulPalette {
             asset_info_url_template: String::new(),
@@ -2904,6 +2933,11 @@ mod tests {
         region.export.haruki_3d = crate::core::config::Haruki3dExportConfig {
             enabled: true,
             work_dir: temp.path().join("3d-work").to_string_lossy().into_owned(),
+            manifest_file: temp
+                .path()
+                .join("runtime/haruki-3d-export-manifest.json")
+                .to_string_lossy()
+                .into_owned(),
             include: vec!["^(start/a|live_pv/model/characterv2/body/)".to_string()],
             ..crate::core::config::Haruki3dExportConfig::default()
         };
@@ -2947,7 +2981,7 @@ mod tests {
         };
 
         let tasks = executor
-            .build_download_tasks(&info, &DownloadRecord::new(), &DownloadRecord::new())
+            .build_download_tasks(&info, &DownloadRecord::new(), &DownloadRecord::new(), false)
             .unwrap();
         let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
         assert_eq!(
@@ -2969,7 +3003,50 @@ mod tests {
             "live_pv/model/characterv2/body/01-hash".to_string(),
         )]);
         let tasks = executor
-            .build_download_tasks(&info, &DownloadRecord::new(), &haruki_3d_record)
+            .build_download_tasks(
+                &info,
+                &DownloadRecord::new(),
+                &haruki_3d_record,
+                executor.can_reuse_haruki_3d_download_record().await,
+            )
+            .unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.bundle_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["start/a", "live_pv/model/characterv2/body/01"],
+            "the independent 3D record must not skip bundles when the runtime manifest is missing"
+        );
+
+        let manifest = Path::new(&region.export.haruki_3d.manifest_file);
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(manifest, b"{broken").unwrap();
+        let tasks = executor
+            .build_download_tasks(
+                &info,
+                &DownloadRecord::new(),
+                &haruki_3d_record,
+                executor.can_reuse_haruki_3d_download_record().await,
+            )
+            .unwrap();
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.bundle_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["start/a", "live_pv/model/characterv2/body/01"],
+            "a malformed 3D runtime manifest must not make the download record reusable"
+        );
+
+        std::fs::write(manifest, br#"{"parts/example":{"bundleLength":1}}"#).unwrap();
+        let tasks = executor
+            .build_download_tasks(
+                &info,
+                &DownloadRecord::new(),
+                &haruki_3d_record,
+                executor.can_reuse_haruki_3d_download_record().await,
+            )
             .unwrap();
         assert_eq!(
             tasks
