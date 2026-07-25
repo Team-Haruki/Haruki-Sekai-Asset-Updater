@@ -1697,6 +1697,11 @@ impl AssetExecutionContext {
             .map(|root| root.join("bundle_sha256.json"))
     }
 
+    fn haruki_3d_bundle_dependency_index_path(&self) -> Option<PathBuf> {
+        self.haruki_3d_state_root()
+            .map(|root| root.join("bundle_dependencies.json"))
+    }
+
     fn haruki_3d_work_dir(haruki_3d: &crate::core::config::Haruki3dExportConfig) -> String {
         if !haruki_3d.work_dir.trim().is_empty() {
             haruki_3d.work_dir.clone()
@@ -1779,6 +1784,14 @@ impl AssetExecutionContext {
         }
         let info = self.fetch_asset_bundle_info().await?;
         let tasks = self.build_haruki_3d_tasks(&info);
+        let bundle_dependency_index_path = self
+            .haruki_3d_bundle_dependency_index_path()
+            .ok_or_else(|| {
+                AssetExecutionError::BlockingTask(
+                    "3D bundle dependency index path is unavailable".to_string(),
+                )
+            })?;
+        Self::save_haruki_3d_dependency_index(&bundle_dependency_index_path, &info, &tasks)?;
         let record_path = self.haruki_3d_download_record_path().ok_or_else(|| {
             AssetExecutionError::BlockingTask("3D download record path is unavailable".to_string())
         })?;
@@ -1883,6 +1896,7 @@ impl AssetExecutionContext {
             &haruki_3d,
             &asset_root,
             &bundle_hash_index_path,
+            &bundle_dependency_index_path,
         );
 
         for args in exporter_commands {
@@ -1988,6 +2002,7 @@ impl AssetExecutionContext {
         haruki_3d: &crate::core::config::Haruki3dExportConfig,
         asset_root: &Path,
         bundle_hash_index: &Path,
+        bundle_dependency_index: &Path,
     ) -> Vec<Vec<String>> {
         let asset_root_arg = asset_root.to_string_lossy().to_string();
         let model_texture_args = || {
@@ -2034,6 +2049,8 @@ impl AssetExecutionContext {
         }
         part_args.push("--bundle-hash-index".to_string());
         part_args.push(bundle_hash_index.to_string_lossy().into_owned());
+        part_args.push("--bundle-dependency-index".to_string());
+        part_args.push(bundle_dependency_index.to_string_lossy().into_owned());
         let mut exporter_commands = vec![registry_args, part_args];
         let mut role_args = vec![
             "--emit-role-runtimes".to_string(),
@@ -2123,9 +2140,26 @@ impl AssetExecutionContext {
     }
 
     fn build_haruki_3d_filter_tasks(&self, info: &AssetBundleInfo) -> Vec<DownloadTask> {
+        let mut selected: HashSet<String> = info
+            .bundles
+            .keys()
+            .filter(|bundle_name| self.matches_haruki_3d_filters(bundle_name))
+            .cloned()
+            .collect();
+        let mut pending: Vec<String> = selected.iter().cloned().collect();
+        while let Some(bundle_name) = pending.pop() {
+            let Some(detail) = info.bundles.get(&bundle_name) else {
+                continue;
+            };
+            for dependency in &detail.dependencies {
+                if info.bundles.contains_key(dependency) && selected.insert(dependency.clone()) {
+                    pending.push(dependency.clone());
+                }
+            }
+        }
         let mut tasks = Vec::new();
         for (bundle_name, detail) in &info.bundles {
-            if !self.matches_haruki_3d_filters(bundle_name) {
+            if !selected.contains(bundle_name) {
                 continue;
             }
             let bundle_hash = match self.region.provider {
@@ -2145,6 +2179,25 @@ impl AssetExecutionContext {
         }
         tasks.sort_by(|a, b| a.bundle_path.cmp(&b.bundle_path));
         tasks
+    }
+
+    fn save_haruki_3d_dependency_index(
+        path: &Path,
+        info: &AssetBundleInfo,
+        tasks: &[DownloadTask],
+    ) -> Result<(), AssetExecutionError> {
+        let index: HashMap<String, Vec<String>> = tasks
+            .iter()
+            .map(|task| {
+                (
+                    task.bundle_path.clone(),
+                    bundle_dependency_closure(info, &task.bundle_path),
+                )
+            })
+            .collect();
+        let bytes = sonic_rs::to_vec_pretty(&index)
+            .map_err(|source| AssetExecutionError::BlockingTask(source.to_string()))?;
+        Self::write_haruki_3d_work_bundle(path, &bytes)
     }
 
     fn remove_haruki_3d_work_dir(work_run_dir: &Path) -> Result<(), AssetExecutionError> {
@@ -2223,6 +2276,25 @@ fn bundle_hash_index_key(bundle_path: &str) -> Result<String, AssetExecutionErro
     Ok(raw_bundle_output_path(Path::new(""), bundle_path)?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+fn bundle_dependency_closure(info: &AssetBundleInfo, bundle_name: &str) -> Vec<String> {
+    let mut closure = HashSet::new();
+    let mut pending = vec![bundle_name.to_string()];
+    while let Some(current) = pending.pop() {
+        let Some(detail) = info.bundles.get(&current) else {
+            continue;
+        };
+        for dependency in &detail.dependencies {
+            if closure.insert(dependency.clone()) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+    closure.remove(bundle_name);
+    let mut result: Vec<_> = closure.into_iter().collect();
+    result.sort();
+    result
 }
 
 fn exporter_metric_lines(stdout: &[u8]) -> String {
@@ -2446,9 +2518,10 @@ mod tests {
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
     use super::{
-        bundle_hash_index_key, decrypt_asset_bundle_info, deobfuscate, exporter_metric_lines,
-        post_process_backlog_capacity, raw_bundle_output_path, should_download_bundle,
-        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
+        bundle_dependency_closure, bundle_hash_index_key, decrypt_asset_bundle_info, deobfuscate,
+        exporter_metric_lines, post_process_backlog_capacity, raw_bundle_output_path,
+        should_download_bundle, AssetBundleDetail, AssetBundleInfo, AssetCategory,
+        AssetExecutionContext,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -2635,6 +2708,7 @@ mod tests {
         let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
         let matched = "live_pv/model/characterv2/body/01_0001.bundle".to_string();
         let missing_from_record = "live_pv/model/characterv2/body/02_0001.bundle".to_string();
+        let dependency = "common/materials/character.bundle".to_string();
         let info = AssetBundleInfo {
             version: Some("1".to_string()),
             os: Some("ios".to_string()),
@@ -2649,7 +2723,7 @@ mod tests {
                         category: AssetCategory::OnDemand,
                         crc: 0,
                         file_size: 1,
-                        dependencies: Vec::new(),
+                        dependencies: vec![dependency.clone()],
                         paths: Vec::new(),
                         is_builtin: false,
                         is_relocate: None,
@@ -2675,15 +2749,34 @@ mod tests {
                         download_path: None,
                     },
                 ),
+                (
+                    dependency.clone(),
+                    AssetBundleDetail {
+                        bundle_name: dependency.clone(),
+                        cache_file_name: String::new(),
+                        cache_directory_name: String::new(),
+                        hash: "dependency-hash".to_string(),
+                        category: AssetCategory::OnDemand,
+                        crc: 0,
+                        file_size: 1,
+                        dependencies: Vec::new(),
+                        paths: Vec::new(),
+                        is_builtin: false,
+                        is_relocate: None,
+                        md5_hash: None,
+                        download_path: None,
+                    },
+                ),
             ]),
         };
         let tasks = executor.build_haruki_3d_tasks(&info);
 
-        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks.len(), 3);
         assert!(tasks.iter().any(|task| task.bundle_path == matched));
         assert!(tasks
             .iter()
             .any(|task| task.bundle_path == missing_from_record));
+        assert!(tasks.iter().any(|task| task.bundle_path == dependency));
         assert_eq!(
             executor.haruki_3d_work_asset_root().unwrap(),
             temp.path()
@@ -2724,6 +2817,7 @@ mod tests {
             &config,
             Path::new("/work/AssetBundles"),
             Path::new("/work/bundle_sha256.json"),
+            Path::new("/work/bundle_dependencies.json"),
         );
         assert_eq!(
             AssetExecutionContext::build_haruki_3d_runtime_catalog_command(&config),
@@ -2766,6 +2860,11 @@ mod tests {
         assert!(commands[1]
             .windows(2)
             .any(|pair| pair == ["--bundle-hash-index", "/work/bundle_sha256.json"]));
+        assert!(commands[1].windows(2).any(|pair| pair
+            == [
+                "--bundle-dependency-index",
+                "/work/bundle_dependencies.json"
+            ]));
         assert_eq!(commands[2][0], "--emit-role-runtimes");
         assert!(
             commands[2]
@@ -2798,6 +2897,7 @@ mod tests {
             &config,
             Path::new("/work/AssetBundles"),
             Path::new("/work/bundle_sha256.json"),
+            Path::new("/work/bundle_dependencies.json"),
         );
 
         assert_eq!(commands.len(), 3);
@@ -3168,6 +3268,44 @@ mod tests {
         assert_eq!(
             bundle_hash_index_key("character/motion/01.bundle").unwrap(),
             "character/motion/01.bundle"
+        );
+    }
+
+    #[test]
+    fn bundle_dependency_closure_is_recursive_and_cycle_safe() {
+        let detail = |name: &str, dependencies: &[&str]| AssetBundleDetail {
+            bundle_name: name.to_string(),
+            cache_file_name: String::new(),
+            cache_directory_name: String::new(),
+            hash: String::new(),
+            category: AssetCategory::OnDemand,
+            crc: 0,
+            file_size: 0,
+            dependencies: dependencies.iter().map(|value| value.to_string()).collect(),
+            paths: Vec::new(),
+            is_builtin: false,
+            is_relocate: None,
+            md5_hash: None,
+            download_path: None,
+        };
+        let info = AssetBundleInfo {
+            version: None,
+            os: None,
+            bundles: HashMap::from([
+                ("body".to_string(), detail("body", &["material", "shared"])),
+                ("material".to_string(), detail("material", &["texture"])),
+                ("texture".to_string(), detail("texture", &["body"])),
+                ("shared".to_string(), detail("shared", &[])),
+            ]),
+        };
+
+        assert_eq!(
+            bundle_dependency_closure(&info, "body"),
+            vec![
+                "material".to_string(),
+                "shared".to_string(),
+                "texture".to_string()
+            ]
         );
     }
 
