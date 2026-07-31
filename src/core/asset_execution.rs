@@ -1825,27 +1825,6 @@ impl AssetExecutionContext {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| asset_root.clone());
 
-        if pending_tasks.is_empty() && can_reuse_download_record {
-            for args in Self::build_haruki_3d_metadata_refresh_commands(&haruki_3d, &asset_root) {
-                if let Err(error) = self
-                    .run_haruki_3d_exporter_stage(&haruki_3d, &args, &progress)
-                    .await
-                {
-                    if haruki_3d.cleanup_work_dir_after_failure {
-                        Self::remove_haruki_3d_work_dir(&work_run_dir)?;
-                    }
-                    return Err(error);
-                }
-            }
-            if haruki_3d.cleanup_work_dir_after_success {
-                Self::remove_haruki_3d_work_dir(&work_run_dir)?;
-            }
-            return Ok(Haruki3dExportSummary {
-                matched_bundles: tasks.len(),
-                downloaded_bundles: 0,
-            });
-        }
-
         for task in &pending_tasks {
             self.ensure_not_cancelled(&cancel_flag)?;
             Self::send_progress(
@@ -2013,16 +1992,6 @@ impl AssetExecutionContext {
             haruki_3d.output_dir.clone(),
             "--convert-model-textures".to_string(),
             haruki_3d.convert_model_textures.to_string(),
-        ]
-    }
-
-    fn build_haruki_3d_metadata_refresh_commands(
-        haruki_3d: &crate::core::config::Haruki3dExportConfig,
-        asset_root: &Path,
-    ) -> Vec<Vec<String>> {
-        vec![
-            Self::build_haruki_3d_costume_registry_command(haruki_3d, asset_root),
-            Self::build_haruki_3d_runtime_catalog_command(haruki_3d),
         ]
     }
 
@@ -2852,13 +2821,6 @@ mod tests {
         assert_eq!(commands[0][0], "--emit-part-packages");
         assert_eq!(commands[1][0], "--emit-role-runtimes");
         assert_eq!(commands[2][0], "--emit-costume-registries");
-        let metadata_commands = AssetExecutionContext::build_haruki_3d_metadata_refresh_commands(
-            &config,
-            Path::new("/work/AssetBundles"),
-        );
-        assert_eq!(metadata_commands.len(), 2);
-        assert_eq!(metadata_commands[0][0], "--emit-costume-registries");
-        assert_eq!(metadata_commands[1][0], "--emit-runtime-role-catalog");
         for command in &commands {
             assert!(
                 !command.iter().any(|arg| arg == "--runtime-json-output"),
