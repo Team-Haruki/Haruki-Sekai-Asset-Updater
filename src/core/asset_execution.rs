@@ -1826,15 +1826,16 @@ impl AssetExecutionContext {
             .unwrap_or_else(|| asset_root.clone());
 
         if pending_tasks.is_empty() && can_reuse_download_record {
-            let catalog_args = Self::build_haruki_3d_runtime_catalog_command(&haruki_3d);
-            if let Err(error) = self
-                .run_haruki_3d_exporter_stage(&haruki_3d, &catalog_args, &progress)
-                .await
-            {
-                if haruki_3d.cleanup_work_dir_after_failure {
-                    Self::remove_haruki_3d_work_dir(&work_run_dir)?;
+            for args in Self::build_haruki_3d_metadata_refresh_commands(&haruki_3d, &asset_root) {
+                if let Err(error) = self
+                    .run_haruki_3d_exporter_stage(&haruki_3d, &args, &progress)
+                    .await
+                {
+                    if haruki_3d.cleanup_work_dir_after_failure {
+                        Self::remove_haruki_3d_work_dir(&work_run_dir)?;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
             if haruki_3d.cleanup_work_dir_after_success {
                 Self::remove_haruki_3d_work_dir(&work_run_dir)?;
@@ -1998,6 +1999,33 @@ impl AssetExecutionContext {
         ]
     }
 
+    fn build_haruki_3d_costume_registry_command(
+        haruki_3d: &crate::core::config::Haruki3dExportConfig,
+        asset_root: &Path,
+    ) -> Vec<String> {
+        vec![
+            "--emit-costume-registries".to_string(),
+            "--master".to_string(),
+            haruki_3d.master_dir.clone(),
+            "--asset-root".to_string(),
+            asset_root.to_string_lossy().into_owned(),
+            "--out".to_string(),
+            haruki_3d.output_dir.clone(),
+            "--convert-model-textures".to_string(),
+            haruki_3d.convert_model_textures.to_string(),
+        ]
+    }
+
+    fn build_haruki_3d_metadata_refresh_commands(
+        haruki_3d: &crate::core::config::Haruki3dExportConfig,
+        asset_root: &Path,
+    ) -> Vec<Vec<String>> {
+        vec![
+            Self::build_haruki_3d_costume_registry_command(haruki_3d, asset_root),
+            Self::build_haruki_3d_runtime_catalog_command(haruki_3d),
+        ]
+    }
+
     fn build_haruki_3d_exporter_commands(
         haruki_3d: &crate::core::config::Haruki3dExportConfig,
         asset_root: &Path,
@@ -2011,18 +2039,6 @@ impl AssetExecutionContext {
                 haruki_3d.convert_model_textures.to_string(),
             ]
         };
-        let registry_args = [
-            "--emit-costume-registries".to_string(),
-            "--master".to_string(),
-            haruki_3d.master_dir.clone(),
-            "--asset-root".to_string(),
-            asset_root_arg.clone(),
-            "--out".to_string(),
-            haruki_3d.output_dir.clone(),
-        ]
-        .into_iter()
-        .chain(model_texture_args())
-        .collect();
         let mut part_args: Vec<String> = [
             "--emit-part-packages".to_string(),
             "--master".to_string(),
@@ -2051,7 +2067,6 @@ impl AssetExecutionContext {
         part_args.push(bundle_hash_index.to_string_lossy().into_owned());
         part_args.push("--bundle-dependency-index".to_string());
         part_args.push(bundle_dependency_index.to_string_lossy().into_owned());
-        let mut exporter_commands = vec![registry_args, part_args];
         let mut role_args = vec![
             "--emit-role-runtimes".to_string(),
             "--master".to_string(),
@@ -2068,8 +2083,11 @@ impl AssetExecutionContext {
             role_args.push(id.to_string());
         }
         role_args.extend(model_texture_args());
-        exporter_commands.push(role_args);
-        exporter_commands
+        vec![
+            part_args,
+            role_args,
+            Self::build_haruki_3d_costume_registry_command(haruki_3d, asset_root),
+        ]
     }
 
     fn build_haruki_3d_tasks(&self, info: &AssetBundleInfo) -> Vec<DownloadTask> {
@@ -2802,7 +2820,7 @@ mod tests {
     }
 
     #[test]
-    fn haruki_3d_background_export_runs_registry_parts_and_role_runtimes() {
+    fn haruki_3d_background_export_publishes_registry_after_runtime_packages() {
         let config = crate::core::config::Haruki3dExportConfig {
             master_dir: "/master".to_string(),
             output_dir: "/runtime".to_string(),
@@ -2831,8 +2849,16 @@ mod tests {
         );
 
         assert_eq!(commands.len(), 3);
-        assert_eq!(commands[0][0], "--emit-costume-registries");
-        assert_eq!(commands[1][0], "--emit-part-packages");
+        assert_eq!(commands[0][0], "--emit-part-packages");
+        assert_eq!(commands[1][0], "--emit-role-runtimes");
+        assert_eq!(commands[2][0], "--emit-costume-registries");
+        let metadata_commands = AssetExecutionContext::build_haruki_3d_metadata_refresh_commands(
+            &config,
+            Path::new("/work/AssetBundles"),
+        );
+        assert_eq!(metadata_commands.len(), 2);
+        assert_eq!(metadata_commands[0][0], "--emit-costume-registries");
+        assert_eq!(metadata_commands[1][0], "--emit-runtime-role-catalog");
         for command in &commands {
             assert!(
                 !command.iter().any(|arg| arg == "--runtime-json-output"),
@@ -2846,41 +2872,40 @@ mod tests {
             );
         }
         assert!(
-            commands[1]
+            commands[0]
                 .windows(2)
                 .any(|pair| pair == ["--part-package-process-concurrency", "16"]),
             "part package command should pass haruki_3d.process_concurrency"
         );
-        assert!(commands[1]
+        assert!(commands[0]
             .windows(2)
             .any(|pair| pair == ["--shared-content-store", "/runtime-cas"]));
-        assert!(commands[1]
+        assert!(commands[0]
             .windows(2)
             .any(|pair| pair == ["--compiled-content-store", "/runtime-compiled"]));
-        assert!(commands[1]
+        assert!(commands[0]
             .windows(2)
             .any(|pair| pair == ["--bundle-hash-index", "/work/bundle_sha256.json"]));
-        assert!(commands[1].windows(2).any(|pair| pair
+        assert!(commands[0].windows(2).any(|pair| pair
             == [
                 "--bundle-dependency-index",
                 "/work/bundle_dependencies.json"
             ]));
-        assert_eq!(commands[2][0], "--emit-role-runtimes");
         assert!(
-            commands[2]
+            commands[1]
                 .windows(2)
                 .any(|pair| pair == ["--part-package-process-concurrency", "16"]),
             "role runtime command should pass haruki_3d.process_concurrency"
         );
         assert_eq!(
-            commands[2]
+            commands[1]
                 .iter()
                 .filter(|value| value.as_str() == "--role-character3d-id")
                 .count(),
             2
         );
-        assert!(commands[2].contains(&"5".to_string()));
-        assert!(commands[2].contains(&"7".to_string()));
+        assert!(commands[1].contains(&"5".to_string()));
+        assert!(commands[1].contains(&"7".to_string()));
     }
 
     #[test]
@@ -2901,15 +2926,15 @@ mod tests {
         );
 
         assert_eq!(commands.len(), 3);
-        assert_eq!(commands[2][0], "--emit-role-runtimes");
+        assert_eq!(commands[1][0], "--emit-role-runtimes");
         assert!(
-            commands[2]
+            commands[1]
                 .windows(2)
                 .any(|pair| pair == ["--part-package-process-concurrency", "48"]),
             "role runtime command should still pass haruki_3d.process_concurrency"
         );
         assert_eq!(
-            commands[2]
+            commands[1]
                 .iter()
                 .filter(|value| value.as_str() == "--role-character3d-id")
                 .count(),
