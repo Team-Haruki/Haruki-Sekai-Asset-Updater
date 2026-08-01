@@ -2603,6 +2603,8 @@ haruki_3d:
             "live_pv/model/characterv2/color_variation/body/",
             "live_pv/model/characterv2/color_variation/face/",
             "live_pv/model/characterv2/color_variation/head_optional/",
+            "live_pv/model/character/head_optional/",
+            "live_pv/model/character/color_variation/head_optional/",
             "character/motion/costume_setting/",
         ] {
             assert!(
@@ -2641,6 +2643,8 @@ haruki_3d:
             "live_pv/model/characterv2/color_variation/body/",
             "live_pv/model/characterv2/color_variation/face/",
             "live_pv/model/characterv2/color_variation/head_optional/",
+            "live_pv/model/character/head_optional/",
+            "live_pv/model/character/color_variation/head_optional/",
             "character/motion/costume_setting/",
         ] {
             assert!(
