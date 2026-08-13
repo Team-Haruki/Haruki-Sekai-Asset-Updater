@@ -1795,7 +1795,7 @@ impl AssetExecutionContext {
         let record_path = self.haruki_3d_download_record_path().ok_or_else(|| {
             AssetExecutionError::BlockingTask("3D download record path is unavailable".to_string())
         })?;
-        let downloaded_assets = load_download_record(&record_path)?;
+        let mut downloaded_assets = load_download_record(&record_path)?;
         let can_reuse_download_record = self.can_reuse_haruki_3d_download_record().await;
         let pending_tasks: Vec<_> = tasks
             .iter()
@@ -1884,6 +1884,30 @@ impl AssetExecutionContext {
                 .run_haruki_3d_exporter_stage(&haruki_3d, &args, &progress)
                 .await
             {
+                if let AssetExecutionError::Haruki3dExporterFailed { stderr, .. } = &error {
+                    let task_paths: HashSet<_> =
+                        tasks.iter().map(|task| task.bundle_path.as_str()).collect();
+                    let mut recovery_paths = HashSet::new();
+                    for bundle_path in missing_haruki_3d_bundle_paths(stderr) {
+                        if !task_paths.contains(bundle_path.as_str()) {
+                            continue;
+                        }
+                        recovery_paths.insert(bundle_path.clone());
+                        recovery_paths.extend(bundle_dependency_closure(&info, &bundle_path));
+                    }
+                    let removed = recovery_paths
+                        .iter()
+                        .filter(|path| downloaded_assets.remove(path.as_str()).is_some())
+                        .count();
+                    if removed > 0 {
+                        save_download_record(&record_path, &downloaded_assets)?;
+                        tracing::warn!(
+                            region = %self.region_name,
+                            removed,
+                            "invalidated missing sparse 3D bundles for targeted retry"
+                        );
+                    }
+                }
                 if haruki_3d.cleanup_work_dir_after_failure {
                     Self::remove_haruki_3d_work_dir(&work_run_dir)?;
                 }
@@ -2292,6 +2316,19 @@ fn exporter_metric_lines(stdout: &[u8]) -> String {
         .join(" | ")
 }
 
+fn missing_haruki_3d_bundle_paths(stderr: &str) -> Vec<String> {
+    const PREFIX: &str = "HARUKI_3D_MISSING_BUNDLE=";
+    let mut paths: Vec<_> = stderr
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix(PREFIX))
+        .filter(|path| !path.is_empty() && raw_bundle_output_path(Path::new(""), path).is_ok())
+        .map(str::to_string)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 #[derive(Clone)]
 struct BundleMemoryLimiter {
     semaphore: Option<Arc<Semaphore>>,
@@ -2506,9 +2543,9 @@ mod tests {
 
     use super::{
         bundle_dependency_closure, bundle_hash_index_key, decrypt_asset_bundle_info, deobfuscate,
-        exporter_metric_lines, post_process_backlog_capacity, raw_bundle_output_path,
-        should_download_bundle, AssetBundleDetail, AssetBundleInfo, AssetCategory,
-        AssetExecutionContext,
+        exporter_metric_lines, missing_haruki_3d_bundle_paths, post_process_backlog_capacity,
+        raw_bundle_output_path, should_download_bundle, AssetBundleDetail, AssetBundleInfo,
+        AssetCategory, AssetExecutionContext,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -3302,6 +3339,16 @@ mod tests {
         assert_eq!(
             exporter_metric_lines(stdout),
             "Part export metrics: built=3, restored=7 | Part export parent metrics: totalMs=42"
+        );
+    }
+
+    #[test]
+    fn sparse_recovery_parses_only_safe_missing_bundle_markers() {
+        let stderr = "failure\nHARUKI_3D_MISSING_BUNDLE=live_pv/model/body/0001\n\
+HARUKI_3D_MISSING_BUNDLE=../escape\nHARUKI_3D_MISSING_BUNDLE=live_pv/model/body/0001\n";
+        assert_eq!(
+            missing_haruki_3d_bundle_paths(stderr),
+            vec!["live_pv/model/body/0001".to_string()]
         );
     }
 
