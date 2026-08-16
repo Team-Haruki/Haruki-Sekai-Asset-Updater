@@ -126,6 +126,28 @@ export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=./assetstudio_ffi_worker
 Windows releases use `./assetstudio_ffi_worker.exe`. When the worker sits next
 to the service binary the path is inferred and the variable is unnecessary.
 
+#### Build-time credential
+
+The engine is a build dependency, not a runtime one, so this affects whoever
+compiles the project and nobody who runs it. While `Team-Haruki/unity-rs` is a
+private repository, the fetch needs a credential:
+
+```bash
+# Local build
+export CARGO_NET_GIT_FETCH_WITH_CLI=true   # reuse your existing git credentials
+
+# Docker build
+printf '%s' "$GITHUB_TOKEN" > /tmp/gh_token
+docker build --secret id=gh_token,src=/tmp/gh_token .
+```
+
+CI reads the same token from a repository secret named `UNITY_RS_TOKEN`;
+`ci.yml`, `docker.yml` and `release.yml` each skip their authentication step
+when it is unset. Nothing needs the token once `unity-rs` is public -- the
+skipped step and the absent Docker secret both fall through to an anonymous
+fetch -- so making the repository public removes this requirement without any
+change to the build files.
+
 ## Runtime Tuning
 
 - AssetStudio exports use the `assetstudio_ffi_worker` pool. Set

@@ -66,6 +66,9 @@
 - 图片转换优先保持纯 Rust 路径，不要重新引入外部 WebP 工具链。
 - 资产引擎为 `Team-Haruki/unity-rs`，以 revision 固定的 Cargo git 依赖直接编译进二进制；
   没有动态库，也不需要 .NET 工具链。
+- 该仓库私有期间，构建需要凭据：本地设 `CARGO_NET_GIT_FETCH_WITH_CLI=true`，
+  Docker 用 `--secret id=gh_token`，CI 读仓库 secret `UNITY_RS_TOKEN`。
+  三条 workflow 在该 secret 未设置时会跳过认证步骤，仓库转公开后无需改动构建文件。
 - `assetstudio_ffi_worker` 与 `ffmpeg` 是仅存的外部运行依赖。
 
 ## 5. 代码风格约定

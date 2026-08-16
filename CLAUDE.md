@@ -72,6 +72,9 @@ docker compose up --build
 - **Image conversion:** pure Rust WebP encoder (`image` crate), no external WebP toolchain
 - **Asset engine:** `Team-Haruki/unity-rs`, a Cargo git dependency pinned by revision and
   compiled in. No dynamic library, no .NET toolchain
+- **Build credential:** while `unity-rs` is private, builds need a token --
+  `CARGO_NET_GIT_FETCH_WITH_CLI=true` locally, `--secret id=gh_token` for Docker,
+  and the `UNITY_RS_TOKEN` repository secret in CI. All three are skipped when unset
 - **External tool deps:** FFmpeg libraries/CLI are the only runtime dependency
 - **Config files:** only `haruki-asset-configs.yaml` (active) and `haruki-asset-configs.example.yaml` (template)
 - **Sensitive config** uses `${env:VAR_NAME}` syntax, never hardcoded secrets
