@@ -47,6 +47,27 @@ jobs:
             url."https://x-access-token:${UNITY_RS_TOKEN}@github.com/".insteadOf \
             "https://github.com/"
 
+      - name: Verify the unity-rs dependency is reachable
+        shell: bash
+        run: |
+          if git ls-remote https://github.com/Team-Haruki/unity-rs.git HEAD >/dev/null 2>&1; then
+            exit 0
+          fi
+          cat >&2 <<'EOF'
+          Cannot reach Team-Haruki/unity-rs, the asset engine this project
+          compiles in, so every cargo step below would fail while resolving it.
+
+          This repository is public; unity-rs is not. GitHub does not pass
+          secrets to pull requests from forks, so UNITY_RS_TOKEN is empty on
+          those runs and there is no credential to authenticate with.
+
+          Resolve it by making unity-rs public, after which no credential is
+          needed anywhere and this check passes for everyone. Failing that,
+          CI can only run on branches pushed to this repository, with
+          UNITY_RS_TOKEN set as a repository secret.
+          EOF
+          exit 1
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
