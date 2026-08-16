@@ -61,6 +61,7 @@ use self::paths::*;
 pub(crate) use self::payload::flush_pending_native_image_writes;
 use self::payload::*;
 use self::tasks::*;
+pub(crate) use self::types::NativeSemanticExportPathRegistry;
 use self::types::*;
 
 pub use self::media_postprocess::post_process_exported_files;
@@ -142,6 +143,28 @@ pub async fn export_unity_asset_bundle_payloads(
     output_dir: &Path,
     category: &str,
 ) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
+    let path_registry = NativeSemanticExportPathRegistry::default();
+    export_unity_asset_bundle_payloads_with_registry(
+        app_config,
+        region,
+        asset_bundle_file,
+        export_path,
+        output_dir,
+        category,
+        &path_registry,
+    )
+    .await
+}
+
+pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
+    app_config: &AppConfig,
+    region: &RegionConfig,
+    asset_bundle_file: &Path,
+    export_path: &str,
+    output_dir: &Path,
+    category: &str,
+    path_registry: &NativeSemanticExportPathRegistry,
+) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
     configure_cpu_budget_throttle(&app_config.resources, app_config.effective_cpu_budget());
     let exclude_path_prefix = if region.export.by_category {
         "assets/sekai/assetbundle/resources".to_string()
@@ -161,12 +184,6 @@ pub async fn export_unity_asset_bundle_payloads(
     };
     let mut post_process_export_path = actual_export_path.clone();
 
-    let native_library_path = configured_path(
-        app_config.backends.asset_studio.library_path.as_deref(),
-    )
-    .ok_or_else(|| ExportPipelineError::AssetStudioFfi {
-        message: "backends.asset_studio.library_path is required".to_string(),
-    })?;
     let native_object_summary = run_assetstudio_ffi_object_export(
         app_config,
         region,
@@ -174,7 +191,7 @@ pub async fn export_unity_asset_bundle_payloads(
         output_dir,
         export_path,
         &exclude_path_prefix,
-        native_library_path,
+        path_registry,
     )
     .await?;
     if region.export.by_category {

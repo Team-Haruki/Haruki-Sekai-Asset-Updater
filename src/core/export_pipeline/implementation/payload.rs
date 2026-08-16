@@ -83,6 +83,14 @@ pub(super) fn write_native_object_payload(
         write_native_payload_file(&target, &read_output.payload)?;
         vec![target.clone()]
     };
+    let writes_are_pending = payload_kind == "image_bmp"
+        || payload_kind == "image_raw_rgba"
+        || payload_kind == "image_array_bundle_raw_rgba";
+    if !writes_are_pending {
+        for written_file in &written_files {
+            remove_byte_identical_semantic_duplicates(written_file, &path_state.registry)?;
+        }
+    }
     let manifest_target = if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
         native_image_surrogate_public_target(&target, options.region)
     } else {
@@ -193,7 +201,17 @@ pub(super) fn write_assetstudio_playable_payloads(
             options.region.export.by_category,
             &container,
         );
-        let target = path_state.claim(target, first_asset);
+        let target = match path_state.claim_generated_payload(target, first_asset, &payload) {
+            NativeSemanticPathClaim::Claimed(target) => target,
+            NativeSemanticPathClaim::Duplicate { existing } => {
+                debug!(
+                    container,
+                    output_path = %existing.display(),
+                    "skipping byte-identical duplicate generated playable"
+                );
+                continue;
+            }
+        };
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ExportPipelineError::Io {
                 path: parent.to_path_buf(),
@@ -201,6 +219,7 @@ pub(super) fn write_assetstudio_playable_payloads(
             })?;
         }
         write_native_payload_file(&target, &payload)?;
+        remove_byte_identical_semantic_duplicates(&target, &path_state.registry)?;
         path_state.written_files.push(target.clone());
         write_assetstudio_export_manifest_entry(
             options.output_dir,
@@ -234,10 +253,10 @@ pub(super) fn playable_container_output_path(
 }
 
 impl NativeSemanticExportPathState {
-    pub(super) fn claim(&mut self, path: PathBuf, asset: &AssetStudioFfiAssetInfo) -> PathBuf {
-        match self.claim_with_signature(path, asset, None) {
-            NativeSemanticPathClaim::Claimed(path)
-            | NativeSemanticPathClaim::Duplicate { existing: path } => path,
+    pub(super) fn with_registry(registry: NativeSemanticExportPathRegistry) -> Self {
+        Self {
+            registry,
+            ..Self::default()
         }
     }
 
@@ -247,36 +266,37 @@ impl NativeSemanticExportPathState {
         asset: &AssetStudioFfiAssetInfo,
         read_output: &AssetStudioFfiObjectReadOutput,
     ) -> NativeSemanticPathClaim {
-        self.claim_with_signature(
-            path,
-            asset,
-            Some(native_payload_signature(asset, read_output)),
-        )
+        self.claim_with_signature(path, asset, native_payload_signature(&read_output.payload))
+    }
+
+    pub(super) fn claim_generated_payload(
+        &mut self,
+        path: PathBuf,
+        asset: &AssetStudioFfiAssetInfo,
+        payload: &[u8],
+    ) -> NativeSemanticPathClaim {
+        self.claim_with_signature(path, asset, native_payload_signature(payload))
     }
 
     fn claim_with_signature(
         &mut self,
         path: PathBuf,
         asset: &AssetStudioFfiAssetInfo,
-        signature: Option<NativePayloadSignature>,
+        signature: NativePayloadSignature,
     ) -> NativeSemanticPathClaim {
+        let mut claims = self.registry.claims.lock().unwrap();
         let mut ordinal = 1usize;
         loop {
             let candidate = semantic_duplicate_path(&path, ordinal);
-            if let Some(existing_claim) = self.claims.get(&candidate) {
-                if signature
-                    .as_ref()
-                    .zip(existing_claim.signature.as_ref())
-                    .is_some_and(|(left, right)| left == right)
-                {
+            if let Some(existing_claim) = claims.get(&candidate) {
+                if signature == existing_claim.signature {
                     return NativeSemanticPathClaim::Duplicate {
                         existing: candidate,
                     };
                 }
             }
-            if !candidate.exists() && !self.claims.contains_key(&candidate) {
-                self.claims
-                    .insert(candidate.clone(), NativeSemanticExportClaim { signature });
+            if !claims.contains_key(&candidate) {
+                claims.insert(candidate.clone(), NativeSemanticExportClaim { signature });
                 if ordinal > 1 {
                     debug!(
                         asset_type = asset.asset_type.as_deref().unwrap_or(""),
@@ -293,18 +313,10 @@ impl NativeSemanticExportPathState {
     }
 }
 
-pub(super) fn native_payload_signature(
-    asset: &AssetStudioFfiAssetInfo,
-    read_output: &AssetStudioFfiObjectReadOutput,
-) -> NativePayloadSignature {
+pub(super) fn native_payload_signature(payload: &[u8]) -> NativePayloadSignature {
     NativePayloadSignature {
-        asset_type: asset.asset_type.clone(),
-        name: asset.name.clone(),
-        container: asset.container.clone(),
-        payload_kind: read_output.response.payload_kind.clone(),
-        suggested_extension: read_output.response.suggested_extension.clone(),
-        payload_len: read_output.payload.len(),
-        payload_fingerprint: native_payload_fingerprint(&read_output.payload),
+        payload_len: payload.len(),
+        payload_fingerprint: native_payload_fingerprint(payload),
     }
 }
 
@@ -532,6 +544,7 @@ pub(super) fn queue_native_image_payload_final_files(
             target: target.to_path_buf(),
             payload: payload.to_vec(),
             region: region.clone(),
+            path_registry: path_state.registry.clone(),
         });
     written_files
 }
@@ -542,19 +555,39 @@ pub(super) fn write_native_image_payload_final_files(
     payload: &[u8],
     region: &RegionConfig,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
-    write_native_image_payload_final_files_with_backend(
+    let path_registry = NativeSemanticExportPathRegistry::default();
+    write_native_image_payload_final_files_with_registry(
         target,
         payload,
         region,
         &ImageBackendConfig::default(),
+        &path_registry,
     )
 }
 
+#[cfg(test)]
 pub(super) fn write_native_image_payload_final_files_with_backend(
     target: &Path,
     payload: &[u8],
     region: &RegionConfig,
     image_backend: &ImageBackendConfig,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let path_registry = NativeSemanticExportPathRegistry::default();
+    write_native_image_payload_final_files_with_registry(
+        target,
+        payload,
+        region,
+        image_backend,
+        &path_registry,
+    )
+}
+
+pub(super) fn write_native_image_payload_final_files_with_registry(
+    target: &Path,
+    payload: &[u8],
+    region: &RegionConfig,
+    image_backend: &ImageBackendConfig,
+    path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     let formats = region.export.images.output_formats();
     let raw_rgba = payload
@@ -578,6 +611,7 @@ pub(super) fn write_native_image_payload_final_files_with_backend(
             };
             write_dynamic_image_to_image_file(&dynamic_image, &output, format, image_backend)?;
         }
+        remove_byte_identical_semantic_duplicates(&output, path_registry)?;
         written_files.push(output);
     }
 
@@ -606,11 +640,12 @@ pub(crate) fn flush_pending_native_image_writes(
     let started = Instant::now();
     run_tasks(pending, image_concurrency, move |job| {
         let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
-        write_native_image_payload_final_files_with_backend(
+        write_native_image_payload_final_files_with_registry(
             &job.target,
             &job.payload,
             &job.region,
             &image_backend,
+            &job.path_registry,
         )
     })?;
     record_phase_ms(&mut phase_ms, "image_encode.wall", started);
@@ -838,13 +873,129 @@ pub(super) fn write_payload_bundle(
                 source,
             })?;
         }
-        std::fs::write(&entry_target, bytes).map_err(|source| ExportPipelineError::Io {
-            path: entry_target.clone(),
-            source,
-        })?;
+        write_native_payload_file(&entry_target, bytes)?;
         written_files.push(entry_target);
     }
     Ok(written_files)
+}
+
+pub(super) fn remove_byte_identical_semantic_duplicates(
+    target: &Path,
+    path_registry: &NativeSemanticExportPathRegistry,
+) -> Result<usize, ExportPipelineError> {
+    let Some(target_stem) = target.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(0);
+    };
+    if semantic_duplicate_ordinal(target_stem).is_some() {
+        return Ok(0);
+    }
+    let claims = path_registry.claims.lock().unwrap();
+    let mut removed = 0usize;
+    let mut ordinal = 2usize;
+    loop {
+        let duplicate = semantic_duplicate_path(target, ordinal);
+        let metadata = match std::fs::symlink_metadata(&duplicate) {
+            Ok(metadata) => metadata,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => break,
+            Err(source) => {
+                return Err(ExportPipelineError::Io {
+                    path: duplicate,
+                    source,
+                });
+            }
+        };
+        if claims.contains_key(&duplicate) {
+            ordinal += 1;
+            continue;
+        }
+        let file_type = metadata.file_type();
+        if !file_type.is_file() || !files_are_byte_identical(target, &duplicate)? {
+            ordinal += 1;
+            continue;
+        }
+        std::fs::remove_file(&duplicate).map_err(|source| ExportPipelineError::Io {
+            path: duplicate.clone(),
+            source,
+        })?;
+        debug!(
+            output_path = %target.display(),
+            duplicate_path = %duplicate.display(),
+            "removed byte-identical legacy semantic duplicate"
+        );
+        removed += 1;
+        ordinal += 1;
+    }
+    Ok(removed)
+}
+
+pub(super) fn semantic_duplicate_ordinal(stem: &str) -> Option<usize> {
+    stem.rsplit_once("__dup")
+        .and_then(|(_, ordinal)| semantic_duplicate_ordinal_digits(ordinal))
+}
+
+pub(super) fn semantic_duplicate_ordinal_digits(value: &str) -> Option<usize> {
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse::<usize>().ok())
+        .flatten()
+        .filter(|ordinal| *ordinal > 1)
+}
+
+pub(super) fn files_are_byte_identical(
+    left: &Path,
+    right: &Path,
+) -> Result<bool, ExportPipelineError> {
+    let left_file = std::fs::File::open(left).map_err(|source| ExportPipelineError::Io {
+        path: left.to_path_buf(),
+        source,
+    })?;
+    let right_file = std::fs::File::open(right).map_err(|source| ExportPipelineError::Io {
+        path: right.to_path_buf(),
+        source,
+    })?;
+    let left_len = left_file
+        .metadata()
+        .map_err(|source| ExportPipelineError::Io {
+            path: left.to_path_buf(),
+            source,
+        })?
+        .len();
+    let right_len = right_file
+        .metadata()
+        .map_err(|source| ExportPipelineError::Io {
+            path: right.to_path_buf(),
+            source,
+        })?
+        .len();
+    if left_len != right_len {
+        return Ok(false);
+    }
+
+    let mut left_reader = std::io::BufReader::new(left_file);
+    let mut right_reader = std::io::BufReader::new(right_file);
+    let mut left_buffer = [0u8; 64 * 1024];
+    let mut right_buffer = [0u8; 64 * 1024];
+    loop {
+        let left_read =
+            left_reader
+                .read(&mut left_buffer)
+                .map_err(|source| ExportPipelineError::Io {
+                    path: left.to_path_buf(),
+                    source,
+                })?;
+        let right_read =
+            right_reader
+                .read(&mut right_buffer)
+                .map_err(|source| ExportPipelineError::Io {
+                    path: right.to_path_buf(),
+                    source,
+                })?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 pub(super) fn queue_native_image_payload_bundle_final_files(

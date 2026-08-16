@@ -19,18 +19,17 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// Opt-in: point `ASSET_STUDIO_BUNDLE_PATH` at a real bundle to run it. The
+/// engine is linked into the test binary, so no library path is involved.
 #[test]
 fn real_assetstudio_ffi_exports_expected_file_when_configured() {
-    let Some(asset_studio_ffi_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
-        return;
-    };
-    run_real_assetstudio_export(asset_studio_ffi_library_path);
-}
-
-fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
         return;
     };
+    run_real_assetstudio_export(bundle_path);
+}
+
+fn run_real_assetstudio_export(bundle_path: String) {
     let Some(expected_relative_file) = required_env("ASSET_STUDIO_EXPECTED_RELATIVE_FILE") else {
         return;
     };
@@ -93,7 +92,6 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
                 ..haruki_sekai_asset_updater::core::config::MediaBackendConfig::default()
             },
             asset_studio: haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig {
-                library_path: Some(asset_studio_ffi_library_path),
                 worker_path: required_env("ASSET_STUDIO_FFI_WORKER_PATH")
                     .or_else(|| required_env("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH")),
                 ..haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default()

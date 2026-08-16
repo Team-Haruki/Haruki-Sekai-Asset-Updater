@@ -1,9 +1,5 @@
 use super::*;
 
-pub(super) fn configured_path(path: Option<&str>) -> Option<&str> {
-    path.map(str::trim).filter(|value| !value.is_empty())
-}
-
 pub(super) async fn run_assetstudio_ffi_object_export(
     app_config: &AppConfig,
     region: &RegionConfig,
@@ -11,29 +7,8 @@ pub(super) async fn run_assetstudio_ffi_object_export(
     output_dir: &Path,
     export_path: &str,
     strip_path_prefix: &str,
-    native_library_path: &str,
+    path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    if app_config.backends.asset_studio.mode == AssetStudioFfiMode::Direct {
-        return call_assetstudio_ffi_object_export_direct(
-            app_config,
-            region,
-            asset_bundle_file,
-            output_dir,
-            export_path,
-            strip_path_prefix,
-            native_library_path,
-        )
-        .await;
-    }
-
-    let worker_path =
-        configured_worker_path(app_config.backends.asset_studio.worker_path.as_deref())?;
-    let pool = AssetStudioWorkerPool::shared(
-        &worker_path,
-        native_library_path,
-        app_config.effective_asset_studio_ffi_process_concurrency(),
-        app_config.backends.asset_studio.worker_max_calls,
-    );
     let open_request = AssetStudioFfiContextOpenRequest {
         input_path: asset_bundle_file.to_string_lossy().to_string(),
         asset_types: asset_studio_export_type_list(region),
@@ -61,12 +36,30 @@ pub(super) async fn run_assetstudio_ffi_object_export(
             .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
         read_batch_size: app_config.backends.asset_studio.read_batch_size,
     };
+    if app_config.backends.asset_studio.mode == AssetStudioFfiMode::Direct {
+        return call_assetstudio_ffi_object_export_direct(
+            app_config,
+            &open_request,
+            &unpack_options,
+            path_registry,
+        )
+        .await;
+    }
+
+    let worker_path =
+        configured_worker_path(app_config.backends.asset_studio.worker_path.as_deref())?;
+    let pool = AssetStudioWorkerPool::shared(
+        &worker_path,
+        app_config.effective_asset_studio_ffi_process_concurrency(),
+        app_config.backends.asset_studio.worker_max_calls,
+    );
     let result = call_assetstudio_ffi_object_export_pooled(
         &pool,
         false,
         app_config.effective_cpu_budget(),
         &open_request,
         &unpack_options,
+        path_registry,
     )
     .await;
 
@@ -85,6 +78,7 @@ pub(super) async fn run_assetstudio_ffi_object_export(
                 app_config.effective_cpu_budget(),
                 &open_request,
                 &unpack_options,
+                path_registry,
             )
             .await
         }
@@ -94,48 +88,18 @@ pub(super) async fn run_assetstudio_ffi_object_export(
 
 async fn call_assetstudio_ffi_object_export_direct(
     app_config: &AppConfig,
-    region: &RegionConfig,
-    asset_bundle_file: &Path,
-    output_dir: &Path,
-    export_path: &str,
-    strip_path_prefix: &str,
-    native_library_path: &str,
+    open_request: &AssetStudioFfiContextOpenRequest,
+    options: &NativeObjectExportOptions<'_>,
+    path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
     let wait_started = Instant::now();
     let cpu_budget_slot = acquire_cpu_budget_permit(app_config.effective_cpu_budget()).await?;
-    let open_request = AssetStudioFfiContextOpenRequest {
-        input_path: asset_bundle_file.to_string_lossy().to_string(),
-        asset_types: asset_studio_export_type_list(region),
-        unity_version: (!region.runtime.unity_version.is_empty())
-            .then(|| region.runtime.unity_version.clone()),
-        filter_exclude_mode: false,
-        filter_with_regex: false,
-        filter_by_name: None,
-        filter_by_container: None,
-        filter_by_path_ids: Vec::new(),
-        load_all_assets: true,
-        include_assets: false,
-    };
-    let options = NativeObjectExportOptions {
-        output_dir,
-        export_path,
-        strip_path_prefix,
-        region,
-        read_kinds: &app_config.backends.asset_studio.read_kinds,
-        image_format: app_config
-            .backends
-            .asset_studio
-            .image_format
-            .as_deref()
-            .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
-        read_batch_size: app_config.backends.asset_studio.read_batch_size,
-    };
     let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    let native_library_path = native_library_path.to_string();
     let open_request = open_request.clone();
-    let options = NativeObjectExportOptionsOwned::from_options(&options);
+    let options = NativeObjectExportOptionsOwned::from_options(options);
+    let path_registry = path_registry.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let library = shared_direct_assetstudio_library(&native_library_path)?;
+        let library = shared_direct_assetstudio_library();
         let mut caller = DirectAssetStudioCaller {
             library,
             call_seq: 0,
@@ -150,6 +114,7 @@ async fn call_assetstudio_ffi_object_export_direct(
             &mut caller,
             &open_request,
             &options.as_ref(),
+            &path_registry,
         ))
     })
     .await
@@ -169,21 +134,13 @@ async fn call_assetstudio_ffi_object_export_direct(
     Ok(summary)
 }
 
-fn shared_direct_assetstudio_library(
-    native_library_path: &str,
-) -> Result<Arc<LoadedAssetStudioFfiLibrary>, AssetStudioFfiError> {
-    static LIBRARIES: OnceLock<Mutex<HashMap<String, Arc<LoadedAssetStudioFfiLibrary>>>> =
-        OnceLock::new();
-    let mut libraries = LIBRARIES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    if let Some(library) = libraries.get(native_library_path) {
-        return Ok(library.clone());
-    }
-    let library = Arc::new(LoadedAssetStudioFfiLibrary::load(native_library_path)?);
-    libraries.insert(native_library_path.to_string(), library.clone());
-    Ok(library)
+/// One handle for the process. The engine is linked in, so there is nothing to
+/// key this by and nothing that can fail.
+fn shared_direct_assetstudio_library() -> Arc<LoadedAssetStudioFfiLibrary> {
+    static LIBRARY: OnceLock<Arc<LoadedAssetStudioFfiLibrary>> = OnceLock::new();
+    LIBRARY
+        .get_or_init(|| Arc::new(LoadedAssetStudioFfiLibrary::load()))
+        .clone()
 }
 
 #[derive(Clone)]
@@ -229,6 +186,7 @@ pub(super) async fn call_assetstudio_ffi_object_export_pooled(
     cpu_budget: usize,
     open_request: &AssetStudioFfiContextOpenRequest,
     options: &NativeObjectExportOptions<'_>,
+    path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
     let wait_started = Instant::now();
     let cpu_budget_slot = acquire_cpu_budget_permit(cpu_budget).await?;
@@ -239,7 +197,8 @@ pub(super) async fn call_assetstudio_ffi_object_export_pooled(
     };
     let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     let call_result =
-        call_assetstudio_ffi_object_export_worker(&mut lease, open_request, options).await;
+        call_assetstudio_ffi_object_export_worker(&mut lease, open_request, options, path_registry)
+            .await;
 
     match call_result {
         Ok(mut summary) => {
@@ -299,8 +258,10 @@ pub(super) async fn call_assetstudio_ffi_object_export_worker(
     worker: &mut WorkerLease,
     open_request: &AssetStudioFfiContextOpenRequest,
     options: &NativeObjectExportOptions<'_>,
+    path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    call_assetstudio_ffi_object_export_with_caller(worker, open_request, options).await
+    call_assetstudio_ffi_object_export_with_caller(worker, open_request, options, path_registry)
+        .await
 }
 
 pub(super) trait AssetStudioObjectExportCaller {
@@ -346,6 +307,7 @@ async fn call_assetstudio_ffi_object_export_with_caller<C>(
     caller: &mut C,
     open_request: &AssetStudioFfiContextOpenRequest,
     options: &NativeObjectExportOptions<'_>,
+    path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError>
 where
     C: AssetStudioObjectExportCaller,
@@ -382,7 +344,7 @@ where
 
         let read_batch_size =
             native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
-        let mut path_state = NativeSemanticExportPathState::default();
+        let mut path_state = NativeSemanticExportPathState::with_registry(path_registry.clone());
         let mut playable_outputs = Vec::new();
         for asset_chunk in readable_assets.chunks(read_batch_size) {
             let read_subchunks = native_object_read_subchunks(asset_chunk, options.image_format);

@@ -240,9 +240,6 @@ impl AppConfig {
         if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
             self.backends.media.backend = value.parse()?;
         }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH") {
-            self.backends.asset_studio.library_path = non_empty_option(value);
-        }
         if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_FFI_MODE") {
             self.backends.asset_studio.mode = value.parse()?;
         }
@@ -1006,7 +1003,6 @@ pub struct BackendsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AssetStudioBackendConfig {
-    pub library_path: Option<String>,
     pub mode: AssetStudioFfiMode,
     pub worker_path: Option<String>,
     pub process_concurrency: usize,
@@ -1252,7 +1248,6 @@ impl Default for RetryConfig {
 impl Default for AssetStudioBackendConfig {
     fn default() -> Self {
         Self {
-            library_path: None,
             mode: AssetStudioFfiMode::WorkerPool,
             worker_path: None,
             process_concurrency: 0,
@@ -1931,7 +1926,6 @@ image:
   webp_lossless: true
   jpeg_quality: 88
 asset_studio:
-  library_path: /tmp/libHarukiAssetStudioFFI.so
   mode: direct
   worker_path: /tmp/assetstudio-ffi-worker
   process_concurrency: 6
@@ -1949,10 +1943,6 @@ asset_studio:
         assert_eq!(backends.image.backend, ImageBackend::Rust);
         assert_eq!(backends.image.png_compression, ImagePngCompression::Best);
         assert_eq!(backends.image.jpeg_quality, 88);
-        assert_eq!(
-            asset_studio.library_path.as_deref(),
-            Some("/tmp/libHarukiAssetStudioFFI.so")
-        );
         assert_eq!(asset_studio.mode, AssetStudioFfiMode::Direct);
         assert_eq!(
             asset_studio.worker_path.as_deref(),
@@ -2214,10 +2204,6 @@ raw_bundles:
         std::env::set_var("HARUKI_TEST_AES_IV_HEX", "0102030405060708090a0b0c0d0e0f10");
         std::env::set_var("HARUKI_TEST_BEARER_TOKEN", "secret-token");
         std::env::set_var(
-            "HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH",
-            "/tmp/libassetstudio-native.so",
-        );
-        std::env::set_var(
             "HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH",
             "/tmp/assetstudio-ffi-worker",
         );
@@ -2235,7 +2221,6 @@ logging:
     format: "[${{time}}] ${{status}}"
 backends:
   asset_studio:
-    library_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH}}"
     worker_path: "${{env:HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH}}"
 regions:
   jp:
@@ -2268,10 +2253,6 @@ regions:
             Some("0102030405060708090a0b0c0d0e0f10")
         );
         assert_eq!(
-            config.backends.asset_studio.library_path.as_deref(),
-            Some("/tmp/libassetstudio-native.so")
-        );
-        assert_eq!(
             config.backends.asset_studio.worker_path.as_deref(),
             Some("/tmp/assetstudio-ffi-worker")
         );
@@ -2280,7 +2261,6 @@ regions:
         std::env::remove_var("HARUKI_TEST_AES_KEY_HEX");
         std::env::remove_var("HARUKI_TEST_AES_IV_HEX");
         std::env::remove_var("HARUKI_TEST_BEARER_TOKEN");
-        std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_FFI_LIBRARY_PATH");
         std::env::remove_var("HARUKI_TEST_ASSET_STUDIO_FFI_WORKER_PATH");
     }
 
@@ -2288,7 +2268,6 @@ regions:
     fn load_from_path_applies_asset_studio_env_overrides() {
         let _env_lock = env_lock();
         let old_media_backend = std::env::var("HARUKI_MEDIA_BACKEND").ok();
-        let old_native_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH").ok();
         let old_asset_studio_mode = std::env::var("HARUKI_ASSET_STUDIO_FFI_MODE").ok();
         let old_worker_path = std::env::var("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH").ok();
         let old_process_concurrency =
@@ -2308,10 +2287,6 @@ regions:
         let old_max_in_flight_bundle_bytes =
             std::env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES").ok();
         std::env::set_var("HARUKI_MEDIA_BACKEND", "cli");
-        std::env::set_var(
-            "HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH",
-            "/tmp/override-native.so",
-        );
         std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", "direct");
         std::env::set_var(
             "HARUKI_ASSET_STUDIO_FFI_WORKER_PATH",
@@ -2339,7 +2314,6 @@ regions:
 config_version: 3
 backends:
   asset_studio:
-    library_path: /tmp/config-native.so
     worker_path: /tmp/config-native-worker
     process_concurrency: 2
     worker_max_calls: 128
@@ -2351,10 +2325,6 @@ backends:
 
         let config = AppConfig::load_from_path(file.path()).unwrap();
         assert_eq!(config.backends.media.backend, MediaBackend::Cli);
-        assert_eq!(
-            config.backends.asset_studio.library_path.as_deref(),
-            Some("/tmp/override-native.so")
-        );
         assert_eq!(
             config.backends.asset_studio.mode,
             AssetStudioFfiMode::Direct
@@ -2389,10 +2359,6 @@ backends:
         match old_media_backend {
             Some(value) => std::env::set_var("HARUKI_MEDIA_BACKEND", value),
             None => std::env::remove_var("HARUKI_MEDIA_BACKEND"),
-        }
-        match old_native_path {
-            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH", value),
-            None => std::env::remove_var("HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH"),
         }
         match old_asset_studio_mode {
             Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_FFI_MODE", value),

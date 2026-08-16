@@ -21,8 +21,6 @@ const FFI_CALL_STACK_SIZE: usize = 64 * 1024 * 1024;
 #[command(name = "assetstudio_ffi_worker")]
 #[command(about = "Run the AssetStudio FFI worker server")]
 struct Args {
-    #[arg(long = "ffi-library")]
-    ffi_library: String,
     #[arg(long)]
     server: bool,
 }
@@ -32,18 +30,18 @@ fn main() -> ExitCode {
 
     let args = Args::parse();
     if args.server {
-        return run_server_on_large_stack(args.ffi_library);
+        return run_server_on_large_stack();
     }
 
     eprintln!("assetstudio_ffi_worker only supports --server mode");
     ExitCode::from(2)
 }
 
-fn run_server_on_large_stack(ffi_library: String) -> ExitCode {
+fn run_server_on_large_stack() -> ExitCode {
     match std::thread::Builder::new()
         .name("haruki-assetstudio-worker-server".to_string())
         .stack_size(FFI_CALL_STACK_SIZE)
-        .spawn(move || run_server(&ffi_library))
+        .spawn(run_server)
     {
         Ok(handle) => handle.join().unwrap_or_else(|panic| {
             write_process_trace("server_thread_panic", &format!("{panic:?}"));
@@ -75,16 +73,9 @@ struct ServerResponse {
     error: Option<String>,
 }
 
-fn run_server(ffi_library: &str) -> ExitCode {
-    write_process_trace("server_start", ffi_library);
-    let library = match LoadedAssetStudioFfiLibrary::load(ffi_library) {
-        Ok(library) => library,
-        Err(error) => {
-            write_process_trace("server_library_load_error", &error.to_string());
-            eprintln!("{error}");
-            return ExitCode::from(101);
-        }
-    };
+fn run_server() -> ExitCode {
+    write_process_trace("server_start", "linked engine");
+    let library = LoadedAssetStudioFfiLibrary::load();
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
 

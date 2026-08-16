@@ -106,24 +106,24 @@ pub(super) struct NativeObjectExportSummary {
 
 #[derive(Debug, Default)]
 pub(super) struct NativeSemanticExportPathState {
-    pub(super) claims: HashMap<PathBuf, NativeSemanticExportClaim>,
+    pub(super) registry: NativeSemanticExportPathRegistry,
     pub(super) written_files: Vec<PathBuf>,
     pub(super) acb_sources: Vec<NativeInMemoryMediaSource>,
     pub(super) pending_image_writes: Vec<PendingNativeImageWrite>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NativeSemanticExportPathRegistry {
+    pub(super) claims: Arc<Mutex<HashMap<PathBuf, NativeSemanticExportClaim>>>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct NativeSemanticExportClaim {
-    pub(super) signature: Option<NativePayloadSignature>,
+    pub(super) signature: NativePayloadSignature,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct NativePayloadSignature {
-    pub(super) asset_type: Option<String>,
-    pub(super) name: Option<String>,
-    pub(super) container: Option<String>,
-    pub(super) payload_kind: Option<String>,
-    pub(super) suggested_extension: Option<String>,
     pub(super) payload_len: usize,
     pub(super) payload_fingerprint: [u64; 2],
 }
@@ -139,6 +139,7 @@ pub(crate) struct PendingNativeImageWrite {
     pub(super) target: PathBuf,
     pub(super) payload: Vec<u8>,
     pub(super) region: RegionConfig,
+    pub(super) path_registry: NativeSemanticExportPathRegistry,
 }
 
 #[derive(Debug, Clone)]

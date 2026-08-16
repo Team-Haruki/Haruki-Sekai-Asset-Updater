@@ -45,7 +45,6 @@ pub struct WorkerOutput {
 
 pub struct AssetStudioWorkerPool {
     worker_path: PathBuf,
-    native_library_path: String,
     process_concurrency: usize,
     max_calls_per_worker: usize,
     semaphore: Arc<Semaphore>,
@@ -113,17 +112,15 @@ fn record_atomic_max(target: &AtomicU64, value: u64) {
 impl AssetStudioWorkerPool {
     pub fn shared(
         worker_path: &Path,
-        native_library_path: &str,
         process_concurrency: usize,
         max_calls_per_worker: usize,
     ) -> Arc<Self> {
         let process_concurrency = process_concurrency.max(1);
         let key = format!(
-            "{}\0{}\0{}\0{}",
+            "{}\0{}\0{}",
             process_concurrency,
             max_calls_per_worker,
             worker_path.display(),
-            native_library_path
         );
         static POOLS: OnceLock<Mutex<HashMap<String, Arc<AssetStudioWorkerPool>>>> =
             OnceLock::new();
@@ -136,7 +133,6 @@ impl AssetStudioWorkerPool {
             .or_insert_with(|| {
                 Arc::new(AssetStudioWorkerPool {
                     worker_path: worker_path.to_path_buf(),
-                    native_library_path: native_library_path.to_string(),
                     process_concurrency,
                     max_calls_per_worker,
                     semaphore: Arc::new(Semaphore::new(process_concurrency)),
@@ -193,15 +189,10 @@ impl AssetStudioWorkerPool {
         let mut command = Command::new(&worker_program);
         command
             .arg("--server")
-            .arg("--ffi-library")
-            .arg(&self.native_library_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        if let Some(native_library_dir) = native_library_working_dir(&self.native_library_path) {
-            command.current_dir(native_library_dir);
-        }
         let mut child = command
             .spawn()
             .map_err(|source| AssetStudioFfiError::Spawn {
@@ -470,10 +461,6 @@ pub fn worker_executable_name() -> &'static str {
     } else {
         "assetstudio_ffi_worker"
     }
-}
-
-fn native_library_working_dir(native_library_path: &str) -> Option<&Path> {
-    Path::new(native_library_path).parent()
 }
 
 fn absolute_command_path(path: &Path) -> PathBuf {

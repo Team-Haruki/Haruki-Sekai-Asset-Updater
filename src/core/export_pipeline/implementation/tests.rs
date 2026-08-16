@@ -34,15 +34,16 @@ use super::{
     record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
     scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
     sort_native_object_reads_for_failure_isolation, text_asset_public_bytes_target,
-    usm_segment_key, write_assetstudio_export_manifest_entry,
+    usm_segment_key, write_assetstudio_export_manifest_entry, write_assetstudio_playable_payloads,
     write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
-    write_native_object_payload, AssetStudioFfiAssetInfo, AssetStudioFfiObjectReadOutput,
-    AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse, MediaEncodeKind,
-    NativeBatchPhaseStats, NativeObjectExportOptions, NativeObjectExportSummary,
+    write_native_object_payload, write_native_payload_file, AssetStudioFfiAssetInfo,
+    AssetStudioFfiObjectReadOutput, AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse,
+    MediaEncodeKind, NativeBatchPhaseStats, NativeObjectExportOptions, NativeObjectExportSummary,
     NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
-    NativeSemanticExportPathState, UsmProcessingInput, WorkerOutput,
-    ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, NATIVE_AOT_DEFAULT_IMAGE_FORMAT,
-    NATIVE_AOT_FAST_IMAGE_FORMAT, NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
+    UsmProcessingInput, WorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+    NATIVE_AOT_DEFAULT_IMAGE_FORMAT, NATIVE_AOT_FAST_IMAGE_FORMAT,
+    NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
 };
 
 fn sample_path(name: &str) -> Option<PathBuf> {
@@ -401,8 +402,11 @@ fn post_process_sample_files_without_transcoding_if_present() {
         .unwrap();
 }
 
+/// The engine is linked into this binary, so no configuration names a library
+/// to load. A bundle export therefore reaches the engine on a default config
+/// and fails on the bundle's own contents, not on a missing path.
 #[test]
-fn native_backend_requires_library_path_when_selected() {
+fn native_backend_needs_no_configured_library_path() {
     let dir = tempdir().unwrap();
     let fake_bundle = dir.path().join("bundle.bin");
     fs::write(&fake_bundle, b"bundle").unwrap();
@@ -422,11 +426,11 @@ fn native_backend_requires_library_path_when_selected() {
         ))
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        ExportPipelineError::AssetStudioFfi { ref message }
-            if message.contains("backends.asset_studio.library_path")
-    ));
+    let message = err.to_string();
+    assert!(
+        !message.contains("library_path"),
+        "no configured library should be required, got: {message}"
+    );
 }
 
 #[test]
@@ -1969,18 +1973,274 @@ fn semantic_export_path_state_disambiguates_without_path_id() {
     let mut state = NativeSemanticExportPathState::default();
     let base = PathBuf::from("/tmp/out/shared.assets/monobehaviour/shared.json");
 
-    let first = state.claim(base.clone(), &asset);
-    let second = state.claim(base, &asset);
+    let first = state.claim_generated_payload(base.clone(), &asset, b"first");
+    let second = state.claim_generated_payload(base, &asset, b"second");
 
     assert_eq!(
         first,
-        PathBuf::from("/tmp/out/shared.assets/monobehaviour/shared.json")
+        NativeSemanticPathClaim::Claimed(PathBuf::from(
+            "/tmp/out/shared.assets/monobehaviour/shared.json"
+        ))
     );
     assert_eq!(
         second,
-        PathBuf::from("/tmp/out/shared.assets/monobehaviour/shared__dup2.json")
+        NativeSemanticPathClaim::Claimed(PathBuf::from(
+            "/tmp/out/shared.assets/monobehaviour/shared__dup2.json"
+        ))
     );
+    let NativeSemanticPathClaim::Claimed(second) = second else {
+        unreachable!("distinct payload must claim a path")
+    };
     assert!(!second.to_string_lossy().contains("12345"));
+}
+
+#[test]
+fn semantic_export_path_state_reuses_preexisting_base_path() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("shared.json");
+    fs::write(&base, b"old payload").unwrap();
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("shared".to_string()),
+        container: Some("assets/shared.prefab".to_string()),
+        asset_type: Some("MonoBehaviour".to_string()),
+        type_id: 114,
+        path_id: 1,
+        unique_id: None,
+        size: 11,
+        source_file: None,
+    };
+    let mut state = NativeSemanticExportPathState::default();
+
+    let claimed = state.claim_generated_payload(base.clone(), &asset, b"new payload");
+
+    assert_eq!(claimed, NativeSemanticPathClaim::Claimed(base));
+    assert!(!dir.path().join("shared__dup2.json").exists());
+}
+
+#[test]
+fn native_payload_write_removes_only_byte_identical_legacy_duplicates() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("shared.json");
+    let duplicate = dir.path().join("shared__dup2.json");
+    let distinct_duplicate = dir.path().join("shared__dup3.json");
+    fs::write(&base, b"old").unwrap();
+    fs::write(&duplicate, b"new").unwrap();
+    fs::write(&distinct_duplicate, b"distinct").unwrap();
+
+    let registry = NativeSemanticExportPathRegistry::default();
+    write_native_payload_file(&base, b"new").unwrap();
+    super::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
+
+    assert_eq!(fs::read(&base).unwrap(), b"new");
+    assert!(!duplicate.exists());
+    assert_eq!(fs::read(&distinct_duplicate).unwrap(), b"distinct");
+}
+
+#[test]
+fn legacy_duplicate_cleanup_preserves_current_job_claims() {
+    let dir = tempdir().unwrap();
+    let base = dir.path().join("shared.json");
+    let duplicate = dir.path().join("shared__dup2.json");
+    fs::write(&base, b"same").unwrap();
+    fs::write(&duplicate, b"same").unwrap();
+    let registry = NativeSemanticExportPathRegistry::default();
+    let mut state = NativeSemanticExportPathState::with_registry(registry.clone());
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("shared".to_string()),
+        container: Some("assets/shared.prefab".to_string()),
+        asset_type: Some("MonoBehaviour".to_string()),
+        type_id: 114,
+        path_id: 1,
+        unique_id: None,
+        size: 4,
+        source_file: None,
+    };
+    assert_eq!(
+        state.claim_generated_payload(base.clone(), &asset, b"first"),
+        NativeSemanticPathClaim::Claimed(base.clone())
+    );
+    assert_eq!(
+        state.claim_generated_payload(base.clone(), &asset, b"second"),
+        NativeSemanticPathClaim::Claimed(duplicate.clone())
+    );
+
+    let removed = super::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
+
+    assert_eq!(removed, 0);
+    assert!(duplicate.exists());
+}
+
+#[test]
+fn native_image_write_removes_byte_identical_legacy_duplicate() {
+    let dir = tempdir().unwrap();
+    let (_config, region) = processing_config();
+    let target = dir.path().join("normal.png");
+    let duplicate = dir.path().join("normal__dup2.png");
+    let payload = make_native_rgba_ir_payload(1, 1, &[255, 0, 0, 255]);
+
+    write_native_image_payload_final_files(&duplicate, &payload, &region).unwrap();
+    write_native_image_payload_final_files(&target, &payload, &region).unwrap();
+
+    assert!(target.exists());
+    assert!(!duplicate.exists());
+}
+
+#[test]
+fn semantic_export_path_registry_dedupes_across_bundle_states() {
+    let registry = NativeSemanticExportPathRegistry::default();
+    let mut first_state = NativeSemanticExportPathState::with_registry(registry.clone());
+    let mut second_state = NativeSemanticExportPathState::with_registry(registry);
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("hard".to_string()),
+        container: Some("assets/music/score/hard.txt".to_string()),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 1,
+        unique_id: None,
+        size: 5,
+        source_file: None,
+    };
+    let read_output = AssetStudioFfiObjectReadOutput {
+        response: AssetStudioFfiObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("text_bytes".to_string()),
+            payload_len: 5,
+            suggested_extension: Some(".txt".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: b"score".to_vec(),
+    };
+    let base = PathBuf::from("/tmp/out/music/score/hard.txt");
+
+    let first = first_state.claim_payload(base.clone(), &asset, &read_output);
+    let second = second_state.claim_payload(base.clone(), &asset, &read_output);
+
+    assert_eq!(first, NativeSemanticPathClaim::Claimed(base.clone()));
+    assert_eq!(
+        second,
+        NativeSemanticPathClaim::Duplicate { existing: base }
+    );
+}
+
+#[test]
+fn semantic_export_path_registry_keeps_distinct_cross_bundle_payloads() {
+    let registry = NativeSemanticExportPathRegistry::default();
+    let mut first_state = NativeSemanticExportPathState::with_registry(registry.clone());
+    let mut second_state = NativeSemanticExportPathState::with_registry(registry);
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("shared".to_string()),
+        container: Some("assets/shared.prefab".to_string()),
+        asset_type: Some("MonoBehaviour".to_string()),
+        type_id: 114,
+        path_id: 1,
+        unique_id: None,
+        size: 1,
+        source_file: None,
+    };
+    let mut read_output = AssetStudioFfiObjectReadOutput {
+        response: AssetStudioFfiObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("typetree_json".to_string()),
+            payload_len: 1,
+            suggested_extension: Some(".json".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: b"1".to_vec(),
+    };
+    let base = PathBuf::from("/tmp/out/shared.json");
+
+    let first = first_state.claim_payload(base.clone(), &asset, &read_output);
+    read_output.payload = b"2".to_vec();
+    let second = second_state.claim_payload(base.clone(), &asset, &read_output);
+
+    assert_eq!(first, NativeSemanticPathClaim::Claimed(base));
+    assert_eq!(
+        second,
+        NativeSemanticPathClaim::Claimed(PathBuf::from("/tmp/out/shared__dup2.json"))
+    );
+}
+
+#[test]
+fn playable_export_dedupes_identical_payloads_across_bundle_states() {
+    let dir = tempdir().unwrap();
+    let (_config, mut region) = processing_config();
+    region.export.by_category = true;
+    let read_kinds = BTreeMap::new();
+    let options = NativeObjectExportOptions {
+        output_dir: dir.path(),
+        export_path: "virtual_live/mc/timeline/foo",
+        strip_path_prefix: "assets/sekai/assetbundle/resources",
+        region: &region,
+        read_kinds: &read_kinds,
+        image_format: "raw_rgba",
+        read_batch_size: 16,
+    };
+    let asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("AudienceClip(Clone)".to_string()),
+        container: Some(
+            "assets/sekai/assetbundle/resources/ondemand/virtual_live/mc/timeline/foo/foo.playable"
+                .to_string(),
+        ),
+        asset_type: Some("MonoBehaviour".to_string()),
+        type_id: 114,
+        path_id: 1,
+        unique_id: None,
+        size: 2,
+        source_file: None,
+    };
+    let read_output = AssetStudioFfiObjectReadOutput {
+        response: AssetStudioFfiObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("typetree_json".to_string()),
+            payload_len: 2,
+            suggested_extension: Some(".json".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: b"{}".to_vec(),
+    };
+    let registry = NativeSemanticExportPathRegistry::default();
+    let mut first_state = NativeSemanticExportPathState::with_registry(registry.clone());
+    let mut second_state = NativeSemanticExportPathState::with_registry(registry);
+
+    write_assetstudio_playable_payloads(
+        &options,
+        &mut first_state,
+        vec![(asset.clone(), read_output.clone())],
+    )
+    .unwrap();
+    write_assetstudio_playable_payloads(&options, &mut second_state, vec![(asset, read_output)])
+        .unwrap();
+
+    let expected = dir
+        .path()
+        .join("ondemand/virtual_live/mc/timeline/foo/foo.json");
+    assert_eq!(first_state.written_files, vec![expected.clone()]);
+    assert!(second_state.written_files.is_empty());
+    assert!(expected.exists());
+    assert!(!dir
+        .path()
+        .join("ondemand/virtual_live/mc/timeline/foo/foo__dup2.json")
+        .exists());
+    let manifest =
+        fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+    assert_eq!(manifest.lines().count(), 1);
 }
 
 #[test]
