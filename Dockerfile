@@ -35,32 +35,6 @@ RUN cargo build --release --locked \
     -p haruki-assetstudio-ffi \
     --features haruki-sekai-asset-updater/media-ffi
 
-FROM mcr.microsoft.com/dotnet/sdk:9.0-bookworm-slim AS assetstudio-builder
-ARG TARGETARCH
-WORKDIR /src
-ARG ASSETSTUDIO_REPOSITORY=https://github.com/Team-Haruki/AssetStudio.git
-ARG ASSETSTUDIO_BRANCH=sekai-modified
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    clang \
-    zlib1g-dev \
-    binutils && \
-    rm -rf /var/lib/apt/lists/*
-RUN git clone --depth 1 --single-branch --branch "${ASSETSTUDIO_BRANCH}" "${ASSETSTUDIO_REPOSITORY}" AssetStudio
-# Force dependency projects away from their net472 targets during NativeAOT publish.
-RUN cd AssetStudio/AssetStudioFFI && \
-    case "${TARGETARCH}" in \
-        amd64) runtime_id=linux-x64 ;; \
-        arm64) runtime_id=linux-arm64 ;; \
-        *) echo "Unsupported Docker target architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac && \
-    dotnet publish -c Release -r "${runtime_id}" -f net9.0 --self-contained true -o /app/assetstudio-ffi \
-    -p:TargetFrameworks=net9.0 \
-    -p:PublishAot=true \
-    -p:InvariantGlobalization=true
-
 FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -86,13 +60,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
 COPY --from=builder /app/target/release/assetstudio_ffi_worker /app/assetstudio_ffi_worker
-COPY --from=assetstudio-builder /app/assetstudio-ffi /app/assetstudio
 RUN mkdir -p logs
 
 ENV TZ=Asia/Shanghai \
-    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=true \
     HARUKI_MEDIA_BACKEND=ffi \
-    HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/app/assetstudio/HarukiAssetStudioFFI.so \
     HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/app/assetstudio_ffi_worker \
     HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY=0 \
     HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS=256 \

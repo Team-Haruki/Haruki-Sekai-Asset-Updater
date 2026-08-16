@@ -37,7 +37,6 @@
   `haruki-asset-configs.example.yaml` as the current config template.
 - The loader resolves this syntax for:
   `server.auth.bearer_token`,
-  `backends.asset_studio.library_path`,
   `backends.asset_studio.worker_path`,
   `storage.providers[].access_key`,
   `storage.providers[].secret_key`,
@@ -46,7 +45,6 @@
   `regions.*.crypto.aes_iv_hex`.
 - Tracked config templates expect values such as:
   `HARUKI_MEDIA_BACKEND`,
-  `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`,
   `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`,
   `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
   `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`,
@@ -74,7 +72,6 @@ cp haruki-asset-configs.example.yaml haruki-asset-configs.yaml
 ```bash
 cp .env.example .env
 export HARUKI_MEDIA_BACKEND=ffi
-export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=/path/to/HarukiAssetStudioFFI.so
 export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/path/to/assetstudio_ffi_worker
 export HARUKI_SHARED_AES_KEY_HEX=...
 export HARUKI_SHARED_AES_IV_HEX=...
@@ -110,40 +107,36 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
   -d '{"region":"jp","asset_version":"6.0.0","asset_hash":"deadbeef","dry_run":true}'
 ```
 
-### AssetStudioFFI Runtime
+### AssetStudio Engine
 
-The Rust service talks to AssetStudio through `assetstudio_ffi_worker`, while
-the native `HarukiAssetStudioFFI` dynamic library comes from the
-[`Team-Haruki/AssetStudio`](https://github.com/Team-Haruki/AssetStudio)
-`sekai-modified` branch. Release and Docker builds use that branch by default.
+The asset engine is [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs),
+a Rust implementation of AssetStudio. It is an ordinary Cargo dependency pinned
+by revision, so it is compiled into `haruki-sekai-asset-updater` and
+`assetstudio_ffi_worker` at build time. There is no dynamic library to ship,
+locate or configure, and no .NET toolchain in any build.
 
-Platform release archives include the matching AssetStudioFFI files under
-`assetstudio/`. For local development with a release archive, point the service
-at that bundled library and the worker binary:
+Release archives therefore contain just the two binaries. `assetstudio_ffi_worker`
+still exists and is still how production runs exports -- it isolates a crash in
+one bundle from the service -- but it now carries the engine itself:
 
 ```bash
-export HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH=./assetstudio/HarukiAssetStudioFFI.so
 export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=./assetstudio_ffi_worker
 ```
 
-Use the platform-specific library extension for your host: `.so` on Linux,
-`.dylib` on macOS, and `.dll` on Windows; Windows releases use
-`./assetstudio/HarukiAssetStudioFFI.dll` and `./assetstudio_ffi_worker.exe`.
-You can also download the standalone AssetStudioFFI archive or build the
-`AssetStudioFFI` project yourself, then set the same variables to those paths.
+Windows releases use `./assetstudio_ffi_worker.exe`. When the worker sits next
+to the service binary the path is inferred and the variable is unnecessary.
 
 ## Runtime Tuning
 
 - AssetStudio exports use the `assetstudio_ffi_worker` pool. Set
-  `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` and, when the worker cannot be inferred
-  from the service binary directory, `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`.
+  `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` when the worker cannot be inferred from
+  the service binary directory.
   `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
   `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`, and
   `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE` tune worker pool throughput.
 - `backends.asset_studio.mode` defaults to `worker_pool` for production crash
   isolation. Set it to `direct`, or set `HARUKI_ASSET_STUDIO_FFI_MODE=direct`,
-  only for local throughput benchmarks where the service process may load and
-  call `HarukiAssetStudioFFI` directly.
+  to call the engine in the service process and skip the worker hop.
 - `resources.memory.max_in_flight_bundle_bytes` is a soft memory guard. The default
   `0` disables it. On small Linux hosts, set it to the amount of bundle work the
   process may keep in memory, for example

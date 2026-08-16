@@ -59,7 +59,8 @@ docker compose up --build
   - `jobs.rs` -- async job manager with progress tracking and cancellation
   - `logging.rs` -- tracing-subscriber setup with file and JSON output
 
-- `crates/assetstudio-ffi/` -- AssetStudio FFI ABI and `assetstudio_ffi_worker`
+- `crates/assetstudio-ffi/` -- typed wrapper over the linked-in `unity-rs` engine,
+  plus the `assetstudio_ffi_worker` binary
 
 **Request flow:** `POST /v2/assets/update` -> handler creates a job -> `JobManager` spawns a tokio task -> `build_execution_plan` -> `AssetExecutionContext` runs download/decrypt/export/upload pipeline -> job status queryable via `GET /v2/jobs/{id}`.
 
@@ -69,7 +70,9 @@ docker compose up --build
 - **YAML:** use `yaml_serde`, never `serde_yaml`
 - **Codec:** use published `cridecoder` crate from crates.io
 - **Image conversion:** pure Rust WebP encoder (`image` crate), no external WebP toolchain
-- **External tool deps:** `AssetStudioFFI` NativeAOT library and FFmpeg libraries/CLI are runtime dependencies
+- **Asset engine:** `Team-Haruki/unity-rs`, a Cargo git dependency pinned by revision and
+  compiled in. No dynamic library, no .NET toolchain
+- **External tool deps:** FFmpeg libraries/CLI are the only runtime dependency
 - **Config files:** only `haruki-asset-configs.yaml` (active) and `haruki-asset-configs.example.yaml` (template)
 - **Sensitive config** uses `${env:VAR_NAME}` syntax, never hardcoded secrets
 - **Codec samples** are external opt-in fixtures. Set
@@ -86,7 +89,6 @@ docker compose up --build
 ## Environment Variables
 
 - `HARUKI_CONFIG_PATH` -- override config file path
-- `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH` -- path to `HarukiAssetStudioFFI` native library
 - `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` -- optional path to `assetstudio_ffi_worker`
 - `HARUKI_MEDIA_BACKEND` -- media backend selection (`ffi`, `auto`, or `cli`)
 - `HARUKI_SHARED_AES_KEY_HEX` / `HARUKI_SHARED_AES_IV_HEX` -- shared AES keys (JP/TW/KR/CN)

@@ -23,7 +23,7 @@
 - `src/`
   Rust 主服务代码。
 - `crates/assetstudio-ffi/`
-  AssetStudio FFI ABI 与 `assetstudio_ffi_worker`。
+  对内联 `unity-rs` 引擎的 typed 封装，以及 `assetstudio_ffi_worker`。
 - `src/core/`
   核心业务逻辑，例如配置、下载、导出、上传、git 同步。
 - `src/service/`
@@ -50,7 +50,6 @@
 当前常用环境变量包括：
 
 - `HARUKI_CONFIG_PATH`
-- `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`
 - `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`
 - `HARUKI_MEDIA_BACKEND`
 - `HARUKI_SHARED_AES_KEY_HEX`
@@ -65,7 +64,9 @@
 - YAML 处理统一使用 `yaml_serde`，不要新增 `serde_yaml` 依赖。
 - codec 后端统一依赖 crates.io 上的 `cridecoder`。
 - 图片转换优先保持纯 Rust 路径，不要重新引入外部 WebP 工具链。
-- `AssetStudioFFI` NativeAOT 动态库、`assetstudio_ffi_worker` 与 `ffmpeg` 继续作为外部运行依赖。
+- 资产引擎为 `Team-Haruki/unity-rs`，以 revision 固定的 Cargo git 依赖直接编译进二进制；
+  没有动态库，也不需要 .NET 工具链。
+- `assetstudio_ffi_worker` 与 `ffmpeg` 是仅存的外部运行依赖。
 
 ## 5. 代码风格约定
 
@@ -115,7 +116,8 @@ cargo test --workspace
   - `cargo test --workspace`
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
-- Release artifact 与 Docker 镜像必须包含 `assetstudio_ffi_worker`，因为主服务生产路径通过 worker pool bridge 调用 AssetStudioFFI。
+- Release artifact 与 Docker 镜像必须包含 `assetstudio_ffi_worker`，因为主服务生产路径通过 worker pool 调用引擎；
+  worker 自身已内联引擎，不再需要随包分发任何动态库。
 
 ## 9. 推荐工作流
 
