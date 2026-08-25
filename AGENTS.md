@@ -66,7 +66,7 @@
 - 该仓库私有期间，构建需要凭据：本地设 `CARGO_NET_GIT_FETCH_WITH_CLI=true`，
   Docker 用 `--secret id=gh_token`，CI 读仓库 secret `UNITY_RS_TOKEN`。
   三条 workflow 在该 secret 未设置时会跳过认证步骤，仓库转公开后无需改动构建文件。
-- 主服务直接调用 `assetstudio-core` 的纯 Rust API；没有 worker pool、stdio IPC 或 AssetStudio 外部运行依赖。
+- 主服务直接调用 `unity-rs-core` 的纯 Rust API；没有 worker pool、stdio IPC 或 AssetStudio 外部运行依赖。
 - FFmpeg 是仅存的外部运行依赖（使用 media FFI feature 时链接其系统库）。
 
 ## 5. 代码风格约定
@@ -96,7 +96,7 @@ cargo test --workspace
 - 样本导出：
   确认 `tests/codec_smoke.rs` 通过。
 - AssetStudio 集成：
-  确认主服务直接链接 `assetstudio-core`，且 release 不再交付额外 worker。
+  确认主服务直接链接 `unity-rs-core`，且 release 不再交付额外 worker。
 - FFI 示例：
   如果修改 `tools/ffi/`，至少运行对应 Python smoke / Go smoke 或 `go test ./...`。
 - HTTP/任务流：
@@ -117,7 +117,7 @@ cargo test --workspace
   - `cargo test --workspace`
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
-- Release artifact 与 Docker 镜像只需包含主服务二进制；`assetstudio-core` 已直接编译进主服务，
+- Release artifact 与 Docker 镜像只需包含主服务二进制；`unity-rs-core` 已直接编译进主服务，
   不得重新引入 worker pool、stdio IPC 或动态 AssetStudio 库。
 
 ## 9. 推荐工作流

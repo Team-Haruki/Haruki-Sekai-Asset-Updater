@@ -17,7 +17,7 @@
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
 - Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
 - Uses the linked-in [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs)
-  `assetstudio-core` library directly. FFmpeg/rsmpeg FFI handles media;
+  `unity-rs-core` library directly. FFmpeg/rsmpeg FFI handles media;
   FFmpeg CLI remains available as a fallback where FFI is unavailable.
 
 ## Layout
@@ -102,7 +102,7 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
 
 The asset engine is [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs),
 a Rust implementation of AssetStudio. It is an ordinary Cargo dependency pinned
-by revision. The service calls `assetstudio_core::studio::Studio` and
+by revision. The service calls `unity_rs_core::studio::Studio` and
 `StudioObject` directly from blocking Rust tasks, so the engine is compiled into
 the single `haruki-sekai-asset-updater` binary. There is no worker process,
 stdio protocol, dynamic AssetStudio library, or .NET toolchain to ship or configure.
@@ -131,7 +131,7 @@ change to the build files.
 
 ## Runtime Tuning
 
-- AssetStudio exports directly call the linked `assetstudio-core` library.
+- AssetStudio exports directly call the linked `unity-rs-core` library.
   `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE` controls object-read chunking; the
   existing CPU budget controls concurrent blocking export work.
 - `resources.memory.max_in_flight_bundle_bytes` is a soft memory guard. The default

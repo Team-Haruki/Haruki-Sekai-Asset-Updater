@@ -60,7 +60,7 @@ fn call_unity_rs_object_export(
         .then(|| options.region.runtime.unity_version.parse())
         .transpose()
         .map_err(
-            |error: assetstudio_core::unity_version::ParseUnityVersionError| {
+            |error: unity_rs_core::unity_version::ParseUnityVersionError| {
                 ExportPipelineError::UnityRs {
                     message: error.to_string(),
                 }
@@ -219,7 +219,7 @@ fn read_unity_rs_object(
                 maximum_bundle_bytes: MAX_PAYLOAD_BYTES,
                 ..TextureArrayReadLimits::default()
             };
-            let loaded = &studio.collection().serialized_files[object.file_index()].file;
+            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
             let texture =
                 read_texture2d_array(studio.collection(), loaded, object.object_index(), limits)
                     .map_err(unity_rs_error)?;
@@ -255,7 +255,7 @@ fn read_unity_rs_object(
             "shader_text",
             ".shader".to_string(),
         ),
-        (assetstudio_core::mesh::MESH_CLASS_ID, "auto" | "mesh" | "obj") => (
+        (unity_rs_core::mesh::MESH_CLASS_ID, "auto" | "mesh" | "obj") => (
             object
                 .read_mesh_obj(MeshReadLimits {
                     maximum_output_bytes: MAX_PAYLOAD_BYTES,
@@ -266,14 +266,14 @@ fn read_unity_rs_object(
             ".obj".to_string(),
         ),
         (MONO_BEHAVIOUR_CLASS_ID, "auto" | "typetree_json") => {
-            let loaded = &studio.collection().serialized_files[object.file_index()].file;
+            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
             let limits = MonoBehaviourReadLimits {
                 maximum_json_bytes: MAX_PAYLOAD_BYTES as usize,
                 ..MonoBehaviourReadLimits::default()
             };
             match read_mono_behaviour_json(loaded, object.object_index(), false, limits) {
                 Ok(json) => (json.into_bytes(), "typetree_json", ".json".to_string()),
-                Err(assetstudio_core::Error::Unsupported(_)) => (
+                Err(unity_rs_core::Error::Unsupported(_)) => (
                     object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
                     "raw",
                     ".dat".to_string(),
@@ -346,7 +346,7 @@ fn read_unity_rs_object(
 }
 
 fn read_simple_asset(
-    result: assetstudio_core::Result<assetstudio_core::simple_assets::SimpleBinaryAsset>,
+    result: unity_rs_core::Result<unity_rs_core::simple_assets::SimpleBinaryAsset>,
     maximum_bytes: u64,
 ) -> Result<(Vec<u8>, &'static str, String), ExportPipelineError> {
     let simple = result.map_err(unity_rs_error)?;
@@ -366,7 +366,7 @@ fn require_raw_rgba(image_format: &str, asset_type: &str) -> Result<(), ExportPi
     })
 }
 
-fn unity_rs_error(error: assetstudio_core::Error) -> ExportPipelineError {
+fn unity_rs_error(error: unity_rs_core::Error) -> ExportPipelineError {
     ExportPipelineError::UnityRs {
         message: error.to_string(),
     }

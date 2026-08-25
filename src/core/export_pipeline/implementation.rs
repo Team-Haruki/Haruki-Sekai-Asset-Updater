@@ -15,22 +15,22 @@ use serde::Serialize;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 use tracing::{debug, warn};
 
-use assetstudio_core::loader::AssetLoadOptions;
-use assetstudio_core::mesh::MeshReadLimits;
-use assetstudio_core::monobehaviour::{
+use unity_rs_core::loader::AssetLoadOptions;
+use unity_rs_core::mesh::MeshReadLimits;
+use unity_rs_core::monobehaviour::{
     read_mono_behaviour_json, MonoBehaviourReadLimits, MONO_BEHAVIOUR_CLASS_ID,
 };
-use assetstudio_core::shader::SHADER_CLASS_ID;
-use assetstudio_core::simple_assets::{
+use unity_rs_core::shader::SHADER_CLASS_ID;
+use unity_rs_core::simple_assets::{
     SimpleAssetReadLimits, AUDIO_CLIP_CLASS_ID, FONT_CLASS_ID, MOVIE_TEXTURE_CLASS_ID,
     VIDEO_CLIP_CLASS_ID,
 };
-use assetstudio_core::sprite::{SpriteReadLimits, SPRITE_CLASS_ID};
-use assetstudio_core::studio::{Studio, StudioObject};
-use assetstudio_core::texture::{
+use unity_rs_core::sprite::{SpriteReadLimits, SPRITE_CLASS_ID};
+use unity_rs_core::studio::{Studio, StudioObject};
+use unity_rs_core::texture::{
     write_rgba_ir, write_rgba_ir_display_order, TextureReadLimits, TEXTURE_2D_CLASS_ID,
 };
-use assetstudio_core::texture_array::{
+use unity_rs_core::texture_array::{
     read_texture2d_array, write_texture2d_array_rgba_bundle, TextureArrayReadLimits,
     TEXTURE_2D_ARRAY_CLASS_ID,
 };
