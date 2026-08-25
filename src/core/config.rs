@@ -1312,6 +1312,10 @@ impl FromStr for MediaBackend {
 pub struct ExecutionConfig {
     pub timeout_seconds: u64,
     pub allow_cancel: bool,
+    /// Optional persistent cache for deobfuscated AssetBundles. Cache entries
+    /// are stored below `<root>/<region>/<bundle path>` and reused by update
+    /// and prefetch runs before the network is consulted.
+    pub asset_bundle_cache_dir: Option<String>,
     /// Soft process memory guard for bundle work.  When non-zero, bundle
     /// downloads/native payloads acquire permits by estimated bundle size and
     /// keep them until export/post-process finishes.
@@ -1334,6 +1338,7 @@ impl Default for ExecutionConfig {
         Self {
             timeout_seconds: 300,
             allow_cancel: true,
+            asset_bundle_cache_dir: None,
             max_in_flight_bundle_bytes: 0,
             batch_save_size: 50,
             max_concurrent_jobs: 4,
@@ -1738,14 +1743,7 @@ pub struct RegionFiltersConfig {
     pub priority: Vec<String>,
 }
 
-pub const DEFAULT_ASSET_STUDIO_EXPORT_TYPES: &[&str] = &[
-    "monoBehaviour",
-    "textAsset",
-    "tex2d",
-    "tex2dArray",
-    "sprite",
-    "audio",
-];
+pub const DEFAULT_ASSET_STUDIO_EXPORT_TYPES: &[&str] = &["all"];
 
 fn default_asset_studio_export_types() -> Vec<String> {
     DEFAULT_ASSET_STUDIO_EXPORT_TYPES
@@ -2038,6 +2036,7 @@ regions:
     fn asset_studio_and_media_defaults_are_valid() {
         let config = AppConfig::default();
         let asset_studio = &config.backends.asset_studio;
+        assert_eq!(default_asset_studio_export_types(), vec!["all"]);
         assert_eq!(config.server.asset_http_version, AssetHttpVersion::Auto);
         assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
         assert_eq!(config.backends.media.backend, MediaBackend::Ffi);
@@ -2398,14 +2397,11 @@ haruki_3d:
             Path::new(env!("CARGO_MANIFEST_DIR")).join("haruki-asset-configs.example.yaml");
         let config = AppConfig::load_from_path(config_path).unwrap();
         let asset_studio = &config.backends.asset_studio;
-        assert_eq!(
-            asset_studio.read_kinds.get("Animator").map(String::as_str),
-            Some("fbx")
-        );
+        assert_eq!(asset_studio.read_kinds.get("Animator"), None);
         assert_eq!(
             asset_studio.read_kinds.get("AnimationClip"),
             None,
-            "motion clips are consumed by the haruki_3d raw-bundle pipeline, not FFI reads"
+            "unconfigured types should use unity-rs TypeTree/raw fallback"
         );
 
         let jp = config.regions.get("jp").expect("jp region exists");
@@ -2413,16 +2409,11 @@ haruki_3d:
             jp.export
                 .asset_studio_types
                 .iter()
-                .any(|value| value.eq_ignore_ascii_case("animator")),
-            "jp asset_studio_types should request Animator exports"
+                .any(|value| value.eq_ignore_ascii_case("all")),
+            "jp asset_studio_types should request every unity-rs readable object"
         );
-        assert!(
-            jp.export
-                .asset_studio_types
-                .iter()
-                .any(|value| value.eq_ignore_ascii_case("AnimationClip")),
-            "jp asset_studio_types should request AnimationClip exports"
-        );
+        assert_eq!(jp.filters.start_app, vec![".*"]);
+        assert_eq!(jp.filters.on_demand, vec![".*"]);
 
         let raw_bundles = jp
             .export

@@ -26,6 +26,7 @@ logging:
 execution:
   timeout_seconds: 300
   allow_cancel: true
+  asset_bundle_cache_dir: "" # optional; e.g. ./Data/asset-bundle-cache for reusable deobfuscated bundles
   batch_save_size: 50
   max_concurrent_jobs: 4 # max jobs running the heavy pipeline at once; extra jobs queue. 0 = unlimited
   retain_terminal_jobs: 256 # cap on retained finished job snapshots in memory. 0 = keep all
@@ -52,8 +53,6 @@ backends:
       TextAsset: text_bytes
       MonoBehaviour: typetree_json
       AudioClip: audio
-      Animator: fbx # requires linux-x64/macOS (no FBX SDK for linux-arm64); model packages & motion clips flow through the haruki_3d raw-bundle pipeline
-      all: typetree_json
 
 resources:
   cpu:
@@ -127,15 +126,9 @@ regions:
       downloaded_asset_record_file: "./Data/jp-assets/downloaded_assets.json"
     filters:
       start_app:
-        - "bonds_honor"
-        - "honor"
-        - "thumbnail"
-        - "character"
-        - "music"
+        - ".*"
       on_demand:
-        - "event"
-        - "gacha"
-        - "music"
+        - ".*"
       skip: []
       priority:
         - "^character/member.*"
@@ -145,14 +138,7 @@ regions:
     export:
       by_category: false
       asset_studio_types:
-        - monoBehaviour
-        - textAsset
-        - tex2d
-        - tex2dArray
-        - sprite
-        - audio
-        - animator
-        - AnimationClip
+        - all
       usm:
         export: true
         decode: true
@@ -226,15 +212,18 @@ regions:
       asset_save_dir: "./Data/cn-assets"
       downloaded_asset_record_file: "./Data/cn-assets/downloaded_assets.json"
     filters:
-      start_app: []
+      start_app:
+        - ".*"
       on_demand:
-        - "music/long"
+        - ".*"
       skip: []
       priority:
         - "^music/.*"
         - ".*"
     export:
       by_category: false
+      asset_studio_types:
+        - all
       usm:
         export: true
         decode: true

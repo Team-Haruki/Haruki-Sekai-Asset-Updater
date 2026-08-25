@@ -30,9 +30,7 @@ fn real_unity_rs_exports_expected_file_when_configured() {
 }
 
 fn run_real_assetstudio_export(bundle_path: String) {
-    let Some(expected_relative_file) = required_env("ASSET_STUDIO_EXPECTED_RELATIVE_FILE") else {
-        return;
-    };
+    let expected_relative_file = required_env("ASSET_STUDIO_EXPECTED_RELATIVE_FILE");
 
     let unity_version =
         required_env("ASSET_STUDIO_UNITY_VERSION").unwrap_or_else(|| "2022.3.21f1".to_string());
@@ -124,6 +122,25 @@ fn run_real_assetstudio_export(bundle_path: String) {
             &category,
         ))
         .unwrap();
+    let object_plan = &summary.unity_rs_object_read_plan;
+    eprintln!(
+        "unity-rs objects: inspected={}, planned={}, succeeded={}, failed={}, skipped={}",
+        object_plan.inspected_objects,
+        object_plan.planned_objects,
+        object_plan.successful_reads,
+        object_plan.failed_reads,
+        object_plan.skipped_reads
+    );
+    assert_eq!(
+        object_plan.successful_reads + object_plan.failed_reads,
+        object_plan.planned_objects,
+        "every selected unity-rs object should be attempted"
+    );
+    assert_eq!(
+        object_plan.failed_reads, 0,
+        "real unity-rs export contained failed object reads: {:?}",
+        summary.unity_rs_skipped_object_reads
+    );
 
     let export_root = if by_category {
         output_dir
@@ -134,13 +151,15 @@ fn run_real_assetstudio_export(bundle_path: String) {
         output_dir.path().join(&export_path)
     };
     let exported_files = walk_files(&export_root);
-    let expected_path = export_root.join(PathBuf::from(expected_relative_file));
-    assert!(
-        expected_path.exists(),
-        "expected AssetStudio output missing: {}; exported: {:?}",
-        expected_path.display(),
-        exported_files
-    );
+    if let Some(expected_relative_file) = expected_relative_file {
+        let expected_path = export_root.join(PathBuf::from(expected_relative_file));
+        assert!(
+            expected_path.exists(),
+            "expected AssetStudio output missing: {}; exported: {:?}",
+            expected_path.display(),
+            exported_files
+        );
+    }
     assert!(
         summary.export_root.exists(),
         "export root missing: {}",

@@ -107,6 +107,25 @@ by revision. The service calls `unity_rs_core::studio::Studio` and
 the single `haruki-sekai-asset-updater` binary. There is no worker process,
 stdio protocol, dynamic AssetStudio library, or .NET toolchain to ship or configure.
 
+Set both `regions.<name>.filters.start_app` and `on_demand` to `[".*"]` to
+include every bundle in those categories. `asset_studio_types: [all]` makes the
+direct engine attempt every serialized object: known types use their specialized
+unity-rs reader, while other types fall back from TypeTree JSON to raw bytes.
+
+### Reusable AssetBundle cache
+
+Set `execution.asset_bundle_cache_dir` (for example
+`./Data/asset-bundle-cache`) to keep deobfuscated bundles below
+`<cache>/<region>/<bundle path>`. Normal update jobs consult this cache before
+the CDN, and cache misses are downloaded and persisted for later runs. Existing
+deobfuscated caches without hash sidecars remain readable when their size
+matches current asset info.
+
+With a cache directory configured, `mode: "prefetch_raw_bundles"` prefetches
+every StartApp/OnDemand bundle selected by the region filters into that cache;
+`export.raw_bundles` continues to control the optional second raw-bundle copy in
+the asset output tree.
+
 #### Build-time credential
 
 The engine is a build dependency, not a runtime one, so this affects whoever
@@ -166,7 +185,7 @@ Linux arm64 containers, using cached CN bundles where noted. It compares the
 current Rust unity-rs pipeline against the old Rust v5.2.2 AssetStudio CLI pipeline
 and the retired Go CLI pipeline.
 
-| Rule | Current Rust FFI | Rust v5.2.2 CLI | Old Go CLI |
+| Rule | Current Rust unity-rs | Rust v5.2.2 CLI | Old Go CLI |
 | --- | ---: | ---: | ---: |
 | `^character/member/` images | `71.5s` with local bundle HTTP, `1250/1250` | `272.9s`, `1250/1250` | `298.3s`, `1250/1250` |
 | `^music/short` audio MP3 | `57.4s`, `1547/1547` | `113.0s`, `1547/1547` | `120.3s`, `1547/1547` |

@@ -1431,6 +1431,18 @@ fn native_object_mode_defaults_read_kind_by_asset_type() {
         native_read_kind_for_asset(&asset, &BTreeMap::new()),
         "typetree_json"
     );
+
+    asset.asset_type = Some("Animator".to_string());
+    assert_eq!(
+        native_read_kind_for_asset(&asset, &BTreeMap::new()),
+        "typetree_json"
+    );
+
+    asset.asset_type = Some("ShaderVariantCollection".to_string());
+    assert_eq!(
+        native_read_kind_for_asset(&asset, &BTreeMap::new()),
+        "typetree_json"
+    );
 }
 
 #[test]

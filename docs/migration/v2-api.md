@@ -26,6 +26,7 @@ Request body:
   "region": "jp",
   "asset_version": "6.0.0",
   "asset_hash": "deadbeef",
+  "mode": "update",
   "dry_run": true
 }
 ```
@@ -50,6 +51,13 @@ Notes:
 - Every job plan now reports `codec_backend: "crates.io:cridecoder@0.1.1"`.
 - Dry-run jobs complete with a concrete execution plan.
 - Non-dry-run jobs now execute asset info fetch, bundle download, deobfuscation, and Rust post-processing.
+- `mode` defaults to `update`. `prefetch_raw_bundles` downloads selected bundles
+  without unity-rs export. When `execution.asset_bundle_cache_dir` is set, this
+  mode fills the reusable deobfuscated cache for every StartApp/OnDemand bundle
+  matched by the region filters; otherwise it retains the legacy
+  `export.raw_bundles`-only behavior.
+- Normal `update` jobs also read and populate the configured bundle cache, so a
+  subsequent full unity-rs validation does not redownload unchanged bundles.
 
 ## `GET /v2/jobs/{id}`
 

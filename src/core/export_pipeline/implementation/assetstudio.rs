@@ -649,9 +649,8 @@ pub(super) fn default_native_read_kind(asset_type: &str) -> &'static str {
         "audioclip" => "audio",
         "videoclip" | "movietexture" => "video",
         "font" => "font",
-        "shader" | "shadervariantcollection" => "shader",
+        "shader" => "shader",
         "mesh" => "obj",
-        "animator" => "fbx",
         _ => "typetree_json",
     }
 }
