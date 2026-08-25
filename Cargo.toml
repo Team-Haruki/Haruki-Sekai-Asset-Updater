@@ -6,7 +6,7 @@ description = "Rust service for Haruki Sekai Asset Updater"
 license = "MIT"
 
 [workspace]
-members = [".", "crates/assetstudio-ffi"]
+members = ["."]
 resolver = "2"
 
 [dependencies]
@@ -17,7 +17,7 @@ cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.6", features = ["derive"] }
 cridecoder = "0.3.4"
-haruki-assetstudio-ffi = { path = "crates/assetstudio-ffi" }
+assetstudio-core = { git = "https://github.com/Team-Haruki/unity-rs.git", rev = "81b02a5" }
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
 libc = "0.2"

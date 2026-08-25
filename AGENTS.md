@@ -6,11 +6,10 @@
 
 - 本仓库已经整理为 Rust 主项目。
 - 旧 Go 主程序已经移除，不要再按 Go 服务结构新增主程序代码。
-- `tools/ffi/` 可以保留面向第三方开发者的 Python / Go AssetStudioFFI 调用示例。
+- `tools/ffi/` 可以保留面向第三方开发者的 Python / Node.js AssetStudioFFI 兼容层调用示例。
 - 当前仓库为 Cargo workspace：
   - `Cargo.toml`
   - `src/`
-  - `crates/assetstudio-ffi/`
   - `tests/`
 - 对外 HTTP 接口目前使用 v2 路径：
   - `GET /healthz`
@@ -22,8 +21,6 @@
 
 - `src/`
   Rust 主服务代码。
-- `crates/assetstudio-ffi/`
-  对内联 `unity-rs` 引擎的 typed 封装，以及 `assetstudio_ffi_worker`。
 - `src/core/`
   核心业务逻辑，例如配置、下载、导出、上传、git 同步。
 - `src/service/`
@@ -36,7 +33,7 @@
 - `docs/migration/`
   当前保留 `v2-api.md`，用于记录 HTTP v2 API 说明。
 - `tools/ffi/`
-  AssetStudioFFI typed ABI 与 `assetstudio_ffi_worker` 的跨语言示例代码；这些示例不属于主服务运行路径。
+  unity-rs 兼容 AssetStudioFFI typed ABI 的跨语言示例代码；这些示例不属于主服务运行路径。
 
 ## 3. 配置文件约定
 
@@ -50,7 +47,7 @@
 当前常用环境变量包括：
 
 - `HARUKI_CONFIG_PATH`
-- `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`
+- `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE`
 - `HARUKI_MEDIA_BACKEND`
 - `HARUKI_SHARED_AES_KEY_HEX`
 - `HARUKI_SHARED_AES_IV_HEX`
@@ -69,7 +66,8 @@
 - 该仓库私有期间，构建需要凭据：本地设 `CARGO_NET_GIT_FETCH_WITH_CLI=true`，
   Docker 用 `--secret id=gh_token`，CI 读仓库 secret `UNITY_RS_TOKEN`。
   三条 workflow 在该 secret 未设置时会跳过认证步骤，仓库转公开后无需改动构建文件。
-- `assetstudio_ffi_worker` 与 `ffmpeg` 是仅存的外部运行依赖。
+- 主服务直接调用 `assetstudio-core` 的纯 Rust API；没有 worker pool、stdio IPC 或 AssetStudio 外部运行依赖。
+- FFmpeg 是仅存的外部运行依赖（使用 media FFI feature 时链接其系统库）。
 
 ## 5. 代码风格约定
 
@@ -97,8 +95,8 @@ cargo test --workspace
   检查 `src/core/config.rs` 相关测试是否覆盖。
 - 样本导出：
   确认 `tests/codec_smoke.rs` 通过。
-- AssetStudio worker：
-  确认 workspace 构建仍生成 `assetstudio_ffi_worker`。
+- AssetStudio 集成：
+  确认主服务直接链接 `assetstudio-core`，且 release 不再交付额外 worker。
 - FFI 示例：
   如果修改 `tools/ffi/`，至少运行对应 Python smoke / Go smoke 或 `go test ./...`。
 - HTTP/任务流：
@@ -111,7 +109,7 @@ cargo test --workspace
 ## 8. 对代理的特殊要求
 
 - 不要重新引入 Go 主程序、Go 服务结构或 Go 运行配置。
-- `tools/ffi/go*` 下的 Go 代码只作为 AssetStudioFFI 示例保留，不应成为主服务依赖。
+- `tools/ffi/` 下的代码只作为 AssetStudioFFI 兼容层示例保留，不应成为主服务依赖。
 - 不要把一次性调试输出、手工 smoke 配置、临时导出目录提交进仓库。
 - 不要在仓库里写入真实密钥、真实 token、真实云存储凭据。
 - 如果修改 CI，请确保：
@@ -119,8 +117,8 @@ cargo test --workspace
   - `cargo test --workspace`
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
-- Release artifact 与 Docker 镜像必须包含 `assetstudio_ffi_worker`，因为主服务生产路径通过 worker pool 调用引擎；
-  worker 自身已内联引擎，不再需要随包分发任何动态库。
+- Release artifact 与 Docker 镜像只需包含主服务二进制；`assetstudio-core` 已直接编译进主服务，
+  不得重新引入 worker pool、stdio IPC 或动态 AssetStudio 库。
 
 ## 9. 推荐工作流
 

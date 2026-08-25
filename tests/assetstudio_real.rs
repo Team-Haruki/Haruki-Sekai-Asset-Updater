@@ -22,7 +22,7 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 /// Opt-in: point `ASSET_STUDIO_BUNDLE_PATH` at a real bundle to run it. The
 /// engine is linked into the test binary, so no library path is involved.
 #[test]
-fn real_assetstudio_ffi_exports_expected_file_when_configured() {
+fn real_unity_rs_exports_expected_file_when_configured() {
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
         return;
     };
@@ -91,11 +91,8 @@ fn run_real_assetstudio_export(bundle_path: String) {
                 ffmpeg_path: "ffmpeg".to_string(),
                 ..haruki_sekai_asset_updater::core::config::MediaBackendConfig::default()
             },
-            asset_studio: haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig {
-                worker_path: required_env("ASSET_STUDIO_FFI_WORKER_PATH")
-                    .or_else(|| required_env("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH")),
-                ..haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default()
-            },
+            asset_studio:
+                haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default(),
             ..haruki_sekai_asset_updater::core::config::BackendsConfig::default()
         },
         storage: StorageConfig {
@@ -136,11 +133,13 @@ fn run_real_assetstudio_export(bundle_path: String) {
     } else {
         output_dir.path().join(&export_path)
     };
+    let exported_files = walk_files(&export_root);
     let expected_path = export_root.join(PathBuf::from(expected_relative_file));
     assert!(
         expected_path.exists(),
-        "expected AssetStudio output missing: {}",
-        expected_path.display()
+        "expected AssetStudio output missing: {}; exported: {:?}",
+        expected_path.display(),
+        exported_files
     );
     assert!(
         summary.export_root.exists(),
@@ -148,7 +147,7 @@ fn run_real_assetstudio_export(bundle_path: String) {
         summary.export_root.display()
     );
 
-    let exported_count = walk_files(&export_root).len();
+    let exported_count = exported_files.len();
     assert!(exported_count > 0, "no files exported by AssetStudio");
 }
 

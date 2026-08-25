@@ -175,15 +175,15 @@ pub enum ExecutionProgressUpdate {
         bundle: String,
         elapsed_ms: u128,
     },
-    BundleFfiExportPhases {
+    BundleUnityRsExportPhases {
         bundle: String,
         phase_ms: HashMap<String, u64>,
     },
-    BundleFfiSkippedObjectReads {
+    BundleUnityRsSkippedObjectReads {
         bundle: String,
         count: usize,
     },
-    BundleFfiObjectReadPlan {
+    BundleUnityRsObjectReadPlan {
         bundle: String,
         plan: NativeObjectReadPlanStats,
     },
@@ -978,7 +978,7 @@ impl AssetExecutionContext {
         )
         .await?;
 
-        let mut phase_ms = job.payload_export.ffi_export_phase_ms;
+        let mut phase_ms = job.payload_export.unity_rs_export_phase_ms;
         phase_ms.extend(image_phase_ms);
         phase_ms.extend(post_process_summary.post_process_phase_ms);
         phase_ms.insert(
@@ -999,27 +999,27 @@ impl AssetExecutionContext {
         if !phase_ms.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleFfiExportPhases {
+                ExecutionProgressUpdate::BundleUnityRsExportPhases {
                     bundle: job.bundle_path.clone(),
                     phase_ms,
                 },
             );
         }
-        if !job.payload_export.ffi_skipped_object_reads.is_empty() {
+        if !job.payload_export.unity_rs_skipped_object_reads.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleFfiSkippedObjectReads {
+                ExecutionProgressUpdate::BundleUnityRsSkippedObjectReads {
                     bundle: job.bundle_path.clone(),
-                    count: job.payload_export.ffi_skipped_object_reads.len(),
+                    count: job.payload_export.unity_rs_skipped_object_reads.len(),
                 },
             );
         }
-        if !job.payload_export.ffi_object_read_plan.is_empty() {
+        if !job.payload_export.unity_rs_object_read_plan.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleFfiObjectReadPlan {
+                ExecutionProgressUpdate::BundleUnityRsObjectReadPlan {
                     bundle: job.bundle_path.clone(),
-                    plan: job.payload_export.ffi_object_read_plan,
+                    plan: job.payload_export.unity_rs_object_read_plan,
                 },
             );
         }

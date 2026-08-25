@@ -17,7 +17,6 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   BINARY_NAME: haruki-sekai-asset-updater
-  WORKER_BINARY_NAME: assetstudio_ffi_worker
   UNITY_RS_TOKEN: ${{ secrets.UNITY_RS_TOKEN }}
 
 jobs:
@@ -39,7 +38,7 @@ jobs:
             archive: zip
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -73,15 +72,15 @@ jobs:
           import sys
 
           version = sys.argv[1]
-          for manifest in (Path("Cargo.toml"), Path("crates/assetstudio-ffi/Cargo.toml")):
-              text = manifest.read_text()
-              text = re.sub(r'(?m)^(version = )"[^"]+"', rf'\1"{version}"', text, count=1)
-              manifest.write_text(text)
+          manifest = Path("Cargo.toml")
+          text = manifest.read_text()
+          text = re.sub(r'(?m)^(version = )"[^"]+"', rf'\1"{version}"', text, count=1)
+          manifest.write_text(text)
           PY
           cargo generate-lockfile
 
       - name: Build release binaries
-        run: cargo build --release --locked -p haruki-sekai-asset-updater -p haruki-assetstudio-ffi
+        run: cargo build --release --locked -p haruki-sekai-asset-updater
 
       - name: Package archive (Unix)
         if: runner.os != 'Windows'
@@ -90,7 +89,6 @@ jobs:
           package_dir="${{ env.BINARY_NAME }}-${{ matrix.name }}"
           mkdir -p "dist/${package_dir}"
           cp "target/release/${{ env.BINARY_NAME }}" "dist/${package_dir}/${{ env.BINARY_NAME }}"
-          cp "target/release/${{ env.WORKER_BINARY_NAME }}" "dist/${package_dir}/${{ env.WORKER_BINARY_NAME }}"
           tar -czf "dist/${package_dir}.tar.gz" -C dist "${package_dir}"
 
       - name: Package archive (Windows)
@@ -101,7 +99,6 @@ jobs:
           $packageDir = "${{ env.BINARY_NAME }}-${{ matrix.name }}"
           New-Item -ItemType Directory -Force -Path "dist/$packageDir" | Out-Null
           Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "dist/$packageDir/${{ env.BINARY_NAME }}.exe"
-          Copy-Item "target/release/${{ env.WORKER_BINARY_NAME }}.exe" "dist/$packageDir/${{ env.WORKER_BINARY_NAME }}.exe"
           Compress-Archive -Path "dist/$packageDir" -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.zip" -Force
 
       - name: Upload packaged artifact

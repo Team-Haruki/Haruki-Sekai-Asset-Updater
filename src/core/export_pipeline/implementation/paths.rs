@@ -5,7 +5,7 @@ pub(super) fn native_object_output_path(
     export_path: &str,
     strip_path_prefix: &str,
     by_category: bool,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     payload_kind: Option<&str>,
     suggested_extension: Option<&str>,
 ) -> PathBuf {
@@ -33,7 +33,7 @@ pub(super) fn native_object_output_path(
 
 pub(super) fn semantic_assetstudio_object_output_path(
     default_path: PathBuf,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
 ) -> PathBuf {
     let normalized = asset
         .asset_type
@@ -95,7 +95,7 @@ pub(super) fn semantic_assetstudio_object_output_path(
 
 pub(super) fn mono_behaviour_can_use_container_path(
     default_path: &Path,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
 ) -> bool {
     let Some(container_stem) = default_path
         .file_stem()
@@ -130,7 +130,7 @@ pub(super) fn assetbundle_typetree_output_path(
     export_path: &str,
     strip_path_prefix: &str,
     by_category: bool,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     payload_kind: Option<&str>,
     payload: &[u8],
 ) -> Result<Option<PathBuf>, ExportPipelineError> {
@@ -143,8 +143,8 @@ pub(super) fn assetbundle_typetree_output_path(
         return Ok(None);
     }
 
-    let data: sonic_rs::Value =
-        sonic_rs::from_slice(payload).map_err(|source| ExportPipelineError::FfiParse { source })?;
+    let data: sonic_rs::Value = sonic_rs::from_slice(payload)
+        .map_err(|source| ExportPipelineError::JsonParse { source })?;
     let bundle_name = data
         .get("m_AssetBundleName")
         .and_then(|value| value.as_str())
@@ -225,7 +225,7 @@ pub(super) fn assetbundle_container_category(relative: &Path) -> Option<&'static
     }
 }
 
-pub(super) fn is_member_cutout_container(asset: &AssetStudioFfiAssetInfo) -> bool {
+pub(super) fn is_member_cutout_container(asset: &UnityAssetInfo) -> bool {
     asset.container.as_deref().is_some_and(|container| {
         container
             .replace('\\', "/")
@@ -235,7 +235,7 @@ pub(super) fn is_member_cutout_container(asset: &AssetStudioFfiAssetInfo) -> boo
 
 pub(super) fn member_cutout_sprite_output_path(
     default_path: &Path,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
 ) -> PathBuf {
     let Some(stem) = default_path
         .file_stem()
@@ -258,7 +258,7 @@ pub(super) fn member_cutout_sprite_output_path(
 
 pub(super) fn named_flat_subasset_output_path(
     default_path: &Path,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
 ) -> PathBuf {
     let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
     let file_stem = assetstudio_semantic_file_stem(asset);
@@ -271,7 +271,7 @@ pub(super) fn named_flat_subasset_output_path(
 
 pub(super) fn named_subasset_output_path(
     default_path: &Path,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     semantic_dir: &str,
 ) -> PathBuf {
     let parent = default_path.parent().unwrap_or_else(|| Path::new(""));
@@ -293,7 +293,7 @@ pub(super) fn named_subasset_output_path(
     }
 }
 
-pub(super) fn assetstudio_semantic_file_stem(asset: &AssetStudioFfiAssetInfo) -> String {
+pub(super) fn assetstudio_semantic_file_stem(asset: &UnityAssetInfo) -> String {
     asset
         .name
         .as_deref()
@@ -317,7 +317,7 @@ pub(super) fn assetstudio_semantic_file_stem(asset: &AssetStudioFfiAssetInfo) ->
 }
 
 pub(super) fn native_object_output_extension(
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     payload_kind: Option<&str>,
     suggested_extension: Option<&str>,
 ) -> &'static str {
@@ -425,7 +425,7 @@ pub(super) fn shorten_assetstudio_public_file_stem(value: &str) -> String {
     shortened
 }
 
-pub(super) fn default_extension_for_asset(asset: &AssetStudioFfiAssetInfo) -> &'static str {
+pub(super) fn default_extension_for_asset(asset: &UnityAssetInfo) -> &'static str {
     let normalized = asset
         .asset_type
         .as_deref()

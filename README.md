@@ -17,13 +17,12 @@
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
 - Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
 - Uses the linked-in [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs)
-  engine through an isolated worker pool. FFmpeg/rsmpeg FFI handles media;
+  `assetstudio-core` library directly. FFmpeg/rsmpeg FFI handles media;
   FFmpeg CLI remains available as a fallback where FFI is unavailable.
 
 ## Layout
 
 - `src/`: application code
-- `crates/assetstudio-ffi/`: AssetStudio FFI ABI and worker binary
 - `tests/`: integration tests
 - `docs/migration/v2-api.md`: current HTTP API notes
 
@@ -34,7 +33,6 @@
   `haruki-asset-configs.example.yaml` as the current config template.
 - The loader resolves this syntax for:
   `server.auth.bearer_token`,
-  `backends.asset_studio.worker_path`,
   `storage.providers[].access_key`,
   `storage.providers[].secret_key`,
   `git_sync.chart_hashes.password`,
@@ -42,11 +40,8 @@
   `regions.*.crypto.aes_iv_hex`.
 - Tracked config templates expect values such as:
   `HARUKI_MEDIA_BACKEND`,
-  `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`,
-  `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
-  `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`,
-  `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE`,
-  `HARUKI_ASSET_STUDIO_FFI_IMAGE_FORMAT`,
+  `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE`,
+  `HARUKI_ASSET_STUDIO_IMAGE_FORMAT`,
   `HARUKI_ASSET_HTTP_VERSION`,
   `HARUKI_CPU_BUDGET_AUTO`,
   `HARUKI_CPU_BUDGET_RATIO`,
@@ -69,7 +64,6 @@ cp haruki-asset-configs.example.yaml haruki-asset-configs.yaml
 ```bash
 cp .env.example .env
 export HARUKI_MEDIA_BACKEND=ffi
-export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=/path/to/assetstudio_ffi_worker
 export HARUKI_SHARED_AES_KEY_HEX=...
 export HARUKI_SHARED_AES_IV_HEX=...
 export HARUKI_EN_AES_KEY_HEX=...
@@ -108,20 +102,10 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
 
 The asset engine is [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs),
 a Rust implementation of AssetStudio. It is an ordinary Cargo dependency pinned
-by revision, so it is compiled into `haruki-sekai-asset-updater` and
-`assetstudio_ffi_worker` at build time. There is no dynamic library to ship,
-locate or configure, and no .NET toolchain in any build.
-
-Release archives therefore contain just the two binaries. `assetstudio_ffi_worker`
-still exists and is still how production runs exports -- it isolates a crash in
-one bundle from the service -- but it now carries the engine itself:
-
-```bash
-export HARUKI_ASSET_STUDIO_FFI_WORKER_PATH=./assetstudio_ffi_worker
-```
-
-Windows releases use `./assetstudio_ffi_worker.exe`. When the worker sits next
-to the service binary the path is inferred and the variable is unnecessary.
+by revision. The service calls `assetstudio_core::studio::Studio` and
+`StudioObject` directly from blocking Rust tasks, so the engine is compiled into
+the single `haruki-sekai-asset-updater` binary. There is no worker process,
+stdio protocol, dynamic AssetStudio library, or .NET toolchain to ship or configure.
 
 #### Build-time credential
 
@@ -147,21 +131,15 @@ change to the build files.
 
 ## Runtime Tuning
 
-- AssetStudio exports use the `assetstudio_ffi_worker` pool. Set
-  `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` when the worker cannot be inferred from
-  the service binary directory.
-  `HARUKI_ASSET_STUDIO_FFI_PROCESS_CONCURRENCY`,
-  `HARUKI_ASSET_STUDIO_FFI_WORKER_MAX_CALLS`, and
-  `HARUKI_ASSET_STUDIO_FFI_READ_BATCH_SIZE` tune worker pool throughput.
-- `backends.asset_studio.mode` is always `worker_pool` for production crash
-  isolation. The former in-process `direct` mode was removed; configuring it
-  fails config loading with a clear error.
+- AssetStudio exports directly call the linked `assetstudio-core` library.
+  `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE` controls object-read chunking; the
+  existing CPU budget controls concurrent blocking export work.
 - `resources.memory.max_in_flight_bundle_bytes` is a soft memory guard. The default
   `0` disables it. On small Linux hosts, set it to the amount of bundle work the
   process may keep in memory, for example
   `HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES=4294967296`.
 - `resources.cpu.budget_auto` and `resources.cpu.budget_ratio` size the
-  CPU-heavy worker pools. The default uses the available CPU budget for
+  CPU-heavy tasks. The default uses the available CPU budget for
   full-throughput export runs; lower it on shared or memory-constrained hosts.
 - `resources.cpu.throttle.enabled` is optional and defaults to `false`. Enable
   it only when the process should actively wait based on sampled process-tree
@@ -178,14 +156,14 @@ change to the build files.
   because x264 keeps per-encoder frame queues; audio encoding can usually run
   much wider.
 - Normal progress logging emits bundle-level start/completion/failure lines.
-  Use debug logging for detailed download, native FFI, export, and post-process
+  Use debug logging for detailed download, unity-rs, export, and post-process
   phase traces.
 
 ## Benchmark Snapshot
 
 The following local comparison was run on an Apple Mac mini M4 with OrbStack
 Linux arm64 containers, using cached CN bundles where noted. It compares the
-current Rust FFI pipeline against the old Rust v5.2.2 AssetStudio CLI pipeline
+current Rust unity-rs pipeline against the old Rust v5.2.2 AssetStudio CLI pipeline
 and the retired Go CLI pipeline.
 
 | Rule | Current Rust FFI | Rust v5.2.2 CLI | Old Go CLI |

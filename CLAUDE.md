@@ -44,7 +44,7 @@ docker compose up --build
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
   - `asset_execution.rs` -- runs the plan (download, decrypt, export, upload)
-  - `export_pipeline` module -- AssetStudio FFI export, PNG/WebP encoding, media conversion
+  - `export_pipeline` module -- direct unity-rs export, PNG/WebP encoding, media conversion
   - `codec.rs` -- wraps the `cridecoder` crate for USM/ACB decoding
   - `media.rs` -- ffmpeg-based conversions (USM/M2V to MP4, WAV to FLAC/MP3)
   - `storage.rs` -- S3-compatible upload via OpenDAL
@@ -58,9 +58,6 @@ docker compose up --build
   - `http` -- Axum router, handlers, `AppState`
   - `jobs.rs` -- async job manager with progress tracking and cancellation
   - `logging.rs` -- tracing-subscriber setup with file and JSON output
-
-- `crates/assetstudio-ffi/` -- typed wrapper over the linked-in `unity-rs` engine,
-  plus the `assetstudio_ffi_worker` binary
 
 **Request flow:** `POST /v2/assets/update` -> handler creates a job -> `JobManager` spawns a tokio task -> `build_execution_plan` -> `AssetExecutionContext` runs download/decrypt/export/upload pipeline -> job status queryable via `GET /v2/jobs/{id}`.
 
@@ -92,7 +89,7 @@ docker compose up --build
 ## Environment Variables
 
 - `HARUKI_CONFIG_PATH` -- override config file path
-- `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH` -- optional path to `assetstudio_ffi_worker`
+- `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE` -- direct unity-rs object-read chunk size
 - `HARUKI_MEDIA_BACKEND` -- media backend selection (`ffi`, `auto`, or `cli`)
 - `HARUKI_SHARED_AES_KEY_HEX` / `HARUKI_SHARED_AES_IV_HEX` -- shared AES keys (JP/TW/KR/CN)
 - `HARUKI_EN_AES_KEY_HEX` / `HARUKI_EN_AES_IV_HEX` -- EN-specific AES keys

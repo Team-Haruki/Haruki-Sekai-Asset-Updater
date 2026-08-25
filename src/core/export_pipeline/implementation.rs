@@ -13,20 +13,27 @@ use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageEncoder, ImageReader};
 use serde::Serialize;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
-use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, warn};
 
-use haruki_assetstudio_ffi::{
-    configured_worker_path, AssetStudioFfiAssetInfo, AssetStudioFfiContextCloseRequest,
-    AssetStudioFfiContextListObjectsRequest, AssetStudioFfiContextListObjectsResponse,
-    AssetStudioFfiContextOpenRequest, AssetStudioFfiContextOpenResponse,
-    AssetStudioFfiContextReadObjectItemRequest, AssetStudioFfiContextReadObjectsRequest,
-    AssetStudioFfiError, AssetStudioFfiObjectReadBatchResponse, AssetStudioFfiObjectReadOutput,
-    AssetStudioFfiRequest, AssetStudioWorkerPool, NativeBatchPhaseStats, WorkerLease,
-    WorkerLeaseStats, WorkerOutput,
+use assetstudio_core::loader::AssetLoadOptions;
+use assetstudio_core::mesh::MeshReadLimits;
+use assetstudio_core::monobehaviour::{
+    read_mono_behaviour_json, MonoBehaviourReadLimits, MONO_BEHAVIOUR_CLASS_ID,
 };
-#[cfg(test)]
-use haruki_assetstudio_ffi::{AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse};
+use assetstudio_core::shader::SHADER_CLASS_ID;
+use assetstudio_core::simple_assets::{
+    SimpleAssetReadLimits, AUDIO_CLIP_CLASS_ID, FONT_CLASS_ID, MOVIE_TEXTURE_CLASS_ID,
+    VIDEO_CLIP_CLASS_ID,
+};
+use assetstudio_core::sprite::{SpriteReadLimits, SPRITE_CLASS_ID};
+use assetstudio_core::studio::{Studio, StudioObject};
+use assetstudio_core::texture::{
+    write_rgba_ir, write_rgba_ir_display_order, TextureReadLimits, TEXTURE_2D_CLASS_ID,
+};
+use assetstudio_core::texture_array::{
+    read_texture2d_array, write_texture2d_array_rgba_bundle, TextureArrayReadLimits,
+    TEXTURE_2D_ARRAY_CLASS_ID,
+};
 
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
@@ -127,10 +134,10 @@ pub async fn extract_unity_asset_bundle(
         payload_export.native_acb_sources,
     )
     .await?;
-    summary.ffi_export_phase_ms = payload_export.ffi_export_phase_ms;
+    summary.unity_rs_export_phase_ms = payload_export.unity_rs_export_phase_ms;
     summary.post_process_phase_ms.extend(image_phase_ms);
-    summary.ffi_skipped_object_reads = payload_export.ffi_skipped_object_reads;
-    summary.ffi_object_read_plan = payload_export.ffi_object_read_plan;
+    summary.unity_rs_skipped_object_reads = payload_export.unity_rs_skipped_object_reads;
+    summary.unity_rs_object_read_plan = payload_export.unity_rs_object_read_plan;
     Ok(summary)
 }
 
@@ -183,7 +190,7 @@ pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
     };
     let mut post_process_export_path = actual_export_path.clone();
 
-    let native_object_summary = run_assetstudio_ffi_object_export(
+    let native_object_summary = run_unity_rs_object_export(
         app_config,
         region,
         asset_bundle_file,
@@ -204,9 +211,9 @@ pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
         native_written_files: native_object_summary.written_files,
         native_acb_sources: native_object_summary.acb_sources,
         pending_image_writes: native_object_summary.pending_image_writes,
-        ffi_export_phase_ms: native_object_summary.phase_ms,
-        ffi_skipped_object_reads: native_object_summary.skipped_object_reads,
-        ffi_object_read_plan: native_object_summary.object_read_plan,
+        unity_rs_export_phase_ms: native_object_summary.phase_ms,
+        unity_rs_skipped_object_reads: native_object_summary.skipped_object_reads,
+        unity_rs_object_read_plan: native_object_summary.object_read_plan,
     })
 }
 
@@ -216,143 +223,9 @@ pub(super) fn merge_phase_ms(target: &mut HashMap<String, u64>, source: &HashMap
     }
 }
 
-pub(super) fn merge_prefixed_phase_ms(
-    target: &mut HashMap<String, u64>,
-    prefix: &str,
-    source: &HashMap<String, u64>,
-) {
-    for (key, value) in source {
-        *target.entry(format!("{prefix}.{key}")).or_default() += *value;
-    }
-}
-
-pub(super) fn merge_prefixed_usize_counts(
-    target: &mut HashMap<String, u64>,
-    prefix: &str,
-    source: &HashMap<String, usize>,
-) {
-    for (key, value) in source {
-        *target.entry(format!("{prefix}.{key}")).or_default() += *value as u64;
-    }
-}
-
-pub(super) fn merge_prefixed_u64_counts(
-    target: &mut HashMap<String, u64>,
-    prefix: &str,
-    source: &HashMap<String, u64>,
-) {
-    for (key, value) in source {
-        *target.entry(format!("{prefix}.{key}")).or_default() += *value;
-    }
-}
-
 pub(super) fn record_max_phase_ms(target: &mut HashMap<String, u64>, phase: &str, value: u64) {
     let current = target.entry(phase.to_string()).or_default();
     *current = (*current).max(value);
-}
-
-pub(super) fn merge_optional_max_phase_ms(
-    target: &mut HashMap<String, u64>,
-    phase: &str,
-    value: Option<u64>,
-) {
-    if let Some(value) = value {
-        record_max_phase_ms(target, phase, value);
-    }
-}
-
-pub(super) fn parse_assetstudio_ffi_context_open_worker_output(
-    output: WorkerOutput,
-) -> Result<AssetStudioFfiContextOpenResponse, ExportPipelineError> {
-    let response = output.response.into_context_open()?;
-    for warning in &response.warnings {
-        warn!(warning = %warning, "assetstudio ffi context open warning");
-    }
-    if output.status_success && response.success {
-        debug!(
-            context_id = response.context_id,
-            assets = response.assets.len(),
-            duration_ms = response.duration_ms,
-            phase_ms = ?response.phase_ms,
-            "assetstudio ffi context opened"
-        );
-        Ok(response)
-    } else {
-        Err(ExportPipelineError::AssetStudioFfi {
-            message: response.error.clone().unwrap_or_else(|| {
-                format!(
-                    "native context open failed with status {}: {}",
-                    output.status,
-                    output.stderr.trim()
-                )
-            }),
-        })
-    }
-}
-
-pub(super) fn parse_assetstudio_ffi_context_list_objects_worker_output(
-    output: WorkerOutput,
-) -> Result<AssetStudioFfiContextListObjectsResponse, ExportPipelineError> {
-    let response = output.response.into_context_list_objects()?;
-    for warning in &response.warnings {
-        warn!(warning = %warning, "assetstudio ffi context list objects warning");
-    }
-    if output.status_success && response.success {
-        debug!(
-            context_id = response.context_id,
-            offset = response.offset,
-            limit = response.limit,
-            returned = response.assets.len(),
-            total = response.total_count,
-            duration_ms = response.duration_ms,
-            "assetstudio ffi context listed objects"
-        );
-        Ok(response)
-    } else {
-        Err(ExportPipelineError::AssetStudioFfi {
-            message: response.error.clone().unwrap_or_else(|| {
-                format!(
-                    "native context_list_objects failed with status {}: {}",
-                    output.status,
-                    output.stderr.trim()
-                )
-            }),
-        })
-    }
-}
-
-pub(super) fn parse_assetstudio_ffi_context_close_worker_output(
-    output: WorkerOutput,
-) -> Result<(), ExportPipelineError> {
-    let response = output.response.into_context_close()?;
-    for warning in &response.warnings {
-        warn!(warning = %warning, "assetstudio ffi context close warning");
-    }
-    if output.status_success && response.success {
-        Ok(())
-    } else {
-        Err(ExportPipelineError::AssetStudioFfi {
-            message: response.error.clone().unwrap_or_else(|| {
-                format!(
-                    "native context close failed with status {}: {}",
-                    output.status,
-                    output.stderr.trim()
-                )
-            }),
-        })
-    }
-}
-
-pub(super) fn is_native_worker_signal_failure(error: &ExportPipelineError) -> bool {
-    matches!(
-        error,
-        ExportPipelineError::CommandFailed {
-            program,
-            status,
-            ..
-        } if program.contains("assetstudio_ffi_worker")
-            && (status.contains("signal:") || status.contains("SIGSEGV"))
-    )
 }
 
 #[cfg(test)]

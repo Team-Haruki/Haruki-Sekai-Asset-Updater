@@ -44,11 +44,7 @@ backends:
     webp_lossless: true
     jpeg_quality: 95
   asset_studio:
-    mode: "worker_pool" # the only supported mode; workers isolate engine crashes from the service
-    worker_path: ""
-    process_concurrency: 0 # 0 = auto: CPU budget, or CPU-count oversubscription when CPU throttle is enabled
-    worker_max_calls: 256 # 0 disables recycling
-    read_batch_size: 64 # context_read_objects chunk size
+    read_batch_size: 64 # direct unity-rs object-read chunk size
     image_format: "raw_rgba" # unity-rs image reads only support raw_rgba
     read_kinds: # optional per AssetStudio type selector
       Texture2D: image

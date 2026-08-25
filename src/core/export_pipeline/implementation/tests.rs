@@ -24,50 +24,21 @@ use super::{
     assetstudio_object_mode_supported_type, assetstudio_type_selector_matches,
     convert_native_surrogate_images_to_png, extract_unity_asset_bundle,
     flush_pending_native_image_writes, get_export_group, handle_png_conversion,
-    native_object_output_extension, native_object_output_path, native_object_read_batch_request,
-    native_read_batch_size_for_assets, native_read_kind_for_asset,
-    native_skipped_unsupported_asset, parse_assetstudio_ffi_context_list_objects_worker_output,
-    parse_assetstudio_ffi_object_read_batch_worker_output_recoverable, parse_payload_bundle,
+    native_object_output_extension, native_object_output_path, native_read_batch_size_for_assets,
+    native_read_kind_for_asset, native_skipped_unsupported_asset, parse_payload_bundle,
     parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
     prepare_usm_processing_inputs, process_usm_file, process_usm_input_with_metrics,
-    record_native_object_read_batch_diagnostics, run_path_tasks, safe_payload_bundle_path,
-    scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
-    sort_native_object_reads_for_failure_isolation, text_asset_public_bytes_target,
-    usm_segment_key, write_assetstudio_export_manifest_entry, write_assetstudio_playable_payloads,
-    write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
-    write_native_object_payload, write_native_payload_file, AssetStudioFfiAssetInfo,
-    AssetStudioFfiObjectReadOutput, AssetStudioFfiObjectReadResponse, AssetStudioFfiResponse,
-    MediaEncodeKind, NativeObjectExportOptions, NativeObjectExportSummary,
-    NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
-    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
-    UsmProcessingInput, WorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
-    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT, UNITY_ENGINE_FAST_IMAGE_FORMAT,
-    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+    run_path_tasks, safe_payload_bundle_path, scan_all_files, select_native_object_readable_assets,
+    should_keep_music_long_hca_track, sort_native_object_reads_for_failure_isolation,
+    text_asset_public_bytes_target, usm_segment_key, write_assetstudio_export_manifest_entry,
+    write_assetstudio_playable_payloads, write_native_image_payload_final_files,
+    write_native_image_payload_final_files_with_backend, write_native_object_payload,
+    write_native_payload_file, MediaEncodeKind, NativeObjectExportOptions,
+    NativeObjectExportSummary, NativeSemanticExportPathRegistry, NativeSemanticExportPathState,
+    NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse,
+    UsmProcessingInput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
+    UNITY_ENGINE_FAST_IMAGE_FORMAT, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
 };
-
-#[test]
-fn native_object_read_batch_uses_stable_object_indexes() {
-    let asset = AssetStudioFfiAssetInfo {
-        index: 37,
-        name: Some("texture".to_string()),
-        container: Some("assets/texture.png".to_string()),
-        asset_type: Some("Texture2D".to_string()),
-        type_id: 28,
-        path_id: 9,
-        unique_id: None,
-        size: 128,
-        source_file: Some("sharedassets0.assets".to_string()),
-    };
-    let request = native_object_read_batch_request(
-        5,
-        &[&asset],
-        &BTreeMap::new(),
-        UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
-    );
-
-    assert_eq!(request.objects[0].index, Some(37));
-    assert_eq!(request.objects[0].path_id, 9);
-}
 
 fn sample_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("HARUKI_CODEC_SAMPLE_DIR")
@@ -426,10 +397,10 @@ fn post_process_sample_files_without_transcoding_if_present() {
 }
 
 /// The engine is linked into this binary, so no configuration names a library
-/// to load. A bundle export therefore reaches the engine on a default config
-/// and fails on the bundle's own contents, not on a missing path.
+/// or worker to load. Even an input with no Unity objects reaches the direct
+/// engine and completes without an external-runtime error.
 #[test]
-fn native_backend_needs_no_configured_library_path() {
+fn direct_backend_needs_no_configured_library_or_worker_path() {
     let dir = tempdir().unwrap();
     let fake_bundle = dir.path().join("bundle.bin");
     fs::write(&fake_bundle, b"bundle").unwrap();
@@ -437,7 +408,7 @@ fn native_backend_needs_no_configured_library_path() {
     let (config, region) = processing_config();
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let err = runtime
+    let summary = runtime
         .block_on(extract_unity_asset_bundle(
             &config,
             "jp",
@@ -447,13 +418,9 @@ fn native_backend_needs_no_configured_library_path() {
             &output_dir,
             "StartApp",
         ))
-        .unwrap_err();
+        .unwrap();
 
-    let message = err.to_string();
-    assert!(
-        !message.contains("library_path"),
-        "no configured library should be required, got: {message}"
-    );
+    assert!(summary.unity_rs_object_read_plan.is_empty());
 }
 
 #[test]
@@ -560,7 +527,7 @@ fn unity_engine_default_image_format_preserves_alpha() {
 
 #[test]
 fn native_image_format_always_uses_raw_rgba() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("normal".to_string()),
         container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
@@ -585,7 +552,7 @@ fn native_image_format_always_uses_raw_rgba() {
 
 #[test]
 fn native_object_read_subchunks_split_non_bmp_images() {
-    let texture = AssetStudioFfiAssetInfo {
+    let texture = UnityAssetInfo {
         index: 0,
         name: Some("normal".to_string()),
         container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
@@ -596,7 +563,7 @@ fn native_object_read_subchunks_split_non_bmp_images() {
         size: 42,
         source_file: None,
     };
-    let sprite = AssetStudioFfiAssetInfo {
+    let sprite = UnityAssetInfo {
         index: 1,
         name: Some("full".to_string()),
         container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
@@ -607,7 +574,7 @@ fn native_object_read_subchunks_split_non_bmp_images() {
         size: 42,
         source_file: None,
     };
-    let mono = AssetStudioFfiAssetInfo {
+    let mono = UnityAssetInfo {
         index: 2,
         name: Some("data".to_string()),
         container: Some("assets/sekai/assetbundle/resources/startapp/foo/data.json".into()),
@@ -635,7 +602,7 @@ fn native_object_read_subchunks_split_non_bmp_images() {
 
 #[test]
 fn native_image_format_ignores_container_extension() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("banner".to_string()),
         container: Some("assets/sekai/assetbundle/resources/startapp/foo/banner.jpg.bytes".into()),
@@ -842,7 +809,7 @@ fn native_image_object_payload_is_flushed_after_export_queue() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("normal".to_string()),
         container: Some(
@@ -861,8 +828,8 @@ fn native_image_object_payload_is_flushed_after_export_queue() {
         2,
         &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 7, 8, 9, 255],
     );
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("image_raw_rgba".to_string()),
@@ -907,7 +874,7 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("se_0126_01".to_string()),
         container: Some(
@@ -920,8 +887,8 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
         size: 4,
         source_file: None,
     };
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("text_bytes".to_string()),
@@ -966,7 +933,7 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("append".to_string()),
         container: Some(
@@ -980,8 +947,8 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
         size: 4,
         source_file: None,
     };
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("text_bytes".to_string()),
@@ -1034,7 +1001,7 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("opening-001.usm".to_string()),
         container: Some(
@@ -1048,8 +1015,8 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
         size: 4,
         source_file: None,
     };
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("text_bytes".to_string()),
@@ -1091,7 +1058,7 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("actionset/group0".to_string()),
         container: None,
@@ -1112,8 +1079,8 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
                 }
             ]
         }"#;
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("typetree_json".to_string()),
@@ -1157,7 +1124,7 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("crystal_shop/thumbnail/mysekai_mission_pass5".to_string()),
         container: None,
@@ -1182,8 +1149,8 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
                 }
             ]
         }"#;
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("typetree_json".to_string()),
@@ -1228,7 +1195,7 @@ fn monoscript_typetree_routes_to_container_subasset_path() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("ActionSetData".to_string()),
         container: Some(
@@ -1243,8 +1210,8 @@ fn monoscript_typetree_routes_to_container_subasset_path() {
         source_file: None,
     };
     let payload = br#"{"m_Name":"ActionSetData"}"#;
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("typetree_json".to_string()),
@@ -1414,7 +1381,7 @@ fn native_object_mode_selectors_match_short_aliases_and_class_names() {
 
 #[test]
 fn native_object_mode_uses_configured_read_kind_with_specific_precedence() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("controller".to_string()),
         container: Some("assets/foo.controller".to_string()),
@@ -1437,7 +1404,7 @@ fn native_object_mode_uses_configured_read_kind_with_specific_precedence() {
 
 #[test]
 fn native_object_mode_defaults_read_kind_by_asset_type() {
-    let mut asset = AssetStudioFfiAssetInfo {
+    let mut asset = UnityAssetInfo {
         index: 0,
         name: Some("asset".to_string()),
         container: Some("assets/foo".to_string()),
@@ -1468,7 +1435,7 @@ fn native_object_mode_defaults_read_kind_by_asset_type() {
 
 #[test]
 fn native_object_output_extension_prefers_payload_kind() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("asset".to_string()),
         container: Some("assets/sekai/assetbundle/resources/startapp/foo/bar.bytes".to_string()),
@@ -1496,7 +1463,7 @@ fn native_object_output_extension_prefers_payload_kind() {
 
 #[test]
 fn text_asset_public_bytes_target_strips_bytes_suffixes() {
-    let mut asset = AssetStudioFfiAssetInfo {
+    let mut asset = UnityAssetInfo {
         index: 0,
         name: Some("asset".to_string()),
         container: Some("assets/foo".to_string()),
@@ -1544,7 +1511,7 @@ fn text_asset_public_bytes_target_strips_bytes_suffixes() {
 
 #[test]
 fn mono_behaviour_primary_asset_uses_container_json_path() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
             index: 0,
             name: Some("005005_minori02_kari".to_string()),
             container: Some(
@@ -1577,7 +1544,7 @@ fn mono_behaviour_primary_asset_uses_container_json_path() {
 
 #[test]
 fn mono_behaviour_bundledata_uses_container_json_path() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
             index: 0,
             name: Some("SoundBundleBuildData".to_string()),
             container: Some(
@@ -1610,7 +1577,7 @@ fn mono_behaviour_bundledata_uses_container_json_path() {
 
 #[test]
 fn live2d_build_motion_data_uses_motion_container_json_path() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
             index: 0,
             name: Some("BuildMotionData".to_string()),
             container: Some(
@@ -1645,7 +1612,7 @@ fn live2d_build_motion_data_uses_motion_container_json_path() {
 
 #[test]
 fn mono_script_stays_in_container_subasset_path() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
             index: 0,
             name: Some("ScenarioSceneData".to_string()),
             container: Some(
@@ -1680,7 +1647,7 @@ fn mono_script_stays_in_container_subasset_path() {
 
 #[test]
 fn member_cutout_sprite_objects_use_resolved_cutout_path() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
             index: 0,
             name: Some("deck".to_string()),
             container: Some(
@@ -1715,7 +1682,7 @@ fn member_cutout_sprite_objects_use_resolved_cutout_path() {
 
 #[test]
 fn member_cutout_texture_objects_use_resolved_cutout_path() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
             index: 0,
             name: Some("normal".to_string()),
             container: Some(
@@ -1748,7 +1715,7 @@ fn member_cutout_texture_objects_use_resolved_cutout_path() {
 
 #[test]
 fn by_category_object_paths_follow_container_category_not_info_category() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("normal".to_string()),
         container: Some(
@@ -1782,7 +1749,7 @@ fn by_category_object_paths_follow_container_category_not_info_category() {
 fn manifest_records_native_surrogate_image_public_png_path() {
     let dir = tempdir().unwrap();
     let target = dir.path().join("startapp/foo/normal.bmp");
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("normal".to_string()),
         container: Some("assets/sekai/assetbundle/resources/startapp/foo/normal.png".into()),
@@ -1793,8 +1760,8 @@ fn manifest_records_native_surrogate_image_public_png_path() {
         size: 42,
         source_file: None,
     };
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("image_bmp".to_string()),
@@ -1831,7 +1798,7 @@ fn manifest_records_animator_bundle_public_fbx_path() {
     let target = dir
         .path()
         .join("ondemand/foo/foo.assets/animator/model.prefab");
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("model".to_string()),
         container: Some("assets/sekai/assetbundle/resources/ondemand/foo/model.prefab".into()),
@@ -1850,8 +1817,8 @@ fn manifest_records_animator_bundle_public_fbx_path() {
     payload.extend_from_slice(&3u64.to_le_bytes());
     payload.extend_from_slice(entry_name.as_bytes());
     payload.extend_from_slice(b"fbx");
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("animator_bundle_fbx".to_string()),
@@ -1884,7 +1851,7 @@ fn manifest_records_animator_bundle_public_fbx_path() {
 
 #[test]
 fn non_character_sprite_objects_route_under_container_sprite_directory() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("deck".to_string()),
         container: Some(
@@ -1916,7 +1883,7 @@ fn non_character_sprite_objects_route_under_container_sprite_directory() {
 
 #[test]
 fn mesh_objects_route_under_container_mesh_directory() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("body".to_string()),
         container: Some(
@@ -1949,7 +1916,7 @@ fn mesh_objects_route_under_container_mesh_directory() {
 
 #[test]
 fn font_objects_use_named_file_in_container_parent_directory() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
             index: 0,
             name: Some("FOT-RodinNTLGPro-DB".to_string()),
             container: Some(
@@ -1982,7 +1949,7 @@ fn font_objects_use_named_file_in_container_parent_directory() {
 
 #[test]
 fn semantic_export_path_state_disambiguates_without_path_id() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("shared".to_string()),
         container: Some("assets/shared.prefab".to_string()),
@@ -2022,7 +1989,7 @@ fn semantic_export_path_state_reuses_preexisting_base_path() {
     let dir = tempdir().unwrap();
     let base = dir.path().join("shared.json");
     fs::write(&base, b"old payload").unwrap();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("shared".to_string()),
         container: Some("assets/shared.prefab".to_string()),
@@ -2069,7 +2036,7 @@ fn legacy_duplicate_cleanup_preserves_current_job_claims() {
     fs::write(&duplicate, b"same").unwrap();
     let registry = NativeSemanticExportPathRegistry::default();
     let mut state = NativeSemanticExportPathState::with_registry(registry.clone());
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("shared".to_string()),
         container: Some("assets/shared.prefab".to_string()),
@@ -2115,7 +2082,7 @@ fn semantic_export_path_registry_dedupes_across_bundle_states() {
     let registry = NativeSemanticExportPathRegistry::default();
     let mut first_state = NativeSemanticExportPathState::with_registry(registry.clone());
     let mut second_state = NativeSemanticExportPathState::with_registry(registry);
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("hard".to_string()),
         container: Some("assets/music/score/hard.txt".to_string()),
@@ -2126,8 +2093,8 @@ fn semantic_export_path_registry_dedupes_across_bundle_states() {
         size: 5,
         source_file: None,
     };
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("text_bytes".to_string()),
@@ -2157,7 +2124,7 @@ fn semantic_export_path_registry_keeps_distinct_cross_bundle_payloads() {
     let registry = NativeSemanticExportPathRegistry::default();
     let mut first_state = NativeSemanticExportPathState::with_registry(registry.clone());
     let mut second_state = NativeSemanticExportPathState::with_registry(registry);
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("shared".to_string()),
         container: Some("assets/shared.prefab".to_string()),
@@ -2168,8 +2135,8 @@ fn semantic_export_path_registry_keeps_distinct_cross_bundle_payloads() {
         size: 1,
         source_file: None,
     };
-    let mut read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let mut read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("typetree_json".to_string()),
@@ -2210,7 +2177,7 @@ fn playable_export_dedupes_identical_payloads_across_bundle_states() {
         image_format: "raw_rgba",
         read_batch_size: 16,
     };
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("AudienceClip(Clone)".to_string()),
         container: Some(
@@ -2224,8 +2191,8 @@ fn playable_export_dedupes_identical_payloads_across_bundle_states() {
         size: 2,
         source_file: None,
     };
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("typetree_json".to_string()),
@@ -2282,7 +2249,7 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("004026_shiho01".to_string()),
         container: Some(
@@ -2296,8 +2263,8 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
         size: 16,
         source_file: None,
     };
-    let read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("typetree_json".to_string()),
@@ -2344,7 +2311,7 @@ fn native_object_export_keeps_distinct_semantic_duplicates() {
         read_batch_size: 16,
     };
     let mut path_state = NativeSemanticExportPathState::default();
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("SiteObjectView".to_string()),
         container: Some(
@@ -2358,8 +2325,8 @@ fn native_object_export_keeps_distinct_semantic_duplicates() {
         size: 16,
         source_file: None,
     };
-    let mut read_output = AssetStudioFfiObjectReadOutput {
-        response: AssetStudioFfiObjectReadResponse {
+    let mut read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
             success: true,
             asset: Some(asset.clone()),
             payload_kind: Some("typetree_json".to_string()),
@@ -2429,7 +2396,7 @@ fn playable_container_routes_to_single_public_json_path() {
 
 #[test]
 fn native_object_mode_records_known_unreadable_types() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("variants".to_string()),
         container: Some("assets/foo.shadervariants".to_string()),
@@ -2452,7 +2419,7 @@ fn native_object_mode_records_known_unreadable_types() {
 
 #[test]
 fn native_object_mode_records_unknown_unreadable_types() {
-    let asset = AssetStudioFfiAssetInfo {
+    let asset = UnityAssetInfo {
         index: 0,
         name: Some("custom".to_string()),
         container: Some("assets/foo.custom".to_string()),
@@ -2604,7 +2571,7 @@ fn native_payload_bundle_paths_are_relative_and_safe() {
 
 #[test]
 fn native_read_batch_size_auto_tunes_by_workload() {
-    let texture = AssetStudioFfiAssetInfo {
+    let texture = UnityAssetInfo {
         index: 0,
         name: Some("texture".to_string()),
         container: None,
@@ -2615,17 +2582,17 @@ fn native_read_batch_size_auto_tunes_by_workload() {
         size: 0,
         source_file: None,
     };
-    let sprite = AssetStudioFfiAssetInfo {
+    let sprite = UnityAssetInfo {
         asset_type: Some("Sprite".to_string()),
         path_id: 2,
         ..texture.clone()
     };
-    let mono = AssetStudioFfiAssetInfo {
+    let mono = UnityAssetInfo {
         asset_type: Some("MonoBehaviour".to_string()),
         path_id: 3,
         ..texture.clone()
     };
-    let text = AssetStudioFfiAssetInfo {
+    let text = UnityAssetInfo {
         asset_type: Some("TextAsset".to_string()),
         path_id: 4,
         ..texture.clone()
@@ -2647,7 +2614,7 @@ fn native_read_batch_size_auto_tunes_by_workload() {
 
 #[test]
 fn native_object_reads_sort_images_after_metadata_assets() {
-    let texture = AssetStudioFfiAssetInfo {
+    let texture = UnityAssetInfo {
         index: 1,
         name: Some("texture_00".to_string()),
         container: Some("assets/live2d/texture_00.png".to_string()),
@@ -2658,7 +2625,7 @@ fn native_object_reads_sort_images_after_metadata_assets() {
         size: 42,
         source_file: None,
     };
-    let model = AssetStudioFfiAssetInfo {
+    let model = UnityAssetInfo {
         index: 2,
         name: Some("model3".to_string()),
         container: Some("assets/live2d/model3.json".to_string()),
@@ -2669,7 +2636,7 @@ fn native_object_reads_sort_images_after_metadata_assets() {
         size: 42,
         source_file: None,
     };
-    let build_motion = AssetStudioFfiAssetInfo {
+    let build_motion = UnityAssetInfo {
         index: 3,
         name: Some("BuildMotionData".to_string()),
         container: Some("assets/live2d/motions/buildmotiondata.asset".to_string()),
@@ -2695,7 +2662,7 @@ fn native_object_reads_sort_images_after_metadata_assets() {
 
 #[test]
 fn readable_assets_skip_texture2d_array_images_when_parent_is_present() {
-    let parent = AssetStudioFfiAssetInfo {
+    let parent = UnityAssetInfo {
         index: 0,
         name: Some("tex_array".to_string()),
         container: Some("assets/sekai/assetbundle/resources/ondemand/fx/tex_array.png".to_string()),
@@ -2706,14 +2673,14 @@ fn readable_assets_skip_texture2d_array_images_when_parent_is_present() {
         size: 0,
         source_file: None,
     };
-    let child = AssetStudioFfiAssetInfo {
+    let child = UnityAssetInfo {
         index: 1,
         name: Some("tex_array_1".to_string()),
         asset_type: Some("Texture2DArrayImage".to_string()),
         path_id: 2,
         ..parent.clone()
     };
-    let standalone_child = AssetStudioFfiAssetInfo {
+    let standalone_child = UnityAssetInfo {
         index: 2,
         name: Some("other_array_1".to_string()),
         container: Some(
@@ -2741,267 +2708,4 @@ fn readable_assets_skip_texture2d_array_images_when_parent_is_present() {
     );
     assert_eq!(summary.object_read_plan.planned_objects, 2);
     assert_eq!(summary.object_read_plan.skipped_reads, 1);
-}
-
-#[test]
-fn context_list_objects_worker_output_parses_pages() {
-    let output = WorkerOutput {
-            status: "0".to_string(),
-            status_success: true,
-            response: AssetStudioFfiResponse::ContextListObjects(
-                sonic_rs::from_str(r#"{"success":true,"context_id":11,"assets":[{"index":0,"name":"asset","container":"assets/a.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null}],"offset":0,"limit":1,"next_offset":1,"total_count":2,"returned_count":1,"warnings":["paged"],"error":null,"duration_ms":3}"#).unwrap(),
-            ),
-            stderr: String::new(),
-            payload: Vec::new(),
-            payload_file: None,
-        };
-
-    let parsed = parse_assetstudio_ffi_context_list_objects_worker_output(output).unwrap();
-
-    assert!(parsed.success);
-    assert_eq!(parsed.assets.len(), 1);
-    assert_eq!(parsed.assets[0].path_id, 7);
-    assert_eq!(parsed.next_offset, Some(1));
-    assert_eq!(parsed.total_count, 2);
-    assert_eq!(parsed.returned_count, 1);
-    assert_eq!(parsed.warnings, ["paged"]);
-    assert_eq!(parsed.duration_ms, Some(3));
-}
-
-#[test]
-fn object_read_batch_preserves_diagnostics_and_payloads() {
-    let good_asset = AssetStudioFfiAssetInfo {
-        index: 0,
-        name: Some("ok".to_string()),
-        container: Some("assets/ok.bytes".to_string()),
-        asset_type: Some("TextAsset".to_string()),
-        type_id: 49,
-        path_id: 7,
-        unique_id: None,
-        size: 3,
-        source_file: None,
-    };
-    let failed_asset = AssetStudioFfiAssetInfo {
-        index: 1,
-        name: Some("bad".to_string()),
-        container: Some("assets/bad.shader".to_string()),
-        asset_type: Some("Shader".to_string()),
-        type_id: 48,
-        path_id: 8,
-        unique_id: None,
-        size: 0,
-        source_file: None,
-    };
-    let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
-    payload.extend_from_slice(&1u32.to_le_bytes());
-    payload.extend_from_slice(&1u32.to_le_bytes());
-    payload.extend_from_slice(&3u64.to_le_bytes());
-    payload.extend_from_slice(b"7");
-    payload.extend_from_slice(b"abc");
-    let output = WorkerOutput {
-            status: "0".to_string(),
-            status_success: true,
-            response: AssetStudioFfiResponse::ContextReadObjects(
-                sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{"read_object.read_payload":4},"error":null,"duration_ms":5},{"success":false,"asset":null,"payload_kind":null,"payload_len":0,"suggested_extension":null,"warnings":[],"phase_ms":{},"error":"shader unsupported","duration_ms":1}],"warnings":["batch warning"],"payload_len":3,"object_count":2,"payload_bundle_bytes":123,"failed_count":1,"read_payload_ms":4,"error":null,"duration_ms":6}"#).unwrap(),
-            ),
-            stderr: String::new(),
-            payload,
-            payload_file: None,
-        };
-    let assets = [&good_asset, &failed_asset];
-
-    let parsed =
-        parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(output, &assets).unwrap();
-
-    assert_eq!(parsed.object_count, 2);
-    assert_eq!(parsed.payload_bundle_bytes, 123);
-    assert_eq!(parsed.failed_count, 1);
-    assert_eq!(parsed.read_payload_ms, 4);
-    assert_eq!(parsed.results.len(), 2);
-    let NativeObjectReadParseResult::Read(read) = &parsed.results[0] else {
-        panic!("expected successful batch object read");
-    };
-    assert_eq!(read.payload.as_ref(), b"abc");
-    assert_eq!(read.response.payload_len, 3);
-    let NativeObjectReadParseResult::Skipped(skipped) = &parsed.results[1] else {
-        panic!("expected skipped batch object read");
-    };
-    assert_eq!(skipped.path_id, 8);
-    assert_eq!(skipped.error, "shader unsupported");
-}
-
-#[test]
-fn object_read_batch_uses_indexes_when_path_ids_collide() {
-    let first_asset = AssetStudioFfiAssetInfo {
-        index: 0,
-        name: Some("first".to_string()),
-        container: Some("assets/first.bytes".to_string()),
-        asset_type: Some("TextAsset".to_string()),
-        type_id: 49,
-        path_id: 7,
-        unique_id: None,
-        size: 3,
-        source_file: None,
-    };
-    let second_asset = AssetStudioFfiAssetInfo {
-        index: 1,
-        name: Some("second".to_string()),
-        container: Some("assets/second.bytes".to_string()),
-        asset_type: Some("TextAsset".to_string()),
-        type_id: 49,
-        path_id: 7,
-        unique_id: None,
-        size: 3,
-        source_file: None,
-    };
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
-    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
-    payload.extend_from_slice(
-        &(super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes(),
-    );
-    payload.extend_from_slice(&2u32.to_le_bytes());
-    payload.extend_from_slice(&6u64.to_le_bytes());
-    for (name, data) in [("index:0", b"one"), ("index:1", b"two")] {
-        payload.extend_from_slice(&(name.len() as u32).to_le_bytes());
-        payload.extend_from_slice(&(data.len() as u64).to_le_bytes());
-        payload.extend_from_slice(name.as_bytes());
-        payload.extend_from_slice(data);
-    }
-    let output = WorkerOutput {
-        status: "0".to_string(),
-        status_success: true,
-        response: AssetStudioFfiResponse::ContextReadObjects(
-            sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":null,"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1},{"success":true,"asset":null,"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}],"warnings":[],"payload_len":6,"object_count":2,"payload_bundle_bytes":64,"failed_count":0,"read_payload_ms":2,"error":null,"duration_ms":3}"#).unwrap(),
-        ),
-        stderr: String::new(),
-        payload,
-        payload_file: None,
-    };
-    let assets = [&first_asset, &second_asset];
-
-    let parsed =
-        parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(output, &assets).unwrap();
-
-    let NativeObjectReadParseResult::Read(first) = &parsed.results[0] else {
-        panic!("expected first successful batch object read");
-    };
-    let NativeObjectReadParseResult::Read(second) = &parsed.results[1] else {
-        panic!("expected second successful batch object read");
-    };
-    assert_eq!(first.payload.as_ref(), b"one");
-    assert_eq!(second.payload.as_ref(), b"two");
-}
-
-#[test]
-fn object_read_batch_maps_spilled_payload_file_and_removes_it() {
-    let asset = AssetStudioFfiAssetInfo {
-        index: 0,
-        name: Some("ok".to_string()),
-        container: Some("assets/ok.bytes".to_string()),
-        asset_type: Some("TextAsset".to_string()),
-        type_id: 49,
-        path_id: 7,
-        unique_id: None,
-        size: 3,
-        source_file: None,
-    };
-    let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
-    payload.extend_from_slice(&1u32.to_le_bytes());
-    payload.extend_from_slice(&1u32.to_le_bytes());
-    payload.extend_from_slice(&3u64.to_le_bytes());
-    payload.extend_from_slice(b"7");
-    payload.extend_from_slice(b"abc");
-    let spill_dir = tempfile::tempdir().unwrap();
-    let payload_file = spill_dir.path().join("spilled-payload.bin");
-    std::fs::write(&payload_file, &payload).unwrap();
-    let output = WorkerOutput {
-            status: "0".to_string(),
-            status_success: true,
-            response: AssetStudioFfiResponse::ContextReadObjects(
-                sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":{"index":0,"name":"ok","container":"assets/ok.bytes","asset_type":"TextAsset","type_id":49,"path_id":7,"size":3,"source_file":null},"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}],"warnings":[],"payload_len":3,"object_count":1,"payload_bundle_bytes":0,"failed_count":0,"read_payload_ms":1,"error":null,"duration_ms":1}"#).unwrap(),
-            ),
-            stderr: String::new(),
-            payload: Vec::new(),
-            payload_file: Some(payload_file.clone()),
-        };
-    let assets = [&asset];
-
-    let parsed =
-        parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(output, &assets).unwrap();
-
-    assert_eq!(parsed.results.len(), 1);
-    let NativeObjectReadParseResult::Read(read) = &parsed.results[0] else {
-        panic!("expected successful batch object read");
-    };
-    // The payload slice is served straight from the (already unlinked) mapping.
-    assert_eq!(read.payload.as_ref(), b"abc");
-    assert!(
-        !payload_file.exists(),
-        "spilled payload file should be removed after mapping"
-    );
-}
-
-#[test]
-fn object_read_batch_diagnostics_record_batch_counters() {
-    let asset = AssetStudioFfiAssetInfo {
-        index: 0,
-        name: Some("ok".to_string()),
-        container: Some("assets/ok.bytes".to_string()),
-        asset_type: Some("TextAsset".to_string()),
-        type_id: 49,
-        path_id: 7,
-        unique_id: None,
-        size: 3,
-        source_file: None,
-    };
-    let mut summary = NativeObjectExportSummary {
-        written_files: Vec::new(),
-        acb_sources: Vec::new(),
-        pending_image_writes: Vec::new(),
-        phase_ms: HashMap::new(),
-        skipped_object_reads: Vec::new(),
-        object_read_plan: NativeObjectReadPlanStats::default(),
-        worker_crash_skipped: false,
-    };
-    let read_outputs = NativeObjectReadBatchParseOutput {
-        results: Vec::new(),
-        object_count: 1,
-        payload_bundle_version: 2,
-        payload_bundle_entry_count: 1,
-        payload_bundle_bytes: 10,
-        payload_data_bytes: 3,
-        failed_count: 0,
-        read_payload_ms: 3,
-        worker_id: None,
-        call_seq: None,
-        phase_ms: HashMap::from([("read_objects".to_string(), 4)]),
-        asset_type_counts: HashMap::new(),
-        payload_kind_counts: HashMap::from([("text_bytes".to_string(), 1)]),
-        payload_bytes_by_kind: HashMap::from([("text_bytes".to_string(), 3)]),
-        phase_stats: HashMap::new(),
-    };
-
-    record_native_object_read_batch_diagnostics(&mut summary, &[&asset], &read_outputs);
-
-    assert_eq!(summary.object_read_plan.payload_bundle_bytes, 10);
-    assert_eq!(summary.object_read_plan.read_payload_ms, 3);
-    assert_eq!(
-        summary.phase_ms.get("read_batch.phase.read_objects"),
-        Some(&4)
-    );
-    assert_eq!(
-        summary
-            .phase_ms
-            .get("read_batch.payload_kind_count.text_bytes"),
-        Some(&1)
-    );
-    assert_eq!(
-        summary
-            .phase_ms
-            .get("read_batch.payload_bytes_by_kind.text_bytes"),
-        Some(&3)
-    );
 }

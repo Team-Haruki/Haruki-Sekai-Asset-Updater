@@ -3,8 +3,8 @@ use super::*;
 pub(super) fn write_native_object_payload(
     options: &NativeObjectExportOptions<'_>,
     path_state: &mut NativeSemanticExportPathState,
-    asset: &AssetStudioFfiAssetInfo,
-    read_output: &AssetStudioFfiObjectReadOutput,
+    asset: &UnityAssetInfo,
+    read_output: &UnityObjectReadOutput,
 ) -> Result<(), ExportPipelineError> {
     if read_output.payload.is_empty()
         || read_output.response.payload_kind.as_deref() == Some("unsupported")
@@ -126,8 +126,8 @@ pub(super) fn write_native_object_payload(
 }
 
 pub(super) fn is_playable_mono_typetree(
-    asset: &AssetStudioFfiAssetInfo,
-    read_output: &AssetStudioFfiObjectReadOutput,
+    asset: &UnityAssetInfo,
+    read_output: &UnityObjectReadOutput,
 ) -> bool {
     asset
         .asset_type
@@ -145,12 +145,10 @@ pub(super) fn is_playable_mono_typetree(
 pub(super) fn write_assetstudio_playable_payloads(
     options: &NativeObjectExportOptions<'_>,
     path_state: &mut NativeSemanticExportPathState,
-    playable_outputs: Vec<(AssetStudioFfiAssetInfo, AssetStudioFfiObjectReadOutput)>,
+    playable_outputs: Vec<(UnityAssetInfo, UnityObjectReadOutput)>,
 ) -> Result<(), ExportPipelineError> {
-    let mut by_container: BTreeMap<
-        String,
-        Vec<(AssetStudioFfiAssetInfo, AssetStudioFfiObjectReadOutput)>,
-    > = BTreeMap::new();
+    let mut by_container: BTreeMap<String, Vec<(UnityAssetInfo, UnityObjectReadOutput)>> =
+        BTreeMap::new();
     for (asset, read_output) in playable_outputs {
         let Some(container) = asset
             .container
@@ -176,7 +174,7 @@ pub(super) fn write_assetstudio_playable_payloads(
         let mut objects = Vec::with_capacity(entries.len());
         for (asset, read_output) in &entries {
             let data: sonic_rs::Value = sonic_rs::from_slice(&read_output.payload)
-                .map_err(|source| ExportPipelineError::FfiParse { source })?;
+                .map_err(|source| ExportPipelineError::JsonParse { source })?;
             objects.push(NativePlayableExportObject {
                 name: asset.name.clone(),
                 asset_type: asset.asset_type.clone(),
@@ -189,11 +187,11 @@ pub(super) fn write_assetstudio_playable_payloads(
             objects,
         };
         let payload = sonic_rs::to_vec_pretty(&playable)
-            .map_err(|source| ExportPipelineError::FfiSerialize { source })?;
+            .map_err(|source| ExportPipelineError::JsonSerialize { source })?;
         let (first_asset, first_read_output) =
             entries
                 .first()
-                .ok_or_else(|| ExportPipelineError::AssetStudioFfi {
+                .ok_or_else(|| ExportPipelineError::UnityRs {
                     message: format!("playable export has no objects for container {container}"),
                 })?;
         let target = playable_container_output_path(
@@ -265,8 +263,8 @@ impl NativeSemanticExportPathState {
     pub(super) fn claim_payload(
         &mut self,
         path: PathBuf,
-        asset: &AssetStudioFfiAssetInfo,
-        read_output: &AssetStudioFfiObjectReadOutput,
+        asset: &UnityAssetInfo,
+        read_output: &UnityObjectReadOutput,
     ) -> NativeSemanticPathClaim {
         self.claim_with_signature(path, asset, native_payload_signature(&read_output.payload))
     }
@@ -274,7 +272,7 @@ impl NativeSemanticExportPathState {
     pub(super) fn claim_generated_payload(
         &mut self,
         path: PathBuf,
-        asset: &AssetStudioFfiAssetInfo,
+        asset: &UnityAssetInfo,
         payload: &[u8],
     ) -> NativeSemanticPathClaim {
         self.claim_with_signature(path, asset, native_payload_signature(payload))
@@ -283,7 +281,7 @@ impl NativeSemanticExportPathState {
     fn claim_with_signature(
         &mut self,
         path: PathBuf,
-        asset: &AssetStudioFfiAssetInfo,
+        asset: &UnityAssetInfo,
         signature: NativePayloadSignature,
     ) -> NativeSemanticPathClaim {
         let mut claims = self.registry.claims.lock().unwrap();
@@ -357,8 +355,8 @@ pub(super) fn semantic_duplicate_path(path: &Path, ordinal: usize) -> PathBuf {
 pub(super) fn write_assetstudio_export_manifest_entry(
     output_dir: &Path,
     target: &Path,
-    asset: &AssetStudioFfiAssetInfo,
-    read_output: &AssetStudioFfiObjectReadOutput,
+    asset: &UnityAssetInfo,
+    read_output: &UnityObjectReadOutput,
 ) -> Result<(), ExportPipelineError> {
     let manifest_root = output_dir.to_path_buf();
     std::fs::create_dir_all(&manifest_root).map_err(|source| ExportPipelineError::Io {
@@ -381,19 +379,18 @@ pub(super) fn write_assetstudio_export_manifest_entry(
         suggested_extension: manifest_suggested_extension(&public_target, read_output),
     };
     let line = sonic_rs::to_string(&entry)
-        .map_err(|source| ExportPipelineError::FfiSerialize { source })?;
+        .map_err(|source| ExportPipelineError::JsonSerialize { source })?;
     let locks = ASSETSTUDIO_MANIFEST_APPEND_LOCKS.get_or_init(|| {
         (0..ASSETSTUDIO_MANIFEST_LOCKS)
             .map(|_| Mutex::new(()))
             .collect()
     });
     let lock_index = manifest_lock_index(&manifest_path);
-    let _guard =
-        locks[lock_index]
-            .lock()
-            .map_err(|source| ExportPipelineError::AssetStudioFfi {
-                message: format!("assetstudio export manifest lock poisoned: {source}"),
-            })?;
+    let _guard = locks[lock_index]
+        .lock()
+        .map_err(|source| ExportPipelineError::UnityRs {
+            message: format!("assetstudio export manifest lock poisoned: {source}"),
+        })?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -411,7 +408,7 @@ pub(super) fn write_assetstudio_export_manifest_entry(
 
 pub(super) fn assetstudio_manifest_public_target(
     target: &Path,
-    read_output: &AssetStudioFfiObjectReadOutput,
+    read_output: &UnityObjectReadOutput,
 ) -> Result<PathBuf, ExportPipelineError> {
     match read_output.response.payload_kind.as_deref() {
         Some("image_bmp") | Some("image_raw_rgba") => {
@@ -446,7 +443,7 @@ pub(super) fn assetstudio_manifest_public_target(
 
 pub(super) fn manifest_suggested_extension(
     public_target: &Path,
-    read_output: &AssetStudioFfiObjectReadOutput,
+    read_output: &UnityObjectReadOutput,
 ) -> Option<String> {
     public_target
         .extension()
@@ -466,7 +463,7 @@ pub(super) fn manifest_lock_index(path: &Path) -> usize {
 
 pub(super) fn text_asset_public_bytes_target(
     target: &Path,
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
 ) -> Option<PathBuf> {
     if asset.asset_type.as_deref() != Some("TextAsset") {
         return None;
@@ -492,13 +489,13 @@ pub(super) fn text_asset_public_bytes_target(
     }
 }
 
-pub(super) fn text_asset_is_music_score(target: &Path, asset: &AssetStudioFfiAssetInfo) -> bool {
+pub(super) fn text_asset_is_music_score(target: &Path, asset: &UnityAssetInfo) -> bool {
     let target_path = target.to_string_lossy().replace('\\', "/");
     let container_path = asset.container.as_deref().unwrap_or("").replace('\\', "/");
     target_path.contains("/music/music_score/") || container_path.contains("/music/music_score/")
 }
 
-pub(super) fn is_text_asset_acb_target(asset: &AssetStudioFfiAssetInfo, target: &Path) -> bool {
+pub(super) fn is_text_asset_acb_target(asset: &UnityAssetInfo, target: &Path) -> bool {
     asset.asset_type.as_deref() == Some("TextAsset")
         && target
             .extension()
@@ -507,7 +504,7 @@ pub(super) fn is_text_asset_acb_target(asset: &AssetStudioFfiAssetInfo, target: 
 }
 
 pub(super) fn is_text_asset_decoded_usm_target(
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     target: &Path,
     region: &RegionConfig,
 ) -> bool {
@@ -738,7 +735,7 @@ pub(super) fn decode_native_rgba_ir_payload(
     let pixels = native_rgba_ir_contiguous_pixels(&raw_rgba).into_owned();
     image::RgbaImage::from_raw(raw_rgba.width, raw_rgba.height, pixels)
         .map(image::DynamicImage::ImageRgba8)
-        .ok_or_else(|| ExportPipelineError::AssetStudioFfi {
+        .ok_or_else(|| ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` could not be converted to an image",
                 target.display()
@@ -760,7 +757,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
     target: &Path,
 ) -> Result<NativeRgbaIr<'a>, ExportPipelineError> {
     if payload.len() < UNITY_ENGINE_RGBA_IR_HEADER_LEN {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` is too short: {} bytes",
                 target.display(),
@@ -769,7 +766,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
         });
     }
     if !payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` has invalid magic",
                 target.display()
@@ -784,7 +781,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
     let stride = read_u32(24) as usize;
     let pixel_format = read_u32(28);
     if pixel_format != 1 {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` has unsupported pixel format {}",
                 target.display(),
@@ -795,7 +792,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
     let row_bytes = usize::try_from(width)
         .ok()
         .and_then(|value| value.checked_mul(4))
-        .ok_or_else(|| ExportPipelineError::AssetStudioFfi {
+        .ok_or_else(|| ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` has invalid width {}",
                 target.display(),
@@ -803,7 +800,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
             ),
         })?;
     if stride < row_bytes {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` has invalid stride {} for width {}",
                 target.display(),
@@ -812,25 +809,24 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
             ),
         });
     }
-    let height_usize =
-        usize::try_from(height).map_err(|_| ExportPipelineError::AssetStudioFfi {
-            message: format!(
-                "native raw RGBA image payload for `{}` has invalid height {}",
-                target.display(),
-                height
-            ),
-        })?;
+    let height_usize = usize::try_from(height).map_err(|_| ExportPipelineError::UnityRs {
+        message: format!(
+            "native raw RGBA image payload for `{}` has invalid height {}",
+            target.display(),
+            height
+        ),
+    })?;
     let pixel_bytes = stride
         .checked_mul(height_usize)
         .and_then(|value| value.checked_add(UNITY_ENGINE_RGBA_IR_HEADER_LEN))
-        .ok_or_else(|| ExportPipelineError::AssetStudioFfi {
+        .ok_or_else(|| ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` is too large",
                 target.display()
             ),
         })?;
     if payload.len() < pixel_bytes {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: format!(
                 "native raw RGBA image payload for `{}` is truncated: expected at least {}, got {}",
                 target.display(),
@@ -1062,91 +1058,6 @@ pub(super) fn parse_payload_bundle(
         .collect())
 }
 
-/// A read-only mmap of a worker payload spill file. The file is unlinked right
-/// after mapping; the pages (and therefore every `Bytes` slice into them) stay
-/// valid until the mapping drops.
-#[cfg(unix)]
-struct MappedSpilledPayload {
-    pointer: *mut libc::c_void,
-    len: usize,
-}
-
-// SAFETY: the mapping is PROT_READ and never mutated; concurrent reads from any
-// thread are safe, and munmap happens exactly once in Drop.
-#[cfg(unix)]
-unsafe impl Send for MappedSpilledPayload {}
-#[cfg(unix)]
-unsafe impl Sync for MappedSpilledPayload {}
-
-#[cfg(unix)]
-impl AsRef<[u8]> for MappedSpilledPayload {
-    fn as_ref(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.pointer as *const u8, self.len) }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for MappedSpilledPayload {
-    fn drop(&mut self) {
-        unsafe {
-            libc::munmap(self.pointer, self.len);
-        }
-    }
-}
-
-/// Loads a worker payload spill file as shared `Bytes` and removes the file. On unix
-/// the file is mapped instead of read, so the parent-side heap copy of the payload
-/// disappears; when the worker spilled into tmpfs the bytes never touch disk at all.
-pub(super) fn map_spilled_payload(path: &Path) -> Result<bytes::Bytes, ExportPipelineError> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-
-        let io_error = |source| ExportPipelineError::Io {
-            path: path.to_path_buf(),
-            source,
-        };
-        let file = std::fs::File::open(path).map_err(io_error)?;
-        let len = file.metadata().map_err(io_error)?.len();
-        if len == 0 {
-            drop(file);
-            let _ = std::fs::remove_file(path);
-            return Ok(bytes::Bytes::new());
-        }
-        let mapped = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len as usize,
-                libc::PROT_READ,
-                libc::MAP_PRIVATE,
-                file.as_raw_fd(),
-                0,
-            )
-        };
-        drop(file);
-        if mapped == libc::MAP_FAILED {
-            // Extremely defensive: fall back to a plain read if the mapping fails.
-            let payload = std::fs::read(path).map_err(io_error)?;
-            let _ = std::fs::remove_file(path);
-            return Ok(payload.into());
-        }
-        let _ = std::fs::remove_file(path);
-        Ok(bytes::Bytes::from_owner(MappedSpilledPayload {
-            pointer: mapped,
-            len: len as usize,
-        }))
-    }
-    #[cfg(not(unix))]
-    {
-        let payload = std::fs::read(path).map_err(|source| ExportPipelineError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        let _ = std::fs::remove_file(path);
-        Ok(payload.into())
-    }
-}
-
 /// Bundle parse that returns refcounted sub-slices of the backing buffer instead
 /// of borrowed slices, so entries can outlive the parse without a heap copy.
 pub(super) fn parse_payload_bundle_shared(
@@ -1175,13 +1086,13 @@ pub(super) fn parse_payload_bundle_borrowed(
         cursor += 4;
         let version = read_bundle_u16(payload, &mut cursor)?;
         if version != UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION {
-            return Err(ExportPipelineError::AssetStudioFfi {
+            return Err(ExportPipelineError::UnityRs {
                 message: format!("native payload bundle has unsupported version {version}"),
             });
         }
         let header_len = read_bundle_u16(payload, &mut cursor)? as usize;
         if header_len < UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN || header_len > payload.len() {
-            return Err(ExportPipelineError::AssetStudioFfi {
+            return Err(ExportPipelineError::UnityRs {
                 message: format!("native payload bundle has invalid header length {header_len}"),
             });
         }
@@ -1202,7 +1113,7 @@ pub(super) fn parse_payload_bundle_borrowed(
         return parse_payload_bundle_grouped_entries(payload, cursor, count);
     }
 
-    Err(ExportPipelineError::AssetStudioFfi {
+    Err(ExportPipelineError::UnityRs {
         message: "native payload bundle has invalid magic".to_string(),
     })
 }
@@ -1219,22 +1130,22 @@ pub(super) fn parse_payload_bundle_interleaved_entries(
         let name_len = read_bundle_u32(payload, &mut cursor)? as usize;
         let data_len = read_bundle_u64(payload, &mut cursor)?;
         let data_len_usize =
-            usize::try_from(data_len).map_err(|_| ExportPipelineError::AssetStudioFfi {
+            usize::try_from(data_len).map_err(|_| ExportPipelineError::UnityRs {
                 message: "native payload bundle entry data is too large".to_string(),
             })?;
         if payload.len().saturating_sub(cursor) < name_len {
-            return Err(ExportPipelineError::AssetStudioFfi {
+            return Err(ExportPipelineError::UnityRs {
                 message: "native payload bundle has truncated entry name".to_string(),
             });
         }
         let name = std::str::from_utf8(&payload[cursor..cursor + name_len])
-            .map_err(|source| ExportPipelineError::AssetStudioFfi {
+            .map_err(|source| ExportPipelineError::UnityRs {
                 message: format!("native payload bundle entry name is not utf-8: {source}"),
             })?
             .to_string();
         cursor += name_len;
         if payload.len().saturating_sub(cursor) < data_len_usize {
-            return Err(ExportPipelineError::AssetStudioFfi {
+            return Err(ExportPipelineError::UnityRs {
                 message: "native payload bundle has truncated entry data".to_string(),
             });
         }
@@ -1262,12 +1173,12 @@ pub(super) fn parse_payload_bundle_grouped_entries(
         let name_len = read_bundle_u32(payload, &mut cursor)? as usize;
         let data_len = read_bundle_u64(payload, &mut cursor)?;
         if payload.len().saturating_sub(cursor) < name_len {
-            return Err(ExportPipelineError::AssetStudioFfi {
+            return Err(ExportPipelineError::UnityRs {
                 message: "native payload bundle has truncated entry name".to_string(),
             });
         }
         let name = std::str::from_utf8(&payload[cursor..cursor + name_len])
-            .map_err(|source| ExportPipelineError::AssetStudioFfi {
+            .map_err(|source| ExportPipelineError::UnityRs {
                 message: format!("native payload bundle entry name is not utf-8: {source}"),
             })?
             .to_string();
@@ -1279,11 +1190,11 @@ pub(super) fn parse_payload_bundle_grouped_entries(
     let mut entries = Vec::with_capacity(count);
     for (name, data_len) in headers {
         let data_len_usize =
-            usize::try_from(data_len).map_err(|_| ExportPipelineError::AssetStudioFfi {
+            usize::try_from(data_len).map_err(|_| ExportPipelineError::UnityRs {
                 message: "native payload bundle entry data is too large".to_string(),
             })?;
         if payload.len().saturating_sub(cursor) < data_len_usize {
-            return Err(ExportPipelineError::AssetStudioFfi {
+            return Err(ExportPipelineError::UnityRs {
                 message: "native payload bundle has truncated entry data".to_string(),
             });
         }
@@ -1302,7 +1213,7 @@ pub(super) fn finish_payload_bundle_parse(
     expected_payload_data_bytes: Option<u64>,
 ) -> Result<(), ExportPipelineError> {
     if cursor != payload.len() {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: format!(
                 "native payload bundle has {} trailing byte(s)",
                 payload.len().saturating_sub(cursor)
@@ -1311,7 +1222,7 @@ pub(super) fn finish_payload_bundle_parse(
     }
     if let Some(expected_payload_data_bytes) = expected_payload_data_bytes {
         if observed_payload_data_bytes != expected_payload_data_bytes {
-            return Err(ExportPipelineError::AssetStudioFfi {
+            return Err(ExportPipelineError::UnityRs {
                 message: format!(
                     "native payload bundle data byte count mismatch: expected {expected_payload_data_bytes}, got {observed_payload_data_bytes}"
                 ),
@@ -1326,7 +1237,7 @@ pub(super) fn read_bundle_u32(
     cursor: &mut usize,
 ) -> Result<u32, ExportPipelineError> {
     if payload.len().saturating_sub(*cursor) < 4 {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: "native payload bundle has truncated u32".to_string(),
         });
     }
@@ -1340,7 +1251,7 @@ pub(super) fn read_bundle_u16(
     cursor: &mut usize,
 ) -> Result<u16, ExportPipelineError> {
     if payload.len().saturating_sub(*cursor) < 2 {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: "native payload bundle has truncated u16".to_string(),
         });
     }
@@ -1354,7 +1265,7 @@ pub(super) fn read_bundle_u64(
     cursor: &mut usize,
 ) -> Result<u64, ExportPipelineError> {
     if payload.len().saturating_sub(*cursor) < 8 {
-        return Err(ExportPipelineError::AssetStudioFfi {
+        return Err(ExportPipelineError::UnityRs {
             message: "native payload bundle has truncated u64".to_string(),
         });
     }
