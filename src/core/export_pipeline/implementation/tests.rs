@@ -24,9 +24,9 @@ use super::{
     assetstudio_object_mode_supported_type, assetstudio_type_selector_matches,
     convert_native_surrogate_images_to_png, extract_unity_asset_bundle,
     flush_pending_native_image_writes, get_export_group, handle_png_conversion,
-    native_object_output_extension, native_object_output_path, native_read_batch_size_for_assets,
-    native_read_kind_for_asset, native_skipped_unsupported_asset,
-    parse_assetstudio_ffi_context_list_objects_worker_output,
+    native_object_output_extension, native_object_output_path, native_object_read_batch_request,
+    native_read_batch_size_for_assets, native_read_kind_for_asset,
+    native_skipped_unsupported_asset, parse_assetstudio_ffi_context_list_objects_worker_output,
     parse_assetstudio_ffi_object_read_batch_worker_output_recoverable, parse_payload_bundle,
     parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
     prepare_usm_processing_inputs, process_usm_file, process_usm_input_with_metrics,
@@ -41,8 +41,33 @@ use super::{
     NativeObjectReadBatchParseOutput, NativeObjectReadParseResult, NativeObjectReadPlanStats,
     NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
     UsmProcessingInput, WorkerOutput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
-    NATIVE_AOT_DEFAULT_IMAGE_FORMAT, NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT, UNITY_ENGINE_FAST_IMAGE_FORMAT,
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
 };
+
+#[test]
+fn native_object_read_batch_uses_stable_object_indexes() {
+    let asset = AssetStudioFfiAssetInfo {
+        index: 37,
+        name: Some("texture".to_string()),
+        container: Some("assets/texture.png".to_string()),
+        asset_type: Some("Texture2D".to_string()),
+        type_id: 28,
+        path_id: 9,
+        unique_id: None,
+        size: 128,
+        source_file: Some("sharedassets0.assets".to_string()),
+    };
+    let request = native_object_read_batch_request(
+        5,
+        &[&asset],
+        &BTreeMap::new(),
+        UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
+    );
+
+    assert_eq!(request.objects[0].index, Some(37));
+    assert_eq!(request.objects[0].path_id, 9);
+}
 
 fn sample_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("HARUKI_CODEC_SAMPLE_DIR")
@@ -116,7 +141,7 @@ fn processing_config() -> (AppConfig, RegionConfig) {
 fn make_native_rgba_ir_payload(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let stride = width * 4;
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_RGBA_IR_MAGIC);
+    payload.extend_from_slice(super::UNITY_ENGINE_RGBA_IR_MAGIC);
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
     payload.extend_from_slice(&stride.to_le_bytes());
@@ -524,9 +549,13 @@ fn png_to_webp_uses_pure_rust_encoder() {
 }
 
 #[test]
-fn native_aot_default_image_format_preserves_alpha() {
-    assert_eq!(NATIVE_AOT_DEFAULT_IMAGE_FORMAT, "raw_rgba");
-    assert_eq!(NATIVE_AOT_IMAGE_SURROGATE_FORMAT, "bmp");
+fn unity_engine_default_image_format_preserves_alpha() {
+    assert_eq!(UNITY_ENGINE_DEFAULT_IMAGE_FORMAT, "raw_rgba");
+    assert_eq!(
+        UNITY_ENGINE_FAST_IMAGE_FORMAT,
+        UNITY_ENGINE_DEFAULT_IMAGE_FORMAT
+    );
+    assert_eq!(UNITY_ENGINE_IMAGE_SURROGATE_FORMAT, "bmp");
 }
 
 #[test]
@@ -633,7 +662,7 @@ fn native_raw_rgba_payload_is_encoded_to_png() {
     let dir = tempdir().unwrap();
     let target = dir.path().join("normal.png");
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_RGBA_IR_MAGIC);
+    payload.extend_from_slice(super::UNITY_ENGINE_RGBA_IR_MAGIC);
     payload.extend_from_slice(&2u32.to_le_bytes());
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&8u32.to_le_bytes());
@@ -1814,7 +1843,7 @@ fn manifest_records_animator_bundle_public_fbx_path() {
         source_file: None,
     };
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&1u32.to_le_bytes());
     let entry_name = "FBX_Animator/model/model.fbx";
     payload.extend_from_slice(&(entry_name.len() as u32).to_le_bytes());
@@ -2467,12 +2496,35 @@ fn assetstudio_type_names_accept_short_and_class_aliases() {
 }
 
 #[test]
+fn native_payload_bundle_parser_reads_multiple_entries() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(&2u32.to_le_bytes());
+    payload.extend_from_slice(&("layer_0000.bmp".len() as u32).to_le_bytes());
+    payload.extend_from_slice(&3u64.to_le_bytes());
+    payload.extend_from_slice(b"layer_0000.bmp");
+    payload.extend_from_slice(&("nested/layer_0001.bmp".len() as u32).to_le_bytes());
+    payload.extend_from_slice(&3u64.to_le_bytes());
+    payload.extend_from_slice(b"nested/layer_0001.bmp");
+    payload.extend_from_slice(b"one");
+    payload.extend_from_slice(b"two");
+
+    let entries = parse_payload_bundle(&payload).unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].0, "layer_0000.bmp");
+    assert_eq!(entries[0].1, b"one");
+    assert_eq!(entries[1].0, "nested/layer_0001.bmp");
+    assert_eq!(entries[1].1, b"two");
+}
+
+#[test]
 fn native_payload_bundle_parser_reads_v2_header() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&super::NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
-    payload.extend_from_slice(&super::NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
-    payload
-        .extend_from_slice(&(super::NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes());
+    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
+    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
+    payload.extend_from_slice(
+        &(super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes(),
+    );
     payload.extend_from_slice(&2u32.to_le_bytes());
     payload.extend_from_slice(&6u64.to_le_bytes());
     payload.extend_from_slice(&1u32.to_le_bytes());
@@ -2494,7 +2546,7 @@ fn native_payload_bundle_parser_reads_v2_header() {
 #[test]
 fn native_payload_bundle_parser_reads_legacy_grouped_entries() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&2u32.to_le_bytes());
     payload.extend_from_slice(&("layer_0000.bmp".len() as u32).to_le_bytes());
     payload.extend_from_slice(&3u64.to_le_bytes());
@@ -2517,7 +2569,7 @@ fn native_payload_bundle_parser_reads_legacy_grouped_entries() {
 #[test]
 fn native_payload_bundle_borrowed_parser_reuses_payload_slices() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&("asset.bin".len() as u32).to_le_bytes());
     payload.extend_from_slice(&4u64.to_le_bytes());
@@ -2741,7 +2793,7 @@ fn object_read_batch_preserves_diagnostics_and_payloads() {
         source_file: None,
     };
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&3u64.to_le_bytes());
@@ -2780,6 +2832,69 @@ fn object_read_batch_preserves_diagnostics_and_payloads() {
 }
 
 #[test]
+fn object_read_batch_uses_indexes_when_path_ids_collide() {
+    let first_asset = AssetStudioFfiAssetInfo {
+        index: 0,
+        name: Some("first".to_string()),
+        container: Some("assets/first.bytes".to_string()),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 7,
+        unique_id: None,
+        size: 3,
+        source_file: None,
+    };
+    let second_asset = AssetStudioFfiAssetInfo {
+        index: 1,
+        name: Some("second".to_string()),
+        container: Some("assets/second.bytes".to_string()),
+        asset_type: Some("TextAsset".to_string()),
+        type_id: 49,
+        path_id: 7,
+        unique_id: None,
+        size: 3,
+        source_file: None,
+    };
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
+    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
+    payload.extend_from_slice(
+        &(super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes(),
+    );
+    payload.extend_from_slice(&2u32.to_le_bytes());
+    payload.extend_from_slice(&6u64.to_le_bytes());
+    for (name, data) in [("index:0", b"one"), ("index:1", b"two")] {
+        payload.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        payload.extend_from_slice(name.as_bytes());
+        payload.extend_from_slice(data);
+    }
+    let output = WorkerOutput {
+        status: "0".to_string(),
+        status_success: true,
+        response: AssetStudioFfiResponse::ContextReadObjects(
+            sonic_rs::from_str(r#"{"success":true,"reads":[{"success":true,"asset":null,"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1},{"success":true,"asset":null,"payload_kind":"text_bytes","payload_len":3,"suggested_extension":".bytes","warnings":[],"phase_ms":{},"error":null,"duration_ms":1}],"warnings":[],"payload_len":6,"object_count":2,"payload_bundle_bytes":64,"failed_count":0,"read_payload_ms":2,"error":null,"duration_ms":3}"#).unwrap(),
+        ),
+        stderr: String::new(),
+        payload,
+        payload_file: None,
+    };
+    let assets = [&first_asset, &second_asset];
+
+    let parsed =
+        parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(output, &assets).unwrap();
+
+    let NativeObjectReadParseResult::Read(first) = &parsed.results[0] else {
+        panic!("expected first successful batch object read");
+    };
+    let NativeObjectReadParseResult::Read(second) = &parsed.results[1] else {
+        panic!("expected second successful batch object read");
+    };
+    assert_eq!(first.payload.as_ref(), b"one");
+    assert_eq!(second.payload.as_ref(), b"two");
+}
+
+#[test]
 fn object_read_batch_maps_spilled_payload_file_and_removes_it() {
     let asset = AssetStudioFfiAssetInfo {
         index: 0,
@@ -2793,7 +2908,7 @@ fn object_read_batch_maps_spilled_payload_file_and_removes_it() {
         source_file: None,
     };
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&3u64.to_le_bytes());

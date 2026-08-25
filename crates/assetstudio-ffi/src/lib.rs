@@ -4,7 +4,7 @@ mod types;
 mod worker_pool;
 
 pub use native::{
-    CallPayload, LoadedAssetStudioFfiLibrary, PayloadSpillPlan, WORKER_PAYLOAD_FILE_PREFIX,
+    CallPayload, LoadedAssetStudioFfiLibrary, WORKER_PAYLOAD_FILE_PREFIX,
     WORKER_PAYLOAD_FILE_SUFFIX,
 };
 pub use types::{

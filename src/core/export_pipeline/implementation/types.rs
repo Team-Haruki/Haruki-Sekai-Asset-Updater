@@ -1,14 +1,16 @@
 use super::*;
 
-pub(super) const NATIVE_AOT_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";
-pub(super) const NATIVE_AOT_IMAGE_SURROGATE_FORMAT: &str = "bmp";
-pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC: &[u8] = b"HARUKI_ASSET_PAYLOAD_BUNDLE_V1";
-pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC: u32 = 0x4250_4148; // HAPB
-pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION: u16 = 2;
-pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN: usize = 20;
-pub(super) const NATIVE_AOT_RGBA_IR_MAGIC: &[u8; 16] = b"HARUKI_RGBAIR_V1";
-pub(super) const NATIVE_AOT_RGBA_IR_HEADER_LEN: usize = 36;
-pub(super) const NATIVE_AOT_CONTEXT_LIST_PAGE_SIZE: usize = 4096;
+pub(super) const UNITY_ENGINE_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";
+pub(super) const UNITY_ENGINE_IMAGE_SURROGATE_FORMAT: &str = "bmp";
+#[allow(dead_code)]
+pub(super) const UNITY_ENGINE_FAST_IMAGE_FORMAT: &str = UNITY_ENGINE_DEFAULT_IMAGE_FORMAT;
+pub(super) const UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC: &[u8] = b"HARUKI_ASSET_PAYLOAD_BUNDLE_V1";
+pub(super) const UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC: u32 = 0x4250_4148; // HAPB
+pub(super) const UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION: u16 = 2;
+pub(super) const UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN: usize = 20;
+pub(super) const UNITY_ENGINE_RGBA_IR_MAGIC: &[u8; 16] = b"HARUKI_RGBAIR_V1";
+pub(super) const UNITY_ENGINE_RGBA_IR_HEADER_LEN: usize = 36;
+pub(super) const UNITY_ENGINE_CONTEXT_LIST_PAGE_SIZE: usize = 4096;
 pub(super) const ASSETSTUDIO_MANIFEST_LOCKS: usize = 64;
 pub(super) const ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS: usize = 220;
 pub(super) static ASSETSTUDIO_MANIFEST_APPEND_LOCKS: OnceLock<Vec<Mutex<()>>> = OnceLock::new();

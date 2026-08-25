@@ -82,17 +82,12 @@ type AssetStudioWorker struct {
 	lock   sync.Mutex
 }
 
-func NewAssetStudioWorker(workerPath, ffiLibrary string) (*AssetStudioWorker, error) {
+func NewAssetStudioWorker(workerPath string) (*AssetStudioWorker, error) {
 	workerPath, err := filepath.Abs(workerPath)
 	if err != nil {
 		return nil, err
 	}
-	ffiLibrary, err = filepath.Abs(ffiLibrary)
-	if err != nil {
-		return nil, err
-	}
-	cmd := exec.Command(workerPath, "--server", "--ffi-library", ffiLibrary)
-	cmd.Dir = filepath.Dir(ffiLibrary)
+	cmd := exec.Command(workerPath, "--server")
 	cmd.Stderr = io.Discard
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -175,13 +170,13 @@ type WorkerPool struct {
 	free    chan *AssetStudioWorker
 }
 
-func NewWorkerPool(workerPath, ffiLibrary string, size int) (*WorkerPool, error) {
+func NewWorkerPool(workerPath string, size int) (*WorkerPool, error) {
 	if size < 1 {
 		size = 1
 	}
 	pool := &WorkerPool{free: make(chan *AssetStudioWorker, size)}
 	for i := 0; i < size; i++ {
-		worker, err := NewAssetStudioWorker(workerPath, ffiLibrary)
+		worker, err := NewAssetStudioWorker(workerPath)
 		if err != nil {
 			pool.Close()
 			return nil, err
@@ -303,27 +298,19 @@ func ReadTexture2D(worker *AssetStudioWorker, contextID int64, assets []AssetInf
 	// Non-nil so an empty batch marshals as [] rather than null; the worker
 	// rejects null for the objects array.
 	objects := []map[string]any{}
-	// Upper bound for the packed payload block; compressed GPU formats can
-	// expand up to ~16x when decoded to raw RGBA. Above the worker's spill
-	// threshold this makes the worker stream payloads through a sparse temp
-	// file instead of memory. 0 keeps the in-memory path.
-	var payloadCapacityHint uint64
 	for _, asset := range assets {
 		if asset.Type == "Texture2D" {
 			objects = append(objects, map[string]any{
+				"index":        asset.Index,
 				"path_id":      asset.PathID,
 				"kind":         "image",
 				"image_format": "raw_rgba",
 			})
-			if asset.Size > 0 {
-				payloadCapacityHint += uint64(asset.Size)*16 + 1024*1024
-			}
 		}
 	}
 	result, err := worker.Call("context_read_objects", map[string]any{
-		"context_id":            contextID,
-		"objects":               objects,
-		"payload_capacity_hint": payloadCapacityHint,
+		"context_id": contextID,
+		"objects":    objects,
 	})
 	if err != nil {
 		return nil, err
@@ -372,21 +359,20 @@ func CloseContext(worker *AssetStudioWorker, contextID int64) error {
 }
 
 func main() {
-	ffiLibrary := flag.String("ffi-library", "", "Path to HarukiAssetStudioFFI dynamic library")
 	workerPath := flag.String("ffi-worker", "target/release/assetstudio_ffi_worker", "Path to assetstudio_ffi_worker")
 	bundle := flag.String("bundle", "", "UnityFS bundle path")
 	unityVersion := flag.String("unity-version", "2022.3.21f1", "Unity version fallback")
 	poolSize := flag.Int("pool-size", 2, "Number of worker processes")
 	readImages := flag.Bool("read-images", false, "Read Texture2D raw_rgba payloads")
 	flag.Parse()
-	if *ffiLibrary == "" || *bundle == "" {
-		panic("--ffi-library and --bundle are required")
+	if *bundle == "" {
+		panic("--bundle is required")
 	}
 	bundlePath, err := filepath.Abs(*bundle)
 	if err != nil {
 		panic(err)
 	}
-	pool, err := NewWorkerPool(*workerPath, *ffiLibrary, *poolSize)
+	pool, err := NewWorkerPool(*workerPath, *poolSize)
 	if err != nil {
 		panic(err)
 	}

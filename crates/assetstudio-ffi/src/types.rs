@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub(crate) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC: u32 = 0x4250_4148;
-pub(crate) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION: u16 = 2;
-pub(crate) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN: usize = 20;
+pub(crate) const UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC: u32 = 0x4250_4148;
+pub(crate) const UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION: u16 = 2;
+pub(crate) const UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN: usize = 20;
 #[derive(Debug, Error)]
 pub enum AssetStudioFfiError {
     #[error("{message}")]
@@ -124,12 +124,6 @@ pub struct AssetStudioFfiContextListObjectsResponse {
 pub struct AssetStudioFfiContextReadObjectsRequest {
     pub context_id: i64,
     pub objects: Vec<AssetStudioFfiContextReadObjectItemRequest>,
-    /// Expected upper bound for the packed payload block in bytes. When it exceeds
-    /// the worker's spill threshold, the worker maps a spill file up front and the
-    /// native library writes payloads straight into the mapping. 0 (the default for
-    /// older callers) keeps the in-memory path.
-    #[serde(default)]
-    pub payload_capacity_hint: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

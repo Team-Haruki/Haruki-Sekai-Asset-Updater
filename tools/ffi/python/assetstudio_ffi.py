@@ -399,9 +399,8 @@ def _read_str(response: ReadBatchRetryResponse, offset: int, length: int) -> str
 class AssetStudioFFI:
     def __init__(self, library_path: str | Path):
         self.library_path = str(library_path)
-        # Shipped native dependencies (Texture2DDecoderNative, AssetStudioFBXNative,
-        # ooz, fmod) are resolved by the library itself from its own directory; set
-        # HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH only for out-of-tree layouts.
+        # This is the cdylib built by unity-rs' assetstudio-ffi crate. The main
+        # updater links the same crate statically and does not load this file.
         self.lib = C.CDLL(self.library_path)
         self._bind_symbols()
         self.verify_layout()

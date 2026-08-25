@@ -1,13 +1,12 @@
 #!/usr/bin/env node
-// Minimal typed AssetStudioFFI binding for Node.js (koffi).
+// Minimal typed unity-rs assetstudio-ffi binding for Node.js (koffi).
 //
 // This mirrors the Rust `crates/assetstudio-ffi` direct typed ABI path:
 // capabilities -> abi_layout -> limits -> open -> paged list (size/into) ->
 // batch read direct retry -> close/result_free.
 //
-// Shipped native dependencies (Texture2DDecoderNative, AssetStudioFBXNative,
-// ooz, fmod) are resolved by the library itself from its own directory; set
-// HARUKI_ASSET_STUDIO_NATIVE_LIBRARY_PATH only for out-of-tree layouts.
+// This loads the cdylib built by unity-rs' assetstudio-ffi crate. The main
+// updater links the same crate statically and does not load this file.
 
 import koffi from "koffi";
 import { parseArgs } from "node:util";

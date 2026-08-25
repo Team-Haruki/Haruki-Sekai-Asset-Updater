@@ -327,7 +327,7 @@ pub(super) fn native_object_output_extension(
         "text_bytes" => suggested_extension
             .and_then(static_known_payload_extension)
             .unwrap_or("bytes"),
-        "image_bmp" => NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+        "image_bmp" => UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
         "image_raw_rgba" => "png",
         "image_png" => "png",
         "image_tga" => "tga",

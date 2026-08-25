@@ -21,8 +21,9 @@ use crate::core::config::{AppConfig, AssetHttpVersion, RegionConfig, RegionProvi
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::export_pipeline::{
-    export_unity_asset_bundle_payloads, flush_pending_native_image_writes,
-    post_process_exported_files, NativeObjectReadPlanStats, UnityAssetBundlePayloadExport,
+    export_unity_asset_bundle_payloads_with_registry, flush_pending_native_image_writes,
+    post_process_exported_files, NativeObjectReadPlanStats, NativeSemanticExportPathRegistry,
+    UnityAssetBundlePayloadExport,
 };
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
@@ -368,6 +369,7 @@ impl AssetExecutionContext {
         let post_process_active = std::sync::Arc::new(AtomicUsize::new(0));
         let mut joins = JoinSet::new();
         let mut post_process_joins = JoinSet::new();
+        let export_path_registry = NativeSemanticExportPathRegistry::default();
         let app_config_cloned = app_config.clone();
         let haruki_3d_work_root = self.haruki_3d_work_asset_root();
         Self::send_progress(
@@ -397,6 +399,7 @@ impl AssetExecutionContext {
             let progress = progress.clone();
             let cancel_flag = cancel_flag.clone();
             let haruki_3d_work_root = haruki_3d_work_root.clone();
+            let export_path_registry = export_path_registry.clone();
             joins.spawn(async move {
                 let download_slot_wait_started = Instant::now();
                 let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
@@ -429,6 +432,7 @@ impl AssetExecutionContext {
                         &task,
                         &progress,
                         haruki_3d_work_root.as_deref(),
+                        &export_path_registry,
                     )
                     .await
                 {
@@ -1300,6 +1304,7 @@ impl AssetExecutionContext {
         task: &DownloadTask,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
         haruki_3d_work_root: Option<&Path>,
+        export_path_registry: &NativeSemanticExportPathRegistry,
     ) -> Result<NativeBundlePostProcessJob, AssetExecutionError> {
         let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
             AssetExecutionError::MissingAssetSaveDir {
@@ -1403,13 +1408,14 @@ impl AssetExecutionContext {
             AssetCategory::Other(_) => "OnDemand",
         };
         let export_started = Instant::now();
-        let payload_export = export_unity_asset_bundle_payloads(
+        let payload_export = export_unity_asset_bundle_payloads_with_registry(
             app_config,
             &self.region,
             &temp_file,
             &task.bundle_path,
             Path::new(&asset_save_dir),
             category,
+            export_path_registry,
         )
         .await;
         let _ = remove_file_if_exists(&temp_file);

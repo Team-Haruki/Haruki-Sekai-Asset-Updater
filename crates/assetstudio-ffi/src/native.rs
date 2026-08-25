@@ -6,19 +6,15 @@ use std::ptr;
 
 use assetstudio_ffi::{
     ContextCloseRequest, ContextCloseResponse, ContextOpenRequest, ContextOpenResponse,
-    ObjectListIntoRequest, ObjectListRequest, ObjectReadBatchIntoRequest,
-    ObjectReadBatchRetryResponse, ObjectReadItemRequest, ObjectReadItemResponse, ObjectTable,
+    ObjectListIntoRequest, ObjectListRequest, ObjectReadBatchByIndexIntoRequest,
+    ObjectReadBatchIntoRequest, ObjectReadBatchRetryResponse, ObjectReadItemByIndexRequest,
+    ObjectReadItemRequest, ObjectReadItemResponse, ObjectTable,
 };
 
 use crate::types::*;
 
 pub const WORKER_PAYLOAD_FILE_PREFIX: &str = "haruki-assetstudio-worker-payload-";
 pub const WORKER_PAYLOAD_FILE_SUFFIX: &str = ".bin";
-
-pub struct PayloadSpillPlan {
-    pub directory: Option<PathBuf>,
-    pub threshold: usize,
-}
 
 pub enum CallPayload {
     Inline(Vec<u8>),
@@ -50,6 +46,10 @@ unsafe extern "C" {
     ) -> c_int;
     fn haruki_assetstudio_context_read_objects_direct_retry_v1(
         request: *const ObjectReadBatchIntoRequest,
+        response: *mut ObjectReadBatchRetryResponse,
+    ) -> c_int;
+    fn haruki_assetstudio_context_read_objects_by_index_direct_retry_v1(
+        request: *const ObjectReadBatchByIndexIntoRequest,
         response: *mut ObjectReadBatchRetryResponse,
     ) -> c_int;
 }
@@ -108,22 +108,6 @@ impl LoadedAssetStudioFfiLibrary {
                 ))
             }
         }
-    }
-
-    pub fn call_typed_request_with_spill(
-        &self,
-        request: &AssetStudioFfiRequest,
-        spill: Option<&PayloadSpillPlan>,
-    ) -> Result<(c_int, AssetStudioFfiResponse, CallPayload), AssetStudioFfiError> {
-        // The linked engine's compatibility ABI owns retry buffers. Convert its
-        // response once, then let the worker apply the shared spill threshold.
-        // Keeping the plan in this API preserves worker protocol compatibility
-        // and leaves room for a direct-to-file core API without another IPC change.
-        if let Some(plan) = spill {
-            let _ = (&plan.directory, plan.threshold);
-        }
-        let (status, response, payload) = self.call_typed_request(request)?;
-        Ok((status, response, CallPayload::Inline(payload)))
     }
 
     fn open_context(
@@ -280,7 +264,6 @@ impl LoadedAssetStudioFfiLibrary {
     ) -> Result<(c_int, AssetStudioFfiObjectReadBatchResponse, Vec<u8>), AssetStudioFfiError> {
         let mut kinds = Vec::with_capacity(request.objects.len());
         let mut formats = Vec::with_capacity(request.objects.len());
-        let mut items = Vec::with_capacity(request.objects.len());
         for item in &request.objects {
             let kind = CString::new(item.kind.clone()).map_err(|source| {
                 AssetStudioFfiError::AssetStudioFfi {
@@ -292,34 +275,84 @@ impl LoadedAssetStudioFfiLibrary {
                     message: format!("native read image format contains nul byte: {source}"),
                 }
             })?;
-            items.push(ObjectReadItemRequest {
-                path_id: item.path_id,
-                kind_utf8: kind.as_ptr().cast(),
-                kind_utf8_len: kind.as_bytes().len() as c_int,
-                image_format_utf8: format.as_ptr().cast(),
-                image_format_utf8_len: format.as_bytes().len() as c_int,
-            });
             kinds.push(kind);
             formats.push(format);
         }
-        let typed_request = ObjectReadBatchIntoRequest {
-            struct_size: size_of::<ObjectReadBatchIntoRequest>() as c_int,
-            context_id: request.context_id,
-            items: items.as_ptr(),
-            count: items.len() as c_int,
-            flags: 0,
-            items_buffer: ptr::null_mut(),
-            items_buffer_len: 0,
-            payload: ptr::null_mut(),
-            payload_len: 0,
-            reserved: 0,
-        };
         let mut response = ObjectReadBatchRetryResponse::default();
-        let status = unsafe {
-            haruki_assetstudio_context_read_objects_direct_retry_v1(&typed_request, &mut response)
+        let count = checked_c_int(request.objects.len(), "context_read_objects count")?;
+        let use_object_indexes = request.objects.iter().all(|item| item.index.is_some());
+        let status = if use_object_indexes {
+            let items = request
+                .objects
+                .iter()
+                .zip(&kinds)
+                .zip(&formats)
+                .map(|((item, kind), format)| {
+                    Ok(ObjectReadItemByIndexRequest {
+                        object_index: checked_c_int(
+                            item.index.expect("all object indexes are present"),
+                            "context_read_objects object index",
+                        )?,
+                        kind_utf8: kind.as_ptr().cast(),
+                        kind_utf8_len: kind.as_bytes().len() as c_int,
+                        image_format_utf8: format.as_ptr().cast(),
+                        image_format_utf8_len: format.as_bytes().len() as c_int,
+                    })
+                })
+                .collect::<Result<Vec<_>, AssetStudioFfiError>>()?;
+            let typed_request = ObjectReadBatchByIndexIntoRequest {
+                struct_size: size_of::<ObjectReadBatchByIndexIntoRequest>() as c_int,
+                context_id: request.context_id,
+                items: items.as_ptr(),
+                count,
+                flags: 0,
+                reserved: 0,
+                items_buffer: ptr::null_mut(),
+                items_buffer_len: 0,
+                payload: ptr::null_mut(),
+                payload_len: 0,
+            };
+            unsafe {
+                haruki_assetstudio_context_read_objects_by_index_direct_retry_v1(
+                    &typed_request,
+                    &mut response,
+                )
+            }
+        } else {
+            let items = request
+                .objects
+                .iter()
+                .zip(&kinds)
+                .zip(&formats)
+                .map(|((item, kind), format)| ObjectReadItemRequest {
+                    path_id: item.path_id,
+                    kind_utf8: kind.as_ptr().cast(),
+                    kind_utf8_len: kind.as_bytes().len() as c_int,
+                    image_format_utf8: format.as_ptr().cast(),
+                    image_format_utf8_len: format.as_bytes().len() as c_int,
+                })
+                .collect::<Vec<_>>();
+            let typed_request = ObjectReadBatchIntoRequest {
+                struct_size: size_of::<ObjectReadBatchIntoRequest>() as c_int,
+                context_id: request.context_id,
+                items: items.as_ptr(),
+                count,
+                flags: 0,
+                items_buffer: ptr::null_mut(),
+                items_buffer_len: 0,
+                payload: ptr::null_mut(),
+                payload_len: 0,
+                reserved: 0,
+            };
+            unsafe {
+                haruki_assetstudio_context_read_objects_direct_retry_v1(
+                    &typed_request,
+                    &mut response,
+                )
+            }
         };
         let output = typed_read_objects_response(request, status, &response);
-        let payload = typed_read_objects_payload_bundle(&response);
+        let payload = typed_read_objects_payload_bundle(&response, use_object_indexes);
         if response.result_handle != 0 {
             unsafe {
                 haruki_assetstudio_result_free(response.result_handle);
@@ -558,7 +591,7 @@ fn typed_read_objects_response(
         payload_bytes_by_kind,
         payload_len: response.payload_len,
         object_count: response.returned_count.max(0) as usize,
-        payload_bundle_version: NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION as u32,
+        payload_bundle_version: UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION as u32,
         payload_bundle_entry_count: typed_read_items(response)
             .iter()
             .filter(|item| item.status == 0 && item.payload_len > 0)
@@ -589,11 +622,19 @@ fn typed_read_objects_response(
 
 fn typed_read_objects_payload_bundle(
     response: &ObjectReadBatchRetryResponse,
+    use_object_indexes: bool,
 ) -> Result<Vec<u8>, AssetStudioFfiError> {
     let entries = typed_read_items(response)
         .iter()
         .filter(|item| item.status == 0 && item.payload_len > 0)
-        .map(|item| (item.path_id.to_string(), typed_read_payload(response, item)))
+        .map(|item| {
+            let name = if use_object_indexes {
+                format!("index:{}", item.index)
+            } else {
+                item.path_id.to_string()
+            };
+            (name, typed_read_payload(response, item))
+        })
         .collect::<Vec<_>>();
     write_native_payload_bundle(entries)
 }
@@ -608,7 +649,7 @@ fn write_native_payload_bundle(
         .iter()
         .map(|(_, payload)| payload.len() as u64)
         .sum::<u64>();
-    let mut total_len = NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN;
+    let mut total_len = UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN;
     for (name, payload) in &entries {
         total_len = total_len
             .checked_add(4)
@@ -620,9 +661,9 @@ fn write_native_payload_bundle(
             })?;
     }
     let mut bundle = Vec::with_capacity(total_len);
-    bundle.extend_from_slice(&NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
-    bundle.extend_from_slice(&NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
-    bundle.extend_from_slice(&(NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes());
+    bundle.extend_from_slice(&UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
+    bundle.extend_from_slice(&UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
+    bundle.extend_from_slice(&(UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes());
     bundle.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     bundle.extend_from_slice(&payload_data_bytes.to_le_bytes());
     for (name, payload) in entries {

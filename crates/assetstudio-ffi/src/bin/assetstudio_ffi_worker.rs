@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use haruki_assetstudio_ffi::{
     AssetStudioFfiError, AssetStudioFfiOperation, AssetStudioFfiRequest, AssetStudioFfiResponse,
-    CallPayload, LoadedAssetStudioFfiLibrary, PayloadSpillPlan, WORKER_PAYLOAD_FILE_PREFIX,
+    CallPayload, LoadedAssetStudioFfiLibrary, WORKER_PAYLOAD_FILE_PREFIX,
     WORKER_PAYLOAD_FILE_SUFFIX,
 };
 use serde::{Deserialize, Serialize};
@@ -371,22 +371,20 @@ fn call_native_with_stdout_suppressed(
     native_library: &LoadedAssetStudioFfiLibrary,
     request: &AssetStudioFfiRequest,
 ) -> Result<(i32, AssetStudioFfiResponse, CallPayload), Box<AssetStudioFfiError>> {
-    let spill = PayloadSpillPlan {
-        directory: payload_spill_dir(),
-        threshold: payload_file_threshold(),
-    };
     #[cfg(unix)]
     {
         let _guard = StdoutRedirectGuard::to_null();
         native_library
-            .call_typed_request_with_spill(request, Some(&spill))
+            .call_typed_request(request)
+            .map(|(status, response, payload)| (status, response, CallPayload::Inline(payload)))
             .map_err(Box::new)
     }
 
     #[cfg(not(unix))]
     {
         native_library
-            .call_typed_request_with_spill(request, Some(&spill))
+            .call_typed_request(request)
+            .map(|(status, response, payload)| (status, response, CallPayload::Inline(payload)))
             .map_err(Box::new)
     }
 }

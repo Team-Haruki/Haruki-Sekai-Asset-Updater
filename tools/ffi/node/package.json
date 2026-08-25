@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Node.js samples for the HarukiAssetStudioFFI typed C ABI and the assetstudio_ffi_worker stdio protocol",
+  "description": "Node.js samples for the unity-rs typed C ABI and the assetstudio_ffi_worker stdio protocol",
   "engines": {
     "node": ">=20"
   },

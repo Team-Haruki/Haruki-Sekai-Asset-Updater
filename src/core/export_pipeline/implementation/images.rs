@@ -58,7 +58,7 @@ pub(super) fn convert_native_surrogate_images_to_png(
         export_path,
         scoped_post_process,
         scoped_files,
-        NATIVE_AOT_IMAGE_SURROGATE_FORMAT,
+        UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
     )?;
     run_path_tasks(surrogate_files, image_concurrency, move |surrogate_file| {
         let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;

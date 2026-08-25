@@ -33,7 +33,7 @@ pub(super) async fn run_assetstudio_ffi_object_export(
             .asset_studio
             .image_format
             .as_deref()
-            .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
+            .unwrap_or(UNITY_ENGINE_DEFAULT_IMAGE_FORMAT),
         read_batch_size: app_config.backends.asset_studio.read_batch_size,
     };
     let worker_path =
@@ -340,7 +340,7 @@ pub(super) async fn list_assetstudio_ffi_context_objects_worker(
         let request = AssetStudioFfiContextListObjectsRequest {
             context_id,
             offset,
-            limit: NATIVE_AOT_CONTEXT_LIST_PAGE_SIZE,
+            limit: UNITY_ENGINE_CONTEXT_LIST_PAGE_SIZE,
         };
         let request = AssetStudioFfiRequest::ContextListObjects(request);
         let output = caller.call(&request).await?;
@@ -412,7 +412,7 @@ pub(super) fn native_object_read_subchunks<'a>(
     let mut subchunks = Vec::new();
     let mut group_start = 0usize;
     for (index, asset) in asset_chunk.iter().enumerate() {
-        if !is_native_aot_non_bmp_image_read(asset, image_format) {
+        if !is_unity_engine_non_bmp_image_read(asset, image_format) {
             continue;
         }
         if group_start < index {
@@ -427,7 +427,7 @@ pub(super) fn native_object_read_subchunks<'a>(
     subchunks
 }
 
-pub(super) fn is_native_aot_non_bmp_image_read(
+pub(super) fn is_unity_engine_non_bmp_image_read(
     asset: &AssetStudioFfiAssetInfo,
     image_format: &str,
 ) -> bool {
@@ -542,32 +542,14 @@ pub(super) fn native_object_read_batch_request(
                 image_format: native_image_format_for_asset(asset, image_format),
             })
             .collect(),
-        payload_capacity_hint: native_object_read_payload_capacity_hint(asset_chunk, image_format),
     }
-}
-
-pub(super) fn native_object_read_payload_capacity_hint(
-    asset_chunk: &[&AssetStudioFfiAssetInfo],
-    image_format: &str,
-) -> u64 {
-    asset_chunk
-        .iter()
-        .map(|asset| {
-            let size = asset.size.max(0) as u64;
-            if is_native_aot_non_bmp_image_read(asset, image_format) {
-                size.saturating_mul(16).saturating_add(1024 * 1024)
-            } else {
-                size.saturating_mul(2).saturating_add(64 * 1024)
-            }
-        })
-        .fold(0u64, u64::saturating_add)
 }
 
 pub(super) fn native_image_format_for_asset(
     _asset: &AssetStudioFfiAssetInfo,
     _configured: &str,
 ) -> String {
-    NATIVE_AOT_DEFAULT_IMAGE_FORMAT.to_string()
+    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT.to_string()
 }
 
 pub(super) fn record_native_object_read_batch_diagnostics(

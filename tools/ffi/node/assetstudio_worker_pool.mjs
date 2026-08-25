@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { readFile, unlink } from "node:fs/promises";
-import { resolve, dirname } from "node:path";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 const MAX_FRAME_SIZE = 256 * 1024 * 1024;
@@ -50,13 +50,11 @@ class FrameReader {
 }
 
 export class AssetStudioWorker {
-  constructor(workerPath, ffiLibrary) {
+  constructor(workerPath) {
     workerPath = resolve(workerPath);
-    ffiLibrary = resolve(ffiLibrary);
     this.nextId = 1;
     this.queue = Promise.resolve();
-    this.proc = spawn(workerPath, ["--server", "--ffi-library", ffiLibrary], {
-      cwd: dirname(ffiLibrary),
+    this.proc = spawn(workerPath, ["--server"], {
       stdio: ["pipe", "pipe", "inherit"],
     });
     this.reader = new FrameReader(this.proc.stdout);
@@ -109,8 +107,8 @@ export class AssetStudioWorker {
 }
 
 export class AssetStudioWorkerPool {
-  constructor(workerPath, ffiLibrary, size) {
-    this.workers = Array.from({ length: Math.max(1, size) }, () => new AssetStudioWorker(workerPath, ffiLibrary));
+  constructor(workerPath, size) {
+    this.workers = Array.from({ length: Math.max(1, size) }, () => new AssetStudioWorker(workerPath));
     this.free = [...this.workers];
     this.waiters = [];
   }
@@ -179,18 +177,14 @@ async function listAllObjects(worker, contextId) {
 
 async function readTexture2D(worker, contextId, assets) {
   const textures = assets.filter((asset) => asset.type === "Texture2D");
-  // Upper bound for the packed payload block; compressed GPU formats can expand
-  // up to ~16x when decoded to raw RGBA. Above the worker's spill threshold this
-  // makes the worker stream payloads through a sparse temp file instead of
-  // memory. 0 keeps the in-memory path.
-  const payloadCapacityHint = textures.reduce(
-    (total, asset) => total + Math.max(0, asset.size ?? 0) * 16 + 1024 * 1024,
-    0
-  );
   const output = await worker.call("context_read_objects", {
     context_id: contextId,
-    objects: textures.map((asset) => ({ path_id: asset.path_id, kind: "image", image_format: "raw_rgba" })),
-    payload_capacity_hint: payloadCapacityHint,
+    objects: textures.map((asset) => ({
+      index: asset.index,
+      path_id: asset.path_id,
+      kind: "image",
+      image_format: "raw_rgba",
+    })),
   });
   const body = responseBody(output, "context_read_objects");
   return {
@@ -209,7 +203,6 @@ async function readTexture2D(worker, contextId, assets) {
 async function main() {
   const { values } = parseArgs({
     options: {
-      "ffi-library": { type: "string" },
       "ffi-worker": { type: "string", default: "target/release/assetstudio_ffi_worker" },
       bundle: { type: "string" },
       "unity-version": { type: "string", default: "2022.3.21f1" },
@@ -217,14 +210,14 @@ async function main() {
       "read-images": { type: "boolean", default: false },
     },
   });
-  if (!values["ffi-library"] || !values.bundle) {
+  if (!values.bundle) {
     console.error(
-      "usage: node assetstudio_worker_pool.mjs --ffi-library <path> --bundle <path> [--ffi-worker <path>] [--pool-size <n>] [--read-images]"
+      "usage: node assetstudio_worker_pool.mjs --bundle <path> [--ffi-worker <path>] [--pool-size <n>] [--read-images]"
     );
     return 2;
   }
 
-  const pool = new AssetStudioWorkerPool(values["ffi-worker"], values["ffi-library"], Number(values["pool-size"]));
+  const pool = new AssetStudioWorkerPool(values["ffi-worker"], Number(values["pool-size"]));
   try {
     const worker = await pool.acquire();
     try {

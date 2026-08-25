@@ -593,7 +593,7 @@ pub(super) fn write_native_image_payload_final_files_with_registry(
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     let formats = region.export.images.output_formats();
     let raw_rgba = payload
-        .starts_with(NATIVE_AOT_RGBA_IR_MAGIC)
+        .starts_with(UNITY_ENGINE_RGBA_IR_MAGIC)
         .then(|| parse_native_rgba_ir_payload(payload, target))
         .transpose()?;
     let mut image: Option<image::DynamicImage> = None;
@@ -672,7 +672,9 @@ pub(super) fn native_image_surrogate_public_target(
     if !target
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case(NATIVE_AOT_IMAGE_SURROGATE_FORMAT))
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case(UNITY_ENGINE_IMAGE_SURROGATE_FORMAT)
+        })
     {
         return target.to_path_buf();
     }
@@ -712,7 +714,7 @@ pub(super) fn decode_image_payload_bytes(
     payload: &[u8],
     target: &Path,
 ) -> Result<image::DynamicImage, ExportPipelineError> {
-    if payload.starts_with(NATIVE_AOT_RGBA_IR_MAGIC) {
+    if payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
         return decode_native_rgba_ir_payload(payload, target);
     }
     ImageReader::new(Cursor::new(payload))
@@ -757,7 +759,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
     payload: &'a [u8],
     target: &Path,
 ) -> Result<NativeRgbaIr<'a>, ExportPipelineError> {
-    if payload.len() < NATIVE_AOT_RGBA_IR_HEADER_LEN {
+    if payload.len() < UNITY_ENGINE_RGBA_IR_HEADER_LEN {
         return Err(ExportPipelineError::AssetStudioFfi {
             message: format!(
                 "native raw RGBA image payload for `{}` is too short: {} bytes",
@@ -766,7 +768,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
             ),
         });
     }
-    if !payload.starts_with(NATIVE_AOT_RGBA_IR_MAGIC) {
+    if !payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
         return Err(ExportPipelineError::AssetStudioFfi {
             message: format!(
                 "native raw RGBA image payload for `{}` has invalid magic",
@@ -820,7 +822,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
         })?;
     let pixel_bytes = stride
         .checked_mul(height_usize)
-        .and_then(|value| value.checked_add(NATIVE_AOT_RGBA_IR_HEADER_LEN))
+        .and_then(|value| value.checked_add(UNITY_ENGINE_RGBA_IR_HEADER_LEN))
         .ok_or_else(|| ExportPipelineError::AssetStudioFfi {
             message: format!(
                 "native raw RGBA image payload for `{}` is too large",
@@ -843,7 +845,7 @@ pub(super) fn parse_native_rgba_ir_payload<'a>(
         stride,
         row_bytes,
         height_usize,
-        pixels: &payload[NATIVE_AOT_RGBA_IR_HEADER_LEN..pixel_bytes],
+        pixels: &payload[UNITY_ENGINE_RGBA_IR_HEADER_LEN..pixel_bytes],
     })
 }
 
@@ -1168,17 +1170,17 @@ pub(super) fn parse_payload_bundle_borrowed(
     let mut cursor = 0usize;
     if payload.len() >= 4
         && u32::from_le_bytes(payload[0..4].try_into().unwrap())
-            == NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC
+            == UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC
     {
         cursor += 4;
         let version = read_bundle_u16(payload, &mut cursor)?;
-        if version != NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION {
+        if version != UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION {
             return Err(ExportPipelineError::AssetStudioFfi {
                 message: format!("native payload bundle has unsupported version {version}"),
             });
         }
         let header_len = read_bundle_u16(payload, &mut cursor)? as usize;
-        if header_len < NATIVE_AOT_PAYLOAD_BUNDLE_V2_HEADER_LEN || header_len > payload.len() {
+        if header_len < UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN || header_len > payload.len() {
             return Err(ExportPipelineError::AssetStudioFfi {
                 message: format!("native payload bundle has invalid header length {header_len}"),
             });
@@ -1194,8 +1196,8 @@ pub(super) fn parse_payload_bundle_borrowed(
         );
     }
 
-    if payload.starts_with(NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC) {
-        cursor += NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC.len();
+    if payload.starts_with(UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC) {
+        cursor += UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC.len();
         let count = read_bundle_u32(payload, &mut cursor)? as usize;
         return parse_payload_bundle_grouped_entries(payload, cursor, count);
     }

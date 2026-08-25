@@ -21,22 +21,15 @@ class WorkerResponse:
 
 
 class AssetStudioWorker:
-    def __init__(self, worker_path: str | Path, ffi_library: str | Path):
+    def __init__(self, worker_path: str | Path):
         self._next_id = 1
         self._lock = threading.Lock()
         worker_path = Path(worker_path).resolve()
-        ffi_library = Path(ffi_library).resolve()
         self.proc = subprocess.Popen(
-            [
-                str(worker_path),
-                "--server",
-                "--ffi-library",
-                str(ffi_library),
-            ],
+            [str(worker_path), "--server"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=Path(ffi_library).resolve().parent,
         )
 
     def call(self, operation: str, request: dict[str, Any]) -> WorkerResponse:
@@ -131,10 +124,10 @@ class WorkerLease:
 
 
 class AssetStudioWorkerPool:
-    def __init__(self, worker_path: str | Path, ffi_library: str | Path, size: int):
+    def __init__(self, worker_path: str | Path, size: int):
         self._workers: queue.LifoQueue[AssetStudioWorker] = queue.LifoQueue()
         self._all_workers = [
-            AssetStudioWorker(worker_path, ffi_library) for _ in range(max(1, size))
+            AssetStudioWorker(worker_path) for _ in range(max(1, size))
         ]
         for worker in self._all_workers:
             self._workers.put(worker)
@@ -197,22 +190,19 @@ def list_all_objects(worker: AssetStudioWorker, context_id: int) -> list[dict[st
 
 def read_texture2d(worker: AssetStudioWorker, context_id: int, assets: list[dict[str, Any]]) -> dict[str, Any]:
     textures = [asset for asset in assets if asset.get("type") == "Texture2D"]
-    # Upper bound for the packed payload block; compressed GPU formats can expand
-    # up to ~16x when decoded to raw RGBA. Above the worker's spill threshold this
-    # makes the worker stream payloads through a sparse temp file instead of
-    # memory. 0 keeps the in-memory path.
-    payload_capacity_hint = sum(
-        max(0, int(asset.get("size") or 0)) * 16 + 1024 * 1024 for asset in textures
-    )
     output = worker.call(
         "context_read_objects",
         {
             "context_id": context_id,
             "objects": [
-                {"path_id": asset["path_id"], "kind": "image", "image_format": "raw_rgba"}
+                {
+                    "index": asset["index"],
+                    "path_id": asset["path_id"],
+                    "kind": "image",
+                    "image_format": "raw_rgba",
+                }
                 for asset in textures
             ],
-            "payload_capacity_hint": payload_capacity_hint,
         },
     )
     body = response_body(output, "context_read_objects")
@@ -234,7 +224,6 @@ def read_texture2d(worker: AssetStudioWorker, context_id: int, assets: list[dict
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ffi-library", required=True)
     parser.add_argument("--ffi-worker", default="target/release/assetstudio_ffi_worker")
     parser.add_argument("--bundle", required=True)
     parser.add_argument("--unity-version", default="2022.3.21f1")
@@ -242,7 +231,7 @@ def main() -> int:
     parser.add_argument("--read-images", action="store_true")
     args = parser.parse_args()
 
-    pool = AssetStudioWorkerPool(args.ffi_worker, args.ffi_library, args.pool_size)
+    pool = AssetStudioWorkerPool(args.ffi_worker, args.pool_size)
     try:
         with pool.acquire() as worker:
             context_id = open_context(worker, str(Path(args.bundle).resolve()), args.unity_version)

@@ -16,12 +16,9 @@
 - Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
 - Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
-- Uses the double-FFI production path by default: AssetStudio FFI worker
-  pool plus FFmpeg/rsmpeg FFI. FFmpeg CLI remains available as a media fallback
-  for platforms where FFI is unavailable.
-- The native AssetStudioFFI library is built from
-  [`Team-Haruki/AssetStudio`](https://github.com/Team-Haruki/AssetStudio)'s
-  `sekai-modified` branch, which is the fork's default branch.
+- Uses the linked-in [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs)
+  engine through an isolated worker pool. FFmpeg/rsmpeg FFI handles media;
+  FFmpeg CLI remains available as a fallback where FFI is unavailable.
 
 ## Layout
 
