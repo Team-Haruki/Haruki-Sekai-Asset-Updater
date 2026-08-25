@@ -1,7 +1,7 @@
 # unity-rs compatibility ABI samples
 
 The updater itself does not use these samples. Its production path links the
-pinned `assetstudio-core` crate and calls the pure Rust `Studio` API directly.
+pinned `unity-rs-core` crate and calls the pure Rust `Studio` API directly.
 
 The Python and Node.js clients in this directory are retained for third-party
 callers that deliberately build unity-rs's archived `assetstudio-ffi`

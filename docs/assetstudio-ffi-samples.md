@@ -1,6 +1,6 @@
 # unity-rs AssetStudio samples
 
-The updater links the pinned `Team-Haruki/unity-rs` `assetstudio-core` crate and
+The updater links the pinned `Team-Haruki/unity-rs` `unity-rs-core` crate and
 calls its pure Rust `Studio` API directly. No AssetStudio worker, NativeAOT
 library, stdio protocol, or .NET toolchain is part of the runtime or build chain.
 
