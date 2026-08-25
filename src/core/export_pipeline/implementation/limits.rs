@@ -1,6 +1,5 @@
 use super::*;
 
-#[allow(dead_code)]
 pub(super) struct CpuBudgetAcquire {
     pub(super) permit: CpuBudgetPermit,
     pub(super) wait_ms: u64,

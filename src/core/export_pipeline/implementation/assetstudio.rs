@@ -36,16 +36,6 @@ pub(super) async fn run_assetstudio_ffi_object_export(
             .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
         read_batch_size: app_config.backends.asset_studio.read_batch_size,
     };
-    if app_config.backends.asset_studio.mode == AssetStudioFfiMode::Direct {
-        return call_assetstudio_ffi_object_export_direct(
-            app_config,
-            &open_request,
-            &unpack_options,
-            path_registry,
-        )
-        .await;
-    }
-
     let worker_path =
         configured_worker_path(app_config.backends.asset_studio.worker_path.as_deref())?;
     let pool = AssetStudioWorkerPool::shared(
@@ -83,100 +73,6 @@ pub(super) async fn run_assetstudio_ffi_object_export(
             .await
         }
         Err(error) => Err(error),
-    }
-}
-
-async fn call_assetstudio_ffi_object_export_direct(
-    app_config: &AppConfig,
-    open_request: &AssetStudioFfiContextOpenRequest,
-    options: &NativeObjectExportOptions<'_>,
-    path_registry: &NativeSemanticExportPathRegistry,
-) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    let wait_started = Instant::now();
-    let cpu_budget_slot = acquire_cpu_budget_permit(app_config.effective_cpu_budget()).await?;
-    let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    let open_request = open_request.clone();
-    let options = NativeObjectExportOptionsOwned::from_options(options);
-    let path_registry = path_registry.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let library = shared_direct_assetstudio_library();
-        let mut caller = DirectAssetStudioCaller {
-            library,
-            call_seq: 0,
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|source| ExportPipelineError::AssetStudioFfi {
-                message: format!("failed to create assetstudio direct runtime: {source}"),
-            })?;
-        runtime.block_on(call_assetstudio_ffi_object_export_with_caller(
-            &mut caller,
-            &open_request,
-            &options.as_ref(),
-            &path_registry,
-        ))
-    })
-    .await
-    .map_err(|source| ExportPipelineError::AssetStudioFfi {
-        message: format!("assetstudio ffi direct export task failed: {source}"),
-    })?;
-    drop(cpu_budget_slot.permit);
-    let mut summary = result?;
-    summary.phase_ms.insert("direct.wait".to_string(), wait_ms);
-    summary.phase_ms.insert(
-        "direct.cpu_budget_wait".to_string(),
-        cpu_budget_slot.wait_ms,
-    );
-    summary
-        .phase_ms
-        .insert("cpu_budget.wait".to_string(), cpu_budget_slot.wait_ms);
-    Ok(summary)
-}
-
-/// One handle for the process. The engine is linked in, so there is nothing to
-/// key this by and nothing that can fail.
-fn shared_direct_assetstudio_library() -> Arc<LoadedAssetStudioFfiLibrary> {
-    static LIBRARY: OnceLock<Arc<LoadedAssetStudioFfiLibrary>> = OnceLock::new();
-    LIBRARY
-        .get_or_init(|| Arc::new(LoadedAssetStudioFfiLibrary::load()))
-        .clone()
-}
-
-#[derive(Clone)]
-struct NativeObjectExportOptionsOwned {
-    output_dir: PathBuf,
-    export_path: String,
-    strip_path_prefix: String,
-    region: RegionConfig,
-    read_kinds: BTreeMap<String, String>,
-    image_format: String,
-    read_batch_size: usize,
-}
-
-impl NativeObjectExportOptionsOwned {
-    fn from_options(options: &NativeObjectExportOptions<'_>) -> Self {
-        Self {
-            output_dir: options.output_dir.to_path_buf(),
-            export_path: options.export_path.to_string(),
-            strip_path_prefix: options.strip_path_prefix.to_string(),
-            region: options.region.clone(),
-            read_kinds: options.read_kinds.clone(),
-            image_format: options.image_format.to_string(),
-            read_batch_size: options.read_batch_size,
-        }
-    }
-
-    fn as_ref(&self) -> NativeObjectExportOptions<'_> {
-        NativeObjectExportOptions {
-            output_dir: &self.output_dir,
-            export_path: &self.export_path,
-            strip_path_prefix: &self.strip_path_prefix,
-            region: &self.region,
-            read_kinds: &self.read_kinds,
-            image_format: &self.image_format,
-            read_batch_size: self.read_batch_size,
-        }
     }
 }
 
@@ -277,29 +173,6 @@ impl AssetStudioObjectExportCaller for WorkerLease {
         request: &AssetStudioFfiRequest,
     ) -> Result<WorkerOutput, ExportPipelineError> {
         Ok(WorkerLease::call(self, request).await?)
-    }
-}
-
-struct DirectAssetStudioCaller {
-    library: Arc<LoadedAssetStudioFfiLibrary>,
-    call_seq: u64,
-}
-
-impl AssetStudioObjectExportCaller for DirectAssetStudioCaller {
-    async fn call(
-        &mut self,
-        request: &AssetStudioFfiRequest,
-    ) -> Result<WorkerOutput, ExportPipelineError> {
-        self.call_seq = self.call_seq.saturating_add(1);
-        let (status, response, payload) = self.library.call_typed_request(request)?;
-        Ok(WorkerOutput {
-            status: status.to_string(),
-            status_success: status == 0,
-            response,
-            stderr: String::new(),
-            payload,
-            payload_file: None,
-        })
     }
 }
 
@@ -561,63 +434,6 @@ pub(super) fn is_native_aot_non_bmp_image_read(
     is_native_image_asset(asset) && native_image_format_for_asset(asset, image_format) != "bmp"
 }
 
-#[allow(dead_code)]
-pub(super) fn parse_assetstudio_ffi_object_read_worker_output_recoverable(
-    output: WorkerOutput,
-    asset: &AssetStudioFfiAssetInfo,
-) -> Result<NativeObjectReadParseResult, ExportPipelineError> {
-    let response = output.response.into_object_read()?;
-    for warning in &response.warnings {
-        warn!(warning = %warning, "assetstudio ffi object read warning");
-    }
-    if !(output.status_success && response.success) {
-        let message = response.error.clone().unwrap_or_else(|| {
-            format!(
-                "native context_read_object failed with status {}: {}",
-                output.status,
-                output.stderr.trim()
-            )
-        });
-        warn!(
-            path_id = asset.path_id,
-            asset_type = asset.asset_type.as_deref().unwrap_or(""),
-            name = asset.name.as_deref().unwrap_or(""),
-            error = %message,
-            "assetstudio ffi object read failed; skipping object"
-        );
-        if let Some(payload_file) = output.payload_file {
-            let _ = remove_file_if_exists(&payload_file);
-        }
-        return Ok(NativeObjectReadParseResult::Skipped(
-            NativeSkippedObjectRead {
-                path_id: asset.path_id,
-                asset_type: asset.asset_type.clone(),
-                name: asset.name.clone(),
-                container: asset.container.clone(),
-                error: message,
-            },
-        ));
-    }
-    let payload = if !output.payload.is_empty() {
-        if let Some(payload_file) = output.payload_file {
-            let _ = remove_file_if_exists(&payload_file);
-        }
-        output.payload
-    } else if let Some(payload_file) = output.payload_file {
-        let payload = std::fs::read(&payload_file).map_err(|source| ExportPipelineError::Io {
-            path: payload_file.clone(),
-            source,
-        })?;
-        let _ = remove_file_if_exists(&payload_file);
-        payload
-    } else {
-        Vec::new()
-    };
-    Ok(NativeObjectReadParseResult::Read(Box::new(
-        AssetStudioFfiObjectReadOutput { response, payload },
-    )))
-}
-
 pub(super) fn select_native_object_readable_assets<'a>(
     assets: &'a [AssetStudioFfiAssetInfo],
     configured_asset_types: &[String],
@@ -720,12 +536,31 @@ pub(super) fn native_object_read_batch_request(
         objects: asset_chunk
             .iter()
             .map(|asset| AssetStudioFfiContextReadObjectItemRequest {
+                index: Some(asset.index),
                 path_id: asset.path_id,
                 kind: native_read_kind_for_asset(asset, read_kinds),
                 image_format: native_image_format_for_asset(asset, image_format),
             })
             .collect(),
+        payload_capacity_hint: native_object_read_payload_capacity_hint(asset_chunk, image_format),
     }
+}
+
+pub(super) fn native_object_read_payload_capacity_hint(
+    asset_chunk: &[&AssetStudioFfiAssetInfo],
+    image_format: &str,
+) -> u64 {
+    asset_chunk
+        .iter()
+        .map(|asset| {
+            let size = asset.size.max(0) as u64;
+            if is_native_aot_non_bmp_image_read(asset, image_format) {
+                size.saturating_mul(16).saturating_add(1024 * 1024)
+            } else {
+                size.saturating_mul(2).saturating_add(64 * 1024)
+            }
+        })
+        .fold(0u64, u64::saturating_add)
 }
 
 pub(super) fn native_image_format_for_asset(
@@ -829,16 +664,11 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
         if let Some(payload_file) = output.payload_file {
             let _ = remove_file_if_exists(&payload_file);
         }
-        output.payload
+        output.payload.into()
     } else if let Some(payload_file) = output.payload_file {
-        let payload = std::fs::read(&payload_file).map_err(|source| ExportPipelineError::Io {
-            path: payload_file.clone(),
-            source,
-        })?;
-        let _ = remove_file_if_exists(&payload_file);
-        payload
+        map_spilled_payload(&payload_file)?
     } else {
-        Vec::new()
+        bytes::Bytes::new()
     };
 
     if !(output.status_success && response.success) && response.reads.len() != assets.len() {
@@ -897,7 +727,7 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
     let payloads = if payload.is_empty() {
         HashMap::new()
     } else {
-        parse_payload_bundle_borrowed(&payload)?
+        parse_payload_bundle_shared(&payload)?
             .into_iter()
             .collect::<HashMap<_, _>>()
     };
@@ -950,8 +780,9 @@ pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
         }
 
         let object_payload = payloads
-            .get(&asset.path_id.to_string())
-            .map(|payload| payload.to_vec())
+            .get(&format!("index:{}", asset.index))
+            .or_else(|| payloads.get(&asset.path_id.to_string()))
+            .cloned()
             .unwrap_or_default();
         results.push(NativeObjectReadParseResult::Read(Box::new(
             AssetStudioFfiObjectReadOutput {

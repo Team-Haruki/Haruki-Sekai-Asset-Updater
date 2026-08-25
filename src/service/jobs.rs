@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tokio::time::{sleep, timeout, Duration};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -20,6 +20,8 @@ use crate::core::regions::{build_url_preview, select_region};
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct JobListEntry {
     pub id: Uuid,
+    pub parent_job_id: Option<Uuid>,
+    pub kind: String,
     pub region: String,
     pub status: JobStatus,
     pub dry_run: bool,
@@ -41,19 +43,35 @@ pub struct JobListSummary {
     pub jobs: Vec<JobListEntry>,
 }
 
+/// Per-region execution locks, keyed by lowercased region name.
+type RegionLockMap = Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>;
+
 #[derive(Clone)]
 pub struct JobManager {
     config: Arc<AppConfig>,
     jobs: Arc<RwLock<HashMap<Uuid, JobSnapshot>>>,
     cancel_flags: Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>,
+    /// Bounds how many jobs run their heavy pipeline concurrently. `None` = unlimited.
+    job_semaphore: Option<Arc<Semaphore>>,
+    /// Per-region locks serializing execution so concurrent same-region jobs can't clobber each
+    /// other's download record (lost updates) or share a temp path mid-export.
+    region_locks: RegionLockMap,
+    haruki_3d_active: Arc<RwLock<HashSet<String>>>,
 }
 
 impl JobManager {
     pub fn new(config: Arc<AppConfig>) -> Self {
+        let job_semaphore = match config.execution.max_concurrent_jobs {
+            0 => None,
+            limit => Some(Arc::new(Semaphore::new(limit))),
+        };
         Self {
             config,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             cancel_flags: Arc::new(RwLock::new(HashMap::new())),
+            job_semaphore,
+            region_locks: Arc::new(RwLock::new(HashMap::new())),
+            haruki_3d_active: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -66,6 +84,9 @@ impl JobManager {
         {
             let mut jobs = self.jobs.write().await;
             jobs.insert(snapshot.id, snapshot.clone());
+            // Evict the oldest terminal snapshots so the jobs map (and `GET /v2/jobs`) can't grow
+            // without bound on a long-running service.
+            prune_terminal_jobs(&mut jobs, self.config.execution.retain_terminal_jobs);
         }
         {
             let mut flags = self.cancel_flags.write().await;
@@ -96,6 +117,8 @@ impl JobManager {
             .values()
             .map(|job| JobListEntry {
                 id: job.id,
+                parent_job_id: job.parent_job_id,
+                kind: job.kind.clone(),
                 region: job.region.clone(),
                 status: job.status.clone(),
                 dry_run: job.dry_run,
@@ -126,10 +149,13 @@ impl JobManager {
     }
 
     pub async fn cancel(&self, id: Uuid) -> Option<Result<JobSnapshot, String>> {
+        // Look up the cancel flag without `?`: terminal jobs have had their flag pruned, but the
+        // snapshot still lives in the jobs map. Drive the not-found vs already-terminal decision
+        // off the jobs map so a finished job reports "already terminal" instead of a spurious 404.
         let cancel_flag = {
             let flags = self.cancel_flags.read().await;
             flags.get(&id).cloned()
-        }?;
+        };
 
         let mut jobs = self.jobs.write().await;
         let job = jobs.get_mut(&id)?;
@@ -138,7 +164,9 @@ impl JobManager {
                 Some(Err("job is already in a terminal state".to_string()))
             }
             _ => {
-                cancel_flag.store(true, Ordering::SeqCst);
+                if let Some(cancel_flag) = &cancel_flag {
+                    cancel_flag.store(true, Ordering::SeqCst);
+                }
                 job.status = JobStatus::Cancelled;
                 job.message = "cancellation requested".to_string();
                 job.failure = Some(JobFailure {
@@ -163,6 +191,9 @@ impl JobManager {
         let jobs = self.jobs.clone();
         let config = self.config.clone();
         let cancel_flags = self.cancel_flags.clone();
+        let job_semaphore = self.job_semaphore.clone();
+        let region_locks = self.region_locks.clone();
+        let haruki_3d_active = self.haruki_3d_active.clone();
 
         tokio::spawn(async move {
             let cancel_flag = {
@@ -263,6 +294,7 @@ impl JobManager {
                             Ok(region) => region.clone(),
                             Err(err) => {
                                 finish_failed(&jobs, id, err.to_string()).await;
+                                remove_cancel_flag(&cancel_flags, id).await;
                                 return;
                             }
                         };
@@ -275,8 +307,19 @@ impl JobManager {
                             Ok(executor) => executor,
                             Err(err) => {
                                 finish_failed(&jobs, id, err.to_string()).await;
+                                remove_cancel_flag(&cancel_flags, id).await;
                                 return;
                             }
+                        };
+                        // Serialize same-region execution (protects the shared download record from
+                        // lost updates) and bound how many heavy pipelines run at once. Take the
+                        // region lock first, then a concurrency permit, so a job doesn't tie up a
+                        // slot while merely waiting on region contention.
+                        let region_lock = acquire_region_lock(&region_locks, &request.region).await;
+                        let _region_guard = region_lock.lock().await;
+                        let _job_permit = match &job_semaphore {
+                            Some(sem) => sem.clone().acquire_owned().await.ok(),
+                            None => None,
                         };
                         let execution = async {
                             match request.mode {
@@ -316,31 +359,56 @@ impl JobManager {
                                             job.updated_at = chrono::Utc::now();
                                             true
                                         } else {
-                                            job.status = JobStatus::Completed;
                                             let completed_downloads = summary.completed_downloads;
                                             let failed_downloads = summary.failed_downloads;
                                             let total_downloads = summary.queued_downloads;
+                                            // If every queued download failed, report the run as
+                                            // Failed so monitoring/alerts don't see a green
+                                            // "job completed" for a wholly-failed run.
+                                            let total_failure = total_downloads > 0
+                                                && completed_downloads == 0
+                                                && failed_downloads > 0;
                                             job.execution = Some(summary);
-                                            job.failure = None;
                                             job.preview =
                                                 Some(build_url_preview(&region, &request));
-                                            job.message = "job completed".to_string();
-                                            push_progress_event(
-                                                job,
-                                                JobPhase::Completed,
-                                                "job completed".to_string(),
-                                            );
                                             let now = chrono::Utc::now();
                                             job.updated_at = now;
-                                            info!(
-                                                job_id = %id,
-                                                region = %job.region,
-                                                elapsed_ms = job_elapsed_ms(job, now),
-                                                completed = completed_downloads,
-                                                failed = failed_downloads,
-                                                total = total_downloads,
-                                                "job completed"
-                                            );
+                                            if total_failure {
+                                                let message = format!(
+                                                    "all {failed_downloads} bundle download(s) failed"
+                                                );
+                                                job.status = JobStatus::Failed;
+                                                job.failure = Some(classify_failure(&message));
+                                                job.message = message.clone();
+                                                push_progress_event(job, JobPhase::Failed, message);
+                                                error!(
+                                                    job_id = %id,
+                                                    region = %job.region,
+                                                    elapsed_ms = job_elapsed_ms(job, now),
+                                                    completed = completed_downloads,
+                                                    failed = failed_downloads,
+                                                    total = total_downloads,
+                                                    "job failed: all downloads failed"
+                                                );
+                                            } else {
+                                                job.status = JobStatus::Completed;
+                                                job.failure = None;
+                                                job.message = "job completed".to_string();
+                                                push_progress_event(
+                                                    job,
+                                                    JobPhase::Completed,
+                                                    "job completed".to_string(),
+                                                );
+                                                info!(
+                                                    job_id = %id,
+                                                    region = %job.region,
+                                                    elapsed_ms = job_elapsed_ms(job, now),
+                                                    completed = completed_downloads,
+                                                    failed = failed_downloads,
+                                                    total = total_downloads,
+                                                    "job completed"
+                                                );
+                                            }
                                             false
                                         }
                                     } else {
@@ -350,6 +418,19 @@ impl JobManager {
                                 if cancelled_after_execution {
                                     remove_cancel_flag(&cancel_flags, id).await;
                                     return;
+                                }
+                                if request.mode == AssetUpdateMode::Update
+                                    && region.export.haruki_3d.enabled
+                                {
+                                    spawn_haruki_3d_child_job(
+                                        jobs.clone(),
+                                        cancel_flags.clone(),
+                                        haruki_3d_active.clone(),
+                                        config.clone(),
+                                        id,
+                                        request.clone(),
+                                    )
+                                    .await;
                                 }
                                 None
                             }
@@ -380,6 +461,21 @@ impl JobManager {
 async fn finish_failed(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid, message: String) {
     let mut job_map = jobs.write().await;
     if let Some(job) = job_map.get_mut(&id) {
+        // Don't clobber an already-terminal job. In particular a user cancellation that races with
+        // an execution timeout/error must stay Cancelled rather than flipping to Failed.
+        if matches!(
+            job.status,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+        ) {
+            job.updated_at = chrono::Utc::now();
+            warn!(
+                job_id = %id,
+                status = ?job.status,
+                error = %message,
+                "execution error after job reached a terminal state; preserving terminal status"
+            );
+            return;
+        }
         job.status = JobStatus::Failed;
         job.message = message.clone();
         job.failure = Some(classify_failure(&message));
@@ -399,6 +495,124 @@ async fn finish_failed(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid,
     } else {
         error!(job_id = %id, error = %message, "job failed");
     }
+}
+
+async fn spawn_haruki_3d_child_job(
+    jobs: Arc<RwLock<HashMap<Uuid, JobSnapshot>>>,
+    cancel_flags: Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>,
+    haruki_3d_active: Arc<RwLock<HashSet<String>>>,
+    config: Arc<AppConfig>,
+    parent_id: Uuid,
+    request: AssetUpdateRequest,
+) {
+    let mut child = JobSnapshot::new(&request);
+    child.parent_job_id = Some(parent_id);
+    child.kind = "haruki_3d_export".to_string();
+    child.message = "Haruki 3D export queued".to_string();
+    let child_id = child.id;
+    {
+        let mut job_map = jobs.write().await;
+        job_map.insert(child_id, child);
+    }
+    {
+        let mut flags = cancel_flags.write().await;
+        flags.insert(child_id, Arc::new(AtomicBool::new(false)));
+    }
+
+    tokio::spawn(async move {
+        let active_key = match select_region(&config, &request.region) {
+            Ok(region) => format!(
+                "{}:{}",
+                request.region,
+                if region.export.haruki_3d.work_dir.trim().is_empty() {
+                    &region.export.haruki_3d.staging_dir
+                } else {
+                    &region.export.haruki_3d.work_dir
+                }
+            ),
+            Err(err) => {
+                finish_failed(&jobs, child_id, err.to_string()).await;
+                remove_cancel_flag(&cancel_flags, child_id).await;
+                return;
+            }
+        };
+        {
+            let mut active = haruki_3d_active.write().await;
+            if !active.insert(active_key.clone()) {
+                let mut job_map = jobs.write().await;
+                if let Some(job) = job_map.get_mut(&child_id) {
+                    job.status = JobStatus::Completed;
+                    let message =
+                        "Haruki 3D export skipped; another export is already running".to_string();
+                    job.message = message.clone();
+                    push_progress_event(job, JobPhase::Completed, message);
+                    job.updated_at = chrono::Utc::now();
+                }
+                remove_cancel_flag(&cancel_flags, child_id).await;
+                return;
+            }
+        }
+        let cancel_flag = {
+            let flags = cancel_flags.read().await;
+            flags.get(&child_id).cloned()
+        };
+        {
+            let mut job_map = jobs.write().await;
+            if let Some(job) = job_map.get_mut(&child_id) {
+                job.status = JobStatus::Running;
+                job.message = "Haruki 3D export running".to_string();
+                push_progress_event(
+                    job,
+                    JobPhase::PlanningDownloads,
+                    "Haruki 3D export running".to_string(),
+                );
+                job.updated_at = chrono::Utc::now();
+            }
+        }
+
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+        let progress_task = tokio::spawn(progress_consumer(jobs.clone(), child_id, progress_rx));
+        let result = async {
+            let region = select_region(&config, &request.region)?.clone();
+            let executor = AssetExecutionContext::new(&config, &request.region, &region, &request)?;
+            executor
+                .run_haruki_3d_background_export(&config, Some(progress_tx), cancel_flag.clone())
+                .await
+        }
+        .await;
+        let _ = progress_task.await;
+
+        match result {
+            Ok(summary) => {
+                let mut job_map = jobs.write().await;
+                if let Some(job) = job_map.get_mut(&child_id) {
+                    if job.status == JobStatus::Cancelled {
+                        job.updated_at = chrono::Utc::now();
+                    } else {
+                        job.status = JobStatus::Completed;
+                        let message = format!(
+                            "Haruki 3D export completed; matched {} bundle(s), downloaded {} bundle(s)",
+                            summary.matched_bundles, summary.downloaded_bundles
+                        );
+                        job.message = message.clone();
+                        push_progress_event(job, JobPhase::Completed, message);
+                        job.updated_at = chrono::Utc::now();
+                    }
+                }
+            }
+            Err(AssetExecutionError::Cancelled) => {
+                finish_cancelled(&jobs, child_id, "Haruki 3D export cancelled".to_string()).await;
+            }
+            Err(err) => {
+                finish_failed(&jobs, child_id, err.to_string()).await;
+            }
+        }
+        {
+            let mut active = haruki_3d_active.write().await;
+            active.remove(&active_key);
+        }
+        remove_cancel_flag(&cancel_flags, child_id).await;
+    });
 }
 
 async fn finish_cancelled(
@@ -741,4 +955,45 @@ fn is_cancelled(flag: &Option<Arc<AtomicBool>>) -> bool {
 async fn remove_cancel_flag(cancel_flags: &Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>, id: Uuid) {
     let mut flags = cancel_flags.write().await;
     flags.remove(&id);
+}
+
+async fn acquire_region_lock(region_locks: &RegionLockMap, region: &str) -> Arc<Mutex<()>> {
+    let key = region.to_ascii_lowercase();
+    {
+        let locks = region_locks.read().await;
+        if let Some(lock) = locks.get(&key) {
+            return lock.clone();
+        }
+    }
+    let mut locks = region_locks.write().await;
+    locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Evict the oldest terminal (Completed/Failed/Cancelled) job snapshots so the in-memory map stays
+/// bounded. Non-terminal jobs are always retained. `retain == 0` disables eviction.
+fn prune_terminal_jobs(jobs: &mut HashMap<Uuid, JobSnapshot>, retain: usize) {
+    if retain == 0 {
+        return;
+    }
+    let mut terminal: Vec<(Uuid, chrono::DateTime<chrono::Utc>)> = jobs
+        .iter()
+        .filter(|(_, job)| {
+            matches!(
+                job.status,
+                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            )
+        })
+        .map(|(id, job)| (*id, job.updated_at))
+        .collect();
+    if terminal.len() <= retain {
+        return;
+    }
+    // Keep the most recently updated `retain`; drop the rest (oldest first).
+    terminal.sort_by_key(|(_, updated_at)| std::cmp::Reverse(*updated_at));
+    for (id, _) in terminal.into_iter().skip(retain) {
+        jobs.remove(&id);
+    }
 }

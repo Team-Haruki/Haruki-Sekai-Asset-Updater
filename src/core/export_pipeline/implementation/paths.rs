@@ -455,5 +455,14 @@ pub(super) fn strip_container_prefix(container: &str, strip_path_prefix: &str) -
         .map(|value| value.trim_start_matches('/'))
         .filter(|value| !value.is_empty())
         .unwrap_or(&normalized);
-    PathBuf::from(stripped)
+    // Container keys come from (untrusted) asset metadata. Keep only normal path components so a
+    // value such as "../../etc/foo" can't escape output_dir when this relative path is later
+    // joined onto it (mirrors the sanitization in `safe_payload_bundle_path`).
+    Path::new(stripped)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect()
 }

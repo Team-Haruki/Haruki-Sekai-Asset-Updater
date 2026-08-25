@@ -10,6 +10,7 @@ license = "MIT"
 # a given Haruki tag resolves to the same source, which the previous
 # build-time `git clone` of a branch head could not promise.
 assetstudio-ffi = { git = "https://github.com/Team-Haruki/unity-rs.git", rev = "81b02a5" }
+bytes = "1"
 clap = { version = "4.6", features = ["derive"] }
 libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }

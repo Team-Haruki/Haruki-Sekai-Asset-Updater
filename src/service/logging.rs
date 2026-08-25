@@ -76,12 +76,20 @@ impl<'a> MakeWriter<'a> for SharedFileMakeWriter {
 
 impl io::Write for SharedFileWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut file = self.file.lock().expect("log file lock poisoned");
+        // Tolerate a poisoned lock (a previous writer panicked mid-write) instead of cascading the
+        // panic into every subsequent log call.
+        let mut file = self
+            .file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         io::Write::write(&mut *file, buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut file = self.file.lock().expect("log file lock poisoned");
+        let mut file = self
+            .file
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         io::Write::flush(&mut *file)
     }
 }

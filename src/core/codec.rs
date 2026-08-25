@@ -7,7 +7,8 @@ use serde::Serialize;
 
 use crate::core::errors::CodecError;
 
-pub const CODEC_BACKEND: &str = "crates.io:cridecoder@0.2.3";
+// Version intentionally omitted; see Cargo.toml for the pinned cridecoder version.
+pub const CODEC_BACKEND: &str = "crates.io:cridecoder";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CodecSummary {

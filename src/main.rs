@@ -1,9 +1,15 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use haruki_sekai_asset_updater::core::config::AppConfig;
 use haruki_sekai_asset_updater::service::http::{build_router, AppState};
 use haruki_sekai_asset_updater::service::logging::init_logging;
 use tracing::{info, warn};
+
+/// After a shutdown signal, force the process to exit if the graceful drain hasn't finished within
+/// this window, so a lingering (e.g. idle keep-alive) connection can't keep the process alive
+/// indefinitely on SIGTERM. Sized to stay under Docker's default 10s stop grace period.
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -67,4 +73,17 @@ async fn shutdown_signal() {
     }
 
     info!("shutdown signal received");
+
+    // Safety net: graceful drain waits for in-flight connections to close, which can stall on a
+    // lingering idle keep-alive connection. Arm a hard deadline so SIGTERM always terminates the
+    // process within a bounded time instead of hanging. If the drain finishes first, `main`
+    // returns and this detached timer is dropped before it fires.
+    tokio::spawn(async {
+        tokio::time::sleep(GRACEFUL_SHUTDOWN_TIMEOUT).await;
+        warn!(
+            timeout_secs = GRACEFUL_SHUTDOWN_TIMEOUT.as_secs(),
+            "graceful shutdown did not complete in time; forcing exit"
+        );
+        std::process::exit(0);
+    });
 }

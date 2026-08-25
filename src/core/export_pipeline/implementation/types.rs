@@ -2,8 +2,6 @@ use super::*;
 
 pub(super) const NATIVE_AOT_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";
 pub(super) const NATIVE_AOT_IMAGE_SURROGATE_FORMAT: &str = "bmp";
-#[allow(dead_code)]
-pub(super) const NATIVE_AOT_FAST_IMAGE_FORMAT: &str = NATIVE_AOT_DEFAULT_IMAGE_FORMAT;
 pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_MAGIC: &[u8] = b"HARUKI_ASSET_PAYLOAD_BUNDLE_V1";
 pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_MAGIC: u32 = 0x4250_4148; // HAPB
 pub(super) const NATIVE_AOT_PAYLOAD_BUNDLE_V2_VERSION: u16 = 2;
@@ -137,7 +135,9 @@ pub(super) enum NativeSemanticPathClaim {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingNativeImageWrite {
     pub(super) target: PathBuf,
-    pub(super) payload: Vec<u8>,
+    /// Shared slice of the read-batch payload bundle (see
+    /// `parse_payload_bundle_shared`); cloning is a refcount bump.
+    pub(super) payload: bytes::Bytes,
     pub(super) region: RegionConfig,
     pub(super) path_registry: NativeSemanticExportPathRegistry,
 }

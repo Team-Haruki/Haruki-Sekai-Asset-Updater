@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use opendal::Operator;
 
@@ -10,7 +11,23 @@ pub type DownloadRecord = BTreeMap<String, String>;
 pub fn load_download_record(path: impl AsRef<Path>) -> Result<DownloadRecord, DownloadRecordError> {
     let path = path.as_ref();
     match std::fs::read(path) {
-        Ok(bytes) => parse_download_record(path, &bytes),
+        Ok(bytes) => match parse_download_record(path, &bytes) {
+            Ok(record) => Ok(record),
+            Err(err) => {
+                // A corrupt record (e.g. a truncated write from a previous crash) must not brick
+                // the region forever: back it up for inspection and start from an empty record so
+                // the run can proceed (it will simply re-download).
+                let backup = path.with_extension("json.corrupt");
+                tracing::error!(
+                    path = %path.display(),
+                    backup = %backup.display(),
+                    error = %err,
+                    "download record is corrupt; backing it up and starting from an empty record"
+                );
+                let _ = std::fs::rename(path, &backup);
+                Ok(BTreeMap::new())
+            }
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(source) => Err(DownloadRecordError::Read {
             path: path.to_path_buf(),
@@ -31,9 +48,26 @@ pub fn save_download_record(
         })?;
     }
     let data = serialize_download_record(path, record)?;
-    std::fs::write(path, data).map_err(|source| DownloadRecordError::Write {
-        path: path.to_path_buf(),
+
+    // Write to a unique sibling temp file then atomically rename into place. A crash, full disk, or
+    // kill mid-write can no longer leave a truncated record that would fail every subsequent run.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("downloaded_assets.json");
+    let tmp_path = path.with_file_name(format!("{file_name}.tmp.{seq}"));
+    std::fs::write(&tmp_path, data).map_err(|source| DownloadRecordError::Write {
+        path: tmp_path.clone(),
         source,
+    })?;
+    std::fs::rename(&tmp_path, path).map_err(|source| {
+        let _ = std::fs::remove_file(&tmp_path);
+        DownloadRecordError::Write {
+            path: path.to_path_buf(),
+            source,
+        }
     })
 }
 

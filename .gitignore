@@ -18,7 +18,17 @@ coverage.*
 # .vscode/
 
 # Local configs and outputs
-haruki-asset-configs.yaml
+# Ignore every haruki-asset-configs*.yaml except the committed example template.
+haruki-asset-configs*.yaml
+!haruki-asset-configs.example.yaml
+# Stale config snapshots / backups that may hold real secrets (never commit).
+backup.yaml
+*.backup
+old/
+*.v3.yaml
+# Python tooling bytecode
+__pycache__/
+*.pyc
 Data/
 logs/
 target/

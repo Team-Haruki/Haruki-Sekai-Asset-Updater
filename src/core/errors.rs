@@ -2,6 +2,20 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// Flatten a `reqwest::Error` together with its source chain into a single string so persisted job
+/// failure messages keep the underlying DNS/TLS/connect cause instead of only the top-level line.
+pub(crate) fn format_reqwest_error_chain(err: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(inner) = source {
+        message.push_str(": ");
+        message.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    message
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to read config file {path}: {source}")]
@@ -275,7 +289,7 @@ pub enum AssetExecutionError {
     ExportPipeline(#[from] ExportPipelineError),
     #[error(transparent)]
     GitSync(#[from] GitSyncError),
-    #[error("http request failed: {0}")]
+    #[error("http request failed: {}", format_reqwest_error_chain(.0))]
     Http(#[from] reqwest::Error),
     #[error("failed to initialize HTTP client: {0}")]
     HttpClient(String),
@@ -328,6 +342,36 @@ pub enum AssetExecutionError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
+    },
+    #[error("failed to create Haruki 3D staging directory for {path}: {source}")]
+    CreateHaruki3dStagingDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write Haruki 3D staging bundle {path}: {source}")]
+    WriteHaruki3dStagingBundle {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to remove Haruki 3D staging directory {path}: {source}")]
+    RemoveHaruki3dStagingDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to spawn Haruki 3D exporter `{program}`: {source}")]
+    Haruki3dExporterSpawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Haruki 3D exporter `{program}` failed with status {status}: {stderr}")]
+    Haruki3dExporterFailed {
+        program: String,
+        status: String,
+        stderr: String,
     },
     #[error("failed to read temp file {path}: {source}")]
     ReadTempFile {

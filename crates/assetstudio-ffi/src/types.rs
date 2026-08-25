@@ -121,21 +121,21 @@ pub struct AssetStudioFfiContextListObjectsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssetStudioFfiContextReadObjectRequest {
-    pub context_id: i64,
-    pub path_id: i64,
-    pub kind: String,
-    pub image_format: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioFfiContextReadObjectsRequest {
     pub context_id: i64,
     pub objects: Vec<AssetStudioFfiContextReadObjectItemRequest>,
+    /// Expected upper bound for the packed payload block in bytes. When it exceeds
+    /// the worker's spill threshold, the worker maps a spill file up front and the
+    /// native library writes payloads straight into the mapping. 0 (the default for
+    /// older callers) keeps the in-memory path.
+    #[serde(default)]
+    pub payload_capacity_hint: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetStudioFfiContextReadObjectItemRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
     pub path_id: i64,
     pub kind: String,
     pub image_format: String,
@@ -207,7 +207,8 @@ pub struct NativeBatchPhaseStats {
 #[derive(Debug, Clone)]
 pub struct AssetStudioFfiObjectReadOutput {
     pub response: AssetStudioFfiObjectReadResponse,
-    pub payload: Vec<u8>,
+    /// Shared slice of the read-batch payload bundle; cloning is a refcount bump.
+    pub payload: bytes::Bytes,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,7 +225,6 @@ pub enum AssetStudioFfiOperation {
     ContextOpen,
     ContextListObjects,
     ContextClose,
-    ContextReadObject,
     ContextReadObjects,
 }
 
@@ -234,7 +234,6 @@ impl AssetStudioFfiOperation {
             Self::ContextOpen => "context_open",
             Self::ContextListObjects => "context_list_objects",
             Self::ContextClose => "context_close",
-            Self::ContextReadObject => "context_read_object",
             Self::ContextReadObjects => "context_read_objects",
         }
     }
@@ -246,7 +245,6 @@ pub enum AssetStudioFfiRequest {
     ContextOpen(AssetStudioFfiContextOpenRequest),
     ContextListObjects(AssetStudioFfiContextListObjectsRequest),
     ContextClose(AssetStudioFfiContextCloseRequest),
-    ContextReadObject(AssetStudioFfiContextReadObjectRequest),
     ContextReadObjects(AssetStudioFfiContextReadObjectsRequest),
 }
 
@@ -256,7 +254,6 @@ impl AssetStudioFfiRequest {
             Self::ContextOpen(_) => AssetStudioFfiOperation::ContextOpen,
             Self::ContextListObjects(_) => AssetStudioFfiOperation::ContextListObjects,
             Self::ContextClose(_) => AssetStudioFfiOperation::ContextClose,
-            Self::ContextReadObject(_) => AssetStudioFfiOperation::ContextReadObject,
             Self::ContextReadObjects(_) => AssetStudioFfiOperation::ContextReadObjects,
         }
     }
@@ -268,7 +265,6 @@ pub enum AssetStudioFfiResponse {
     ContextOpen(AssetStudioFfiContextOpenResponse),
     ContextListObjects(AssetStudioFfiContextListObjectsResponse),
     ContextClose(AssetStudioFfiContextCloseResponse),
-    ContextReadObject(AssetStudioFfiObjectReadResponse),
     ContextReadObjects(AssetStudioFfiObjectReadBatchResponse),
 }
 
@@ -297,13 +293,6 @@ impl AssetStudioFfiResponse {
         match self {
             Self::ContextClose(response) => Ok(response),
             other => Err(unexpected_native_response("context_close", &other)),
-        }
-    }
-
-    pub fn into_object_read(self) -> Result<AssetStudioFfiObjectReadResponse, AssetStudioFfiError> {
-        match self {
-            Self::ContextReadObject(response) => Ok(response),
-            other => Err(unexpected_native_response("context_read_object", &other)),
         }
     }
 

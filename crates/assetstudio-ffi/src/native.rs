@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_int, c_longlong, c_uchar};
+use std::path::PathBuf;
 use std::ptr;
 
 use assetstudio_ffi::{
@@ -10,6 +11,19 @@ use assetstudio_ffi::{
 };
 
 use crate::types::*;
+
+pub const WORKER_PAYLOAD_FILE_PREFIX: &str = "haruki-assetstudio-worker-payload-";
+pub const WORKER_PAYLOAD_FILE_SUFFIX: &str = ".bin";
+
+pub struct PayloadSpillPlan {
+    pub directory: Option<PathBuf>,
+    pub threshold: usize,
+}
+
+pub enum CallPayload {
+    Inline(Vec<u8>),
+    File { path: PathBuf, len: u64 },
+}
 
 // The engine is linked in, so these resolve at link time and the request and
 // response types come from the engine crate itself. There is no handshake to
@@ -38,12 +52,6 @@ unsafe extern "C" {
         request: *const ObjectReadBatchIntoRequest,
         response: *mut ObjectReadBatchRetryResponse,
     ) -> c_int;
-}
-
-pub fn call_assetstudio_ffi_typed_request(
-    request: &AssetStudioFfiRequest,
-) -> Result<(c_int, AssetStudioFfiResponse, Vec<u8>), AssetStudioFfiError> {
-    LoadedAssetStudioFfiLibrary::load().call_typed_request(request)
 }
 
 /// Handle for the linked-in engine.
@@ -91,36 +99,6 @@ impl LoadedAssetStudioFfiLibrary {
                     Vec::new(),
                 ))
             }
-            AssetStudioFfiRequest::ContextReadObject(request) => {
-                let batch_request = AssetStudioFfiContextReadObjectsRequest {
-                    context_id: request.context_id,
-                    objects: vec![AssetStudioFfiContextReadObjectItemRequest {
-                        path_id: request.path_id,
-                        kind: request.kind.clone(),
-                        image_format: request.image_format.clone(),
-                    }],
-                };
-                let (status, batch_response, payload) =
-                    self.read_context_objects(&batch_request)?;
-                let response = batch_response.reads.into_iter().next().unwrap_or_else(|| {
-                    AssetStudioFfiObjectReadResponse {
-                        success: false,
-                        asset: None,
-                        payload_kind: None,
-                        payload_len: 0,
-                        suggested_extension: None,
-                        warnings: Vec::new(),
-                        phase_ms: HashMap::new(),
-                        error: Some("typed context_read_object returned no read item".to_string()),
-                        duration_ms: None,
-                    }
-                });
-                Ok((
-                    status,
-                    AssetStudioFfiResponse::ContextReadObject(response),
-                    payload,
-                ))
-            }
             AssetStudioFfiRequest::ContextReadObjects(request) => {
                 let (status, response, payload) = self.read_context_objects(request)?;
                 Ok((
@@ -130,6 +108,22 @@ impl LoadedAssetStudioFfiLibrary {
                 ))
             }
         }
+    }
+
+    pub fn call_typed_request_with_spill(
+        &self,
+        request: &AssetStudioFfiRequest,
+        spill: Option<&PayloadSpillPlan>,
+    ) -> Result<(c_int, AssetStudioFfiResponse, CallPayload), AssetStudioFfiError> {
+        // The linked engine's compatibility ABI owns retry buffers. Convert its
+        // response once, then let the worker apply the shared spill threshold.
+        // Keeping the plan in this API preserves worker protocol compatibility
+        // and leaves room for a direct-to-file core API without another IPC change.
+        if let Some(plan) = spill {
+            let _ = (&plan.directory, plan.threshold);
+        }
+        let (status, response, payload) = self.call_typed_request(request)?;
+        Ok((status, response, CallPayload::Inline(payload)))
     }
 
     fn open_context(

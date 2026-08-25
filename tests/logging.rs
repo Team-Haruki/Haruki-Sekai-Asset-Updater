@@ -101,15 +101,13 @@ async fn binary_writes_main_and_access_logs_to_files() {
 
     let binary = binary_path();
 
-    let child = Command::new(binary)
+    let mut child = Command::new(binary)
         .env("HARUKI_CONFIG_PATH", &config_path)
         .env_remove("RUST_LOG")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    #[cfg(not(unix))]
-    let mut child = child;
 
     wait_for_health(port).await;
 
@@ -128,19 +126,38 @@ async fn binary_writes_main_and_access_logs_to_files() {
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Close client connections before signaling so the server's graceful shutdown isn't blocked
+    // waiting on idle keep-alive connections held open by the pooled reqwest client.
+    drop(client);
+
     #[cfg(unix)]
-    {
+    if let Some(pid) = child.id() {
         let _ = Command::new("kill")
             .arg("-TERM")
-            .arg(child.id().expect("child pid").to_string())
+            .arg(pid.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .await;
     }
     #[cfg(not(unix))]
-    {
-        let _ = child.kill().await;
+    let _ = child.start_kill();
+
+    // Give graceful shutdown a short window, then force-kill so the test can't hang regardless of
+    // shutdown timing. The log assertions below are written during startup/request handling, so
+    // they don't depend on a graceful exit.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.start_kill();
+                break;
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(_) => break,
+        }
     }
     let output = child.wait_with_output().await.unwrap();
 

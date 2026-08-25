@@ -27,6 +27,8 @@ execution:
   timeout_seconds: 300
   allow_cancel: true
   batch_save_size: 50
+  max_concurrent_jobs: 4 # max jobs running the heavy pipeline at once; extra jobs queue. 0 = unlimited
+  retain_terminal_jobs: 256 # cap on retained finished job snapshots in memory. 0 = keep all
   retry:
     attempts: 4
     initial_backoff_ms: 1000
@@ -42,7 +44,7 @@ backends:
     webp_lossless: true
     jpeg_quality: 95
   asset_studio:
-    mode: "worker_pool" # worker_pool for production isolation; direct for local FFI throughput benchmarks
+    mode: "worker_pool" # the only supported mode; workers isolate engine crashes from the service
     worker_path: ""
     process_concurrency: 0 # 0 = auto: CPU budget, or CPU-count oversubscription when CPU throttle is enabled
     worker_max_calls: 256 # 0 disables recycling
@@ -54,7 +56,7 @@ backends:
       TextAsset: text_bytes
       MonoBehaviour: typetree_json
       AudioClip: audio
-      Animator: fbx
+      Animator: fbx # requires linux-x64/macOS (no FBX SDK for linux-arm64); model packages & motion clips flow through the haruki_3d raw-bundle pipeline
       all: typetree_json
 
 resources:
@@ -146,6 +148,15 @@ regions:
         - ".*"
     export:
       by_category: false
+      asset_studio_types:
+        - monoBehaviour
+        - textAsset
+        - tex2d
+        - tex2dArray
+        - sprite
+        - audio
+        - animator
+        - AnimationClip
       usm:
         export: true
         decode: true
@@ -161,6 +172,38 @@ regions:
         direct_mp4: true
       audio:
         formats: ["mp3"] # wav | flac | mp3
+      raw_bundles:
+        output_dir: "./Data/jp-assets/AssetBundles"
+        include:
+          - "^live_pv/model/characterv2/body/"
+          - "^live_pv/model/characterv2/face/"
+          - "^live_pv/model/characterv2/head_optional/"
+          - "^live_pv/model/characterv2/color_variation/body/"
+          - "^live_pv/model/characterv2/color_variation/face/"
+          - "^live_pv/model/characterv2/color_variation/head_optional/"
+          - "^character/motion/costume_setting/"
+        exclude: []
+      haruki_3d:
+        enabled: false
+        exporter_path: "/app/haruki-3d/exporter/Haruki-3D-Exporter"
+        master_dir: "/app/data/haruki-sekai-master/master"
+        work_dir: "/app/data/3d-work"
+        manifest_file: "/app/data/3d-output/haruki-3d-export-manifest.json"
+        output_dir: "/app/data/3d-output"
+        process_concurrency: 0 # 0 = exporter auto CPU count; set a fixed value such as 16 for bounded full 3D export
+        role_character3d_ids:
+          - 5
+        include:
+          - "^live_pv/model/characterv2/body/"
+          - "^live_pv/model/characterv2/face/"
+          - "^live_pv/model/characterv2/head_optional/"
+          - "^live_pv/model/characterv2/color_variation/body/"
+          - "^live_pv/model/characterv2/color_variation/face/"
+          - "^live_pv/model/characterv2/color_variation/head_optional/"
+          - "^character/motion/costume_setting/"
+        exclude: []
+        cleanup_work_dir_after_success: true
+        cleanup_work_dir_after_failure: true
     upload:
       enabled: false
       providers: []

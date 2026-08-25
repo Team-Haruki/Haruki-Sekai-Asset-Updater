@@ -2,7 +2,7 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub async fn write_worker_frame<W>(writer: &mut W, payload: &[u8]) -> io::Result<()>
+pub(crate) async fn write_worker_frame<W>(writer: &mut W, payload: &[u8]) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -13,7 +13,7 @@ where
     writer.flush().await
 }
 
-pub async fn read_worker_frame<R>(reader: &mut R) -> io::Result<Vec<u8>>
+pub(crate) async fn read_worker_frame<R>(reader: &mut R) -> io::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
