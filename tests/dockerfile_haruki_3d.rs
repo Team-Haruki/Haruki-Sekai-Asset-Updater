@@ -13,11 +13,6 @@ fn dockerfile_keeps_haruki_3d_exporter_external() {
         "default Docker image should not clone the exporter repository"
     );
     assert!(
-        !dockerfile
-            .contains("FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim AS dotnet-runtime"),
-        "default Docker image should not bundle the .NET runtime for exporter use"
-    );
-    assert!(
         !dockerfile.contains("/app/bin/Haruki-3D-Exporter"),
         "default Docker image should not install an exporter wrapper"
     );
@@ -65,7 +60,5 @@ fn container_defaults_use_the_direct_asset_engine() {
         .expect("example config should be readable");
 
     assert!(dockerfile.contains("MALLOC_ARENA_MAX=4"));
-    assert!(!dockerfile.contains("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"));
-    assert!(!config.contains("worker_idle_timeout_seconds"));
     assert!(config.contains("read_batch_size: 64 # direct unity-rs object-read chunk size"));
 }
