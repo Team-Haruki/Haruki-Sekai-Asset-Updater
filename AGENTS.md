@@ -59,9 +59,9 @@
 - YAML 处理统一使用 `yaml_serde`，不要新增 `serde_yaml` 依赖。
 - codec 后端统一依赖 crates.io 上的 `cridecoder`。
 - 图片转换优先保持纯 Rust 路径，不要重新引入外部 WebP 工具链。
-- 资产引擎为 `seiunx-dev/unity-rs`，以 revision 固定的 Cargo git 依赖直接编译进二进制；
+- 资产引擎为 crates.io 发布的 `unity-rs-core` crate，由 `Cargo.lock` 锁定版本并直接编译进二进制；
   没有动态库，也不需要 .NET 工具链。
-- `unity-rs` 是公开 Git 依赖，Cargo、Docker 和 CI 均使用匿名拉取，不需要构建凭据。
+- `unity-rs-core` 使用公开 crates.io registry，不需要私有 Git 依赖构建凭据。
 - 主服务直接调用 `unity-rs-core` 的纯 Rust API，这是唯一的资产引擎运行路径。
 - FFmpeg 是仅存的外部运行依赖（使用 media FFI feature 时链接其系统库）。
 

@@ -33,18 +33,6 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Verify the unity-rs dependency is reachable
-        shell: bash
-        run: |
-          if git ls-remote https://github.com/seiunx-dev/unity-rs.git HEAD >/dev/null 2>&1; then
-            exit 0
-          fi
-          cat >&2 <<'EOF'
-          Cannot reach seiunx-dev/unity-rs, the public asset engine this project
-          compiles in, so every cargo step below would fail while resolving it.
-          EOF
-          exit 1
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 

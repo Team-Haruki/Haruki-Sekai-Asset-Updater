@@ -3233,7 +3233,8 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "unity-rs-core"
 version = "0.1.0"
-source = "git+https://github.com/seiunx-dev/unity-rs.git?rev=4dd7d1c#4dd7d1ce983c0fc544078becf2d6ed398d1b372c"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13690b49bdc65810a2e1af16c2a1b070af6edb03759b267262d2470698011db1"
 dependencies = [
  "brotli",
  "flate2",

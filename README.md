@@ -16,8 +16,8 @@
 - Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
 - Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
-- Uses the linked-in [`seiunx-dev/unity-rs`](https://github.com/seiunx-dev/unity-rs)
-  `unity-rs-core` library directly. FFmpeg/rsmpeg FFI handles media;
+- Uses the published [`unity-rs-core`](https://crates.io/crates/unity-rs-core)
+  library directly. FFmpeg/rsmpeg FFI handles media;
   FFmpeg CLI remains available as a fallback where FFI is unavailable.
 
 ## Layout
@@ -100,9 +100,10 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
 
 ### unity-rs Engine
 
-The asset engine is [`seiunx-dev/unity-rs`](https://github.com/seiunx-dev/unity-rs),
-a Rust implementation of AssetStudio. It is an ordinary Cargo dependency pinned
-by revision. The service calls `unity_rs_core::studio::Studio` and
+The asset engine is the published [`unity-rs-core`](https://crates.io/crates/unity-rs-core)
+crate from [`seiunx-dev/unity-rs`](https://github.com/seiunx-dev/unity-rs), a Rust
+implementation of AssetStudio. Cargo resolves it from crates.io and `Cargo.lock`
+pins the exact release. The service calls `unity_rs_core::studio::Studio` and
 `StudioObject` directly from blocking Rust tasks, so the engine is compiled into
 the single `haruki-sekai-asset-updater` binary and is the only asset-unpacking path.
 

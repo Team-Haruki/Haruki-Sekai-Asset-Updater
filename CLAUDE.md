@@ -67,9 +67,10 @@ docker compose up --build
 - **YAML:** use `yaml_serde`, never `serde_yaml`
 - **Codec:** use published `cridecoder` crate from crates.io
 - **Image conversion:** pure Rust WebP encoder (`image` crate), no external WebP toolchain
-- **Asset engine:** `seiunx-dev/unity-rs`, a Cargo git dependency pinned by revision and
-  compiled in. No dynamic library, no .NET toolchain
-- **Build credential:** `unity-rs` is public; Cargo, Docker, and CI fetch it anonymously
+- **Asset engine:** published `unity-rs-core` crate from crates.io, locked by
+  `Cargo.lock` and compiled in. No dynamic library, no .NET toolchain
+- **Build credential:** `unity-rs-core` uses the public crates.io registry; no private
+  Git dependency credentials are required
 - **External tool deps:** FFmpeg libraries/CLI are the only runtime dependency
 - **Config files:** only `haruki-asset-configs.yaml` (active) and `haruki-asset-configs.example.yaml` (template)
 - **Sensitive config** uses `${env:VAR_NAME}` syntax, never hardcoded secrets
