@@ -6,7 +6,7 @@
 
 - 本仓库已经整理为 Rust 主项目。
 - 旧 Go 主程序已经移除，不要再按 Go 服务结构新增主程序代码。
-- `tools/ffi/` 可以保留面向第三方开发者的 Python / Node.js AssetStudioFFI 兼容层调用示例。
+- 资产解包只保留直接链接 `unity-rs-core` 的纯 Rust 路径。
 - 当前仓库为 Cargo workspace：
   - `Cargo.toml`
   - `src/`
@@ -32,8 +32,6 @@
   `se_0126_01.acb` 放在外部目录，并设置 `HARUKI_CODEC_SAMPLE_DIR`。
 - `docs/migration/`
   当前保留 `v2-api.md`，用于记录 HTTP v2 API 说明。
-- `tools/ffi/`
-  unity-rs 兼容 AssetStudioFFI typed ABI 的跨语言示例代码；这些示例不属于主服务运行路径。
 
 ## 3. 配置文件约定
 
@@ -66,7 +64,7 @@
 - 该仓库私有期间，构建需要凭据：本地设 `CARGO_NET_GIT_FETCH_WITH_CLI=true`，
   Docker 用 `--secret id=gh_token`，CI 读仓库 secret `UNITY_RS_TOKEN`。
   三条 workflow 在该 secret 未设置时会跳过认证步骤，仓库转公开后无需改动构建文件。
-- 主服务直接调用 `unity-rs-core` 的纯 Rust API；没有 worker pool、stdio IPC 或 AssetStudio 外部运行依赖。
+- 主服务直接调用 `unity-rs-core` 的纯 Rust API，这是唯一的资产引擎运行路径。
 - FFmpeg 是仅存的外部运行依赖（使用 media FFI feature 时链接其系统库）。
 
 ## 5. 代码风格约定
@@ -95,10 +93,8 @@ cargo test --workspace
   检查 `src/core/config.rs` 相关测试是否覆盖。
 - 样本导出：
   确认 `tests/codec_smoke.rs` 通过。
-- AssetStudio 集成：
-  确认主服务直接链接 `unity-rs-core`，且 release 不再交付额外 worker。
-- FFI 示例：
-  如果修改 `tools/ffi/`，至少运行对应 Python smoke / Go smoke 或 `go test ./...`。
+- unity-rs 集成：
+  确认主服务直接链接 `unity-rs-core`，且 release 只交付主服务二进制。
 - HTTP/任务流：
   确认 `tests/api.rs` 通过。
 - 日志：
@@ -109,7 +105,7 @@ cargo test --workspace
 ## 8. 对代理的特殊要求
 
 - 不要重新引入 Go 主程序、Go 服务结构或 Go 运行配置。
-- `tools/ffi/` 下的代码只作为 AssetStudioFFI 兼容层示例保留，不应成为主服务依赖。
+- 不要新增其他资产引擎运行时或跨语言资产解包绑定。
 - 不要把一次性调试输出、手工 smoke 配置、临时导出目录提交进仓库。
 - 不要在仓库里写入真实密钥、真实 token、真实云存储凭据。
 - 如果修改 CI，请确保：
@@ -117,8 +113,7 @@ cargo test --workspace
   - `cargo test --workspace`
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
-- Release artifact 与 Docker 镜像只需包含主服务二进制；`unity-rs-core` 已直接编译进主服务，
-  不得重新引入 worker pool、stdio IPC 或动态 AssetStudio 库。
+- Release artifact 与 Docker 镜像只需包含主服务二进制；`unity-rs-core` 已直接编译进主服务。
 
 ## 9. 推荐工作流
 

@@ -396,11 +396,10 @@ fn post_process_sample_files_without_transcoding_if_present() {
         .unwrap();
 }
 
-/// The engine is linked into this binary, so no configuration names a library
-/// or worker to load. Even an input with no Unity objects reaches the direct
-/// engine and completes without an external-runtime error.
+/// Even an input with no Unity objects reaches the linked unity-rs engine and
+/// completes successfully.
 #[test]
-fn direct_backend_needs_no_configured_library_or_worker_path() {
+fn linked_unity_rs_backend_handles_an_empty_object_set() {
     let dir = tempdir().unwrap();
     let fake_bundle = dir.path().join("bundle.bin");
     fs::write(&fake_bundle, b"bundle").unwrap();

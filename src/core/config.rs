@@ -2267,9 +2267,9 @@ asset_studio:
 
     #[test]
     fn rejects_unimplemented_pjsk_read_kinds() {
-        // The FFI dylib never implemented these kinds; model packages and motion
-        // clips flow through the haruki_3d raw-bundle pipeline instead. Accepting
-        // them here would silently drop every Animator/AnimationClip export.
+        // Model packages and motion clips flow through the haruki_3d raw-bundle
+        // pipeline. Accepting them here would silently drop every
+        // Animator/AnimationClip export.
         for (asset_type, kind) in [
             ("Animator", "pjsk_model_package"),
             ("AnimationClip", "pjsk_animation_clip_decoded"),

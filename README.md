@@ -98,14 +98,13 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
   -d '{"region":"jp","asset_version":"6.0.0","asset_hash":"deadbeef","dry_run":true}'
 ```
 
-### AssetStudio Engine
+### unity-rs Engine
 
 The asset engine is [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs),
 a Rust implementation of AssetStudio. It is an ordinary Cargo dependency pinned
 by revision. The service calls `unity_rs_core::studio::Studio` and
 `StudioObject` directly from blocking Rust tasks, so the engine is compiled into
-the single `haruki-sekai-asset-updater` binary. There is no worker process,
-stdio protocol, dynamic AssetStudio library, or .NET toolchain to ship or configure.
+the single `haruki-sekai-asset-updater` binary and is the only asset-unpacking path.
 
 Set both `regions.<name>.filters.start_app` and `on_demand` to `[".*"]` to
 include every bundle in those categories. `asset_studio_types: [all]` makes the
