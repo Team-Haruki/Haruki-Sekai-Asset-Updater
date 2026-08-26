@@ -1803,7 +1803,10 @@ pub struct Haruki3dExportConfig {
     pub manifest_file: String,
     pub staging_dir: String,
     pub output_dir: String,
+    pub shared_content_store: String,
+    pub compiled_content_store: String,
     pub process_concurrency: usize,
+    pub convert_model_textures: bool,
     pub role_character3d_ids: Vec<i64>,
     pub include: Vec<String>,
     pub exclude: Vec<String>,
@@ -1823,7 +1826,10 @@ impl Default for Haruki3dExportConfig {
             manifest_file: String::new(),
             staging_dir: String::new(),
             output_dir: String::new(),
+            shared_content_store: String::new(),
+            compiled_content_store: String::new(),
             process_concurrency: 0,
+            convert_model_textures: false,
             role_character3d_ids: Vec::new(),
             include: Vec::new(),
             exclude: Vec::new(),
@@ -2356,7 +2362,10 @@ haruki_3d:
   work_dir: /app/data/3d-work
   manifest_file: /app/data/3d-output/haruki-3d-export-manifest.json
   output_dir: /app/data/3d-output
+  shared_content_store: /app/data/3d-output-cas
+  compiled_content_store: /app/data/3d-compiled-cache
   process_concurrency: 16
+  convert_model_textures: true
   role_character3d_ids:
     - 5
   include:
@@ -2380,7 +2389,16 @@ haruki_3d:
             "/app/data/3d-output/haruki-3d-export-manifest.json"
         );
         assert_eq!(export.haruki_3d.output_dir, "/app/data/3d-output");
+        assert_eq!(
+            export.haruki_3d.shared_content_store,
+            "/app/data/3d-output-cas"
+        );
+        assert_eq!(
+            export.haruki_3d.compiled_content_store,
+            "/app/data/3d-compiled-cache"
+        );
         assert_eq!(export.haruki_3d.process_concurrency, 16);
+        assert!(export.haruki_3d.convert_model_textures);
         assert_eq!(export.haruki_3d.role_character3d_ids, vec![5]);
         assert_eq!(
             export.haruki_3d.include,
@@ -2415,11 +2433,12 @@ haruki_3d:
         assert_eq!(jp.filters.start_app, vec![".*"]);
         assert_eq!(jp.filters.on_demand, vec![".*"]);
 
-        let raw_bundles = jp
-            .export
-            .raw_bundles
-            .as_ref()
-            .expect("jp raw bundle retention configured");
+        assert!(
+            jp.export.raw_bundles.is_none(),
+            "the default example must not enable legacy raw bundle retention"
+        );
+
+        let haruki_3d = &jp.export.haruki_3d;
         for expected in [
             "live_pv/model/characterv2/body/",
             "live_pv/model/characterv2/face/",
@@ -2427,18 +2446,19 @@ haruki_3d:
             "live_pv/model/characterv2/color_variation/body/",
             "live_pv/model/characterv2/color_variation/face/",
             "live_pv/model/characterv2/color_variation/head_optional/",
+            "live_pv/model/character/head_optional/",
+            "live_pv/model/character/color_variation/head_optional/",
             "character/motion/costume_setting/",
         ] {
             assert!(
-                raw_bundles
+                haruki_3d
                     .include
                     .iter()
                     .any(|value| value.contains(expected)),
-                "raw_bundles.include should retain {expected}"
+                "haruki_3d.include should retain {expected}"
             );
         }
 
-        let haruki_3d = &jp.export.haruki_3d;
         assert!(
             haruki_3d.master_dir.contains("haruki-sekai-master/master"),
             "haruki_3d.master_dir should point at the upstream masterdata checkout"
@@ -2466,6 +2486,8 @@ haruki_3d:
             "live_pv/model/characterv2/color_variation/body/",
             "live_pv/model/characterv2/color_variation/face/",
             "live_pv/model/characterv2/color_variation/head_optional/",
+            "live_pv/model/character/head_optional/",
+            "live_pv/model/character/color_variation/head_optional/",
             "character/motion/costume_setting/",
         ] {
             assert!(

@@ -59,6 +59,7 @@ COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-s
 RUN mkdir -p logs
 
 ENV TZ=Asia/Shanghai \
+    MALLOC_ARENA_MAX=4 \
     HARUKI_MEDIA_BACKEND=ffi \
     HARUKI_ASSET_STUDIO_READ_BATCH_SIZE=32 \
     HARUKI_CONFIG_PATH=/app/haruki-asset-configs.yaml

@@ -50,6 +50,7 @@ pub enum JobPhase {
     FetchingAssetInfo,
     PlanningDownloads,
     DownloadingBundles,
+    Exporting3dRuntime,
     PersistingState,
     SyncingChartHashes,
     Cancelled,

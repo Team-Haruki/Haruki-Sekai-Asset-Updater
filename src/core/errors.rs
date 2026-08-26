@@ -355,6 +355,8 @@ pub enum AssetExecutionError {
         #[source]
         source: std::io::Error,
     },
+    #[error("Haruki 3D staging bundle is missing: {path}")]
+    MissingHaruki3dStagingBundle { path: PathBuf },
     #[error("failed to remove Haruki 3D staging directory {path}: {source}")]
     RemoveHaruki3dStagingDir {
         path: PathBuf,
