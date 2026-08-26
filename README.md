@@ -11,6 +11,7 @@
 - Loads v3 YAML config
 - Exposes `GET /healthz`
 - Exposes `POST /v2/assets/update`
+- Exposes `GET /v2/jobs`
 - Exposes `GET /v2/jobs/{id}`
 - Exposes `POST /v2/jobs/{id}/cancel`
 - Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend

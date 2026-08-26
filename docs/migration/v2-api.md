@@ -59,6 +59,16 @@ Notes:
 - Normal `update` jobs also read and populate the configured bundle cache, so a
   subsequent full unity-rs validation does not redownload unchanged bundles.
 
+## `GET /v2/jobs`
+
+Returns a summary of all known jobs, grouped by status.
+
+Current response fields:
+
+- `total`
+- `queued` / `running` / `completed` / `failed` / `cancelled` (job id lists)
+- `jobs` (per-job entries)
+
 ## `GET /v2/jobs/{id}`
 
 Returns the current snapshot for a submitted job.

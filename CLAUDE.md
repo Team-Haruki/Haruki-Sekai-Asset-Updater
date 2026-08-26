@@ -51,6 +51,7 @@ docker compose up --build
   - `git_sync.rs` -- chart hash sync via Git CLI
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection
   - `retry.rs` -- generic async retry helper
+  - `cleanup.rs` -- workspace/temp directory cleanup
   - `download_records.rs` -- tracks previously downloaded assets
   - `models.rs` / `errors.rs` -- shared types and error enums
 
@@ -82,17 +83,21 @@ docker compose up --build
 
 - `GET /healthz`
 - `POST /v2/assets/update`
+- `GET /v2/jobs`
 - `GET /v2/jobs/{id}`
 - `POST /v2/jobs/{id}/cancel`
 
 ## Environment Variables
 
 - `HARUKI_CONFIG_PATH` -- override config file path
+- `HARUKI_CONFIG_URI` / `HARUKI_CONFIG_OPENDAL_SCHEME` / `HARUKI_CONFIG_OPENDAL_ROOT` / `HARUKI_CONFIG_OPENDAL_OPTION_*` -- load config from an `opendal://` remote source
 - `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE` -- direct unity-rs object-read chunk size
 - `HARUKI_MEDIA_BACKEND` -- media backend selection (`ffi`, `auto`, or `cli`)
 - `HARUKI_SHARED_AES_KEY_HEX` / `HARUKI_SHARED_AES_IV_HEX` -- shared AES keys (JP/TW/KR/CN)
 - `HARUKI_EN_AES_KEY_HEX` / `HARUKI_EN_AES_IV_HEX` -- EN-specific AES keys
 - `RUST_LOG` -- tracing log level filter
+
+Concurrency/CPU/memory tuning vars (`HARUKI_DOWNLOAD_CONCURRENCY`, `HARUKI_POST_PROCESS_CONCURRENCY`, `HARUKI_AUDIO_ENCODE_CONCURRENCY`, `HARUKI_VIDEO_ENCODE_CONCURRENCY`, `HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES`, `HARUKI_CPU_BUDGET_*`, etc.) are documented in the README "Runtime Tuning" section.
 
 ## Git commits
 
@@ -118,7 +123,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude: `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 5`, `Claude Sonnet 5`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 

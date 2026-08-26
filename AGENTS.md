@@ -14,6 +14,7 @@
 - 对外 HTTP 接口目前使用 v2 路径：
   - `GET /healthz`
   - `POST /v2/assets/update`
+  - `GET /v2/jobs`
   - `GET /v2/jobs/{id}`
   - `POST /v2/jobs/{id}/cancel`
 
@@ -45,6 +46,7 @@
 当前常用环境变量包括：
 
 - `HARUKI_CONFIG_PATH`
+- `HARUKI_CONFIG_URI`（配合 `HARUKI_CONFIG_OPENDAL_SCHEME` / `HARUKI_CONFIG_OPENDAL_ROOT` / `HARUKI_CONFIG_OPENDAL_OPTION_*` 从远端加载配置）
 - `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE`
 - `HARUKI_MEDIA_BACKEND`
 - `HARUKI_SHARED_AES_KEY_HEX`
@@ -52,6 +54,11 @@
 - `HARUKI_EN_AES_KEY_HEX`
 - `HARUKI_EN_AES_IV_HEX`
 - `RUST_LOG`
+
+并发/CPU/内存调优类变量（`HARUKI_DOWNLOAD_CONCURRENCY`、`HARUKI_POST_PROCESS_CONCURRENCY`、
+`HARUKI_AUDIO_ENCODE_CONCURRENCY`、`HARUKI_VIDEO_ENCODE_CONCURRENCY`、
+`HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES`、`HARUKI_CPU_BUDGET_*` 等）见 README 的
+"Runtime Tuning" 一节。
 
 ## 4. 依赖与实现约束
 
@@ -99,8 +106,10 @@ cargo test --workspace
   确认 `tests/logging.rs` 通过。
 - AssetStudio 集成（CI 可选）：
   确认 `tests/assetstudio_real.rs` 通过。
+- Docker/3D 导出器构建输入：
+  确认 `tests/dockerfile_haruki_3d.rs` 通过。
 
-## 8. 对代理的特殊要求
+## 7. 对代理的特殊要求
 
 - 不要重新引入 Go 主程序、Go 服务结构或 Go 运行配置。
 - 不要新增其他资产引擎运行时或跨语言资产解包绑定。
@@ -113,7 +122,7 @@ cargo test --workspace
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
 - Release artifact 与 Docker 镜像只需包含主服务二进制；`unity-rs-core` 已直接编译进主服务。
 
-## 9. 推荐工作流
+## 8. 推荐工作流
 
 1. 先阅读 `README.md`、`CLAUDE.md` 和本文件。
 2. 只在 Rust 结构内工作。
@@ -146,7 +155,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude: `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 5`, `Claude Sonnet 5`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
@@ -164,7 +173,7 @@ Examples from this repo's history:
 Use the standardized workflow layout in `.github/workflows`:
 
 - `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
-- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, then `cargo test --locked --workspace`. A separate CI job repeats clippy/test with the `media-ffi` feature enabled.
 - `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
 - `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
 
