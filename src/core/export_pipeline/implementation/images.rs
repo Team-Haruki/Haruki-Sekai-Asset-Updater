@@ -257,7 +257,7 @@ pub(super) fn write_native_rgba_ir_to_jpeg_file(
 ) -> Result<(), ExportPipelineError> {
     let pixels = native_rgba_ir_contiguous_pixels(raw_rgba);
     let mut rgb = Vec::with_capacity(raw_rgba.width as usize * raw_rgba.height as usize * 3);
-    for rgba in pixels.chunks_exact(4) {
+    for rgba in pixels.as_chunks::<4>().0 {
         rgb.extend_from_slice(&rgba[..3]);
     }
     let writer = std::fs::File::create(jpeg_file).map_err(|source| ExportPipelineError::Io {
