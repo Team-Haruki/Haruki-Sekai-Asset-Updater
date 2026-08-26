@@ -365,8 +365,3 @@ mod limits_tests {
         assert_eq!(sum_process_tree_cpu_ticks(10, &rows), 26);
     }
 }
-
-pub(super) async fn native_process_recovery_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| TokioMutex::new(())).lock().await
-}

@@ -59,11 +59,13 @@ fn example_config_uses_external_haruki_3d_exporter_path() {
 }
 
 #[test]
-fn container_defaults_bound_idle_assetstudio_memory() {
+fn container_defaults_use_the_direct_asset_engine() {
     let dockerfile = fs::read_to_string("Dockerfile").expect("Dockerfile should be readable");
     let config = fs::read_to_string("haruki-asset-configs.example.yaml")
         .expect("example config should be readable");
 
     assert!(dockerfile.contains("MALLOC_ARENA_MAX=4"));
-    assert!(config.contains("worker_idle_timeout_seconds: 60"));
+    assert!(!dockerfile.contains("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"));
+    assert!(!config.contains("worker_idle_timeout_seconds"));
+    assert!(config.contains("read_batch_size: 64 # direct unity-rs object-read chunk size"));
 }

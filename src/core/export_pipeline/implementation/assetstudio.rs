@@ -1,391 +1,437 @@
 use super::*;
 
-pub(super) fn configured_path(path: Option<&str>) -> Option<&str> {
-    path.map(str::trim).filter(|value| !value.is_empty())
-}
-
-pub(super) async fn run_assetstudio_ffi_object_export(
+pub(super) async fn run_unity_rs_object_export(
     app_config: &AppConfig,
     region: &RegionConfig,
     asset_bundle_file: &Path,
     output_dir: &Path,
     export_path: &str,
     strip_path_prefix: &str,
-    native_library_path: &str,
+    path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    let worker_path =
-        configured_worker_path(app_config.backends.asset_studio.worker_path.as_deref())?;
-    let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
-        &worker_path,
-        native_library_path,
-        app_config.effective_asset_studio_ffi_process_concurrency(),
-        app_config.backends.asset_studio.worker_max_calls,
-        Duration::from_secs(app_config.backends.asset_studio.worker_idle_timeout_seconds as u64),
-    );
-    let open_request = AssetStudioFfiContextOpenRequest {
-        input_path: asset_bundle_file.to_string_lossy().to_string(),
-        asset_types: asset_studio_export_type_list(region),
-        unity_version: (!region.runtime.unity_version.is_empty())
-            .then(|| region.runtime.unity_version.clone()),
-        filter_exclude_mode: false,
-        filter_with_regex: false,
-        filter_by_name: None,
-        filter_by_container: None,
-        filter_by_path_ids: Vec::new(),
-        load_all_assets: true,
-        include_assets: false,
-    };
-    let unpack_options = NativeObjectExportOptions {
-        output_dir,
-        export_path,
-        strip_path_prefix,
-        region,
-        read_kinds: &app_config.backends.asset_studio.read_kinds,
-        image_format: app_config
-            .backends
-            .asset_studio
-            .image_format
-            .as_deref()
-            .unwrap_or(NATIVE_AOT_DEFAULT_IMAGE_FORMAT),
-        read_batch_size: app_config.backends.asset_studio.read_batch_size,
-    };
-    let result = call_assetstudio_ffi_object_export_pooled(
-        &pool,
-        false,
-        app_config.effective_cpu_budget(),
-        &open_request,
-        &unpack_options,
+    let cpu_slot = acquire_cpu_budget_permit(app_config.effective_cpu_budget()).await?;
+    let cpu_wait_ms = cpu_slot.wait_ms;
+    let input_path = asset_bundle_file.to_path_buf();
+    let output_dir = output_dir.to_path_buf();
+    let export_path = export_path.to_string();
+    let strip_path_prefix = strip_path_prefix.to_string();
+    let region = region.clone();
+    let read_kinds = app_config.backends.asset_studio.read_kinds.clone();
+    let image_format = app_config
+        .backends
+        .asset_studio
+        .image_format
+        .clone()
+        .unwrap_or_else(|| UNITY_ENGINE_DEFAULT_IMAGE_FORMAT.to_string());
+    let read_batch_size = app_config.backends.asset_studio.read_batch_size;
+    let path_registry = path_registry.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let _cpu_permit = cpu_slot.permit;
+        let options = NativeObjectExportOptions {
+            output_dir: &output_dir,
+            export_path: &export_path,
+            strip_path_prefix: &strip_path_prefix,
+            region: &region,
+            read_kinds: &read_kinds,
+            image_format: &image_format,
+            read_batch_size,
+        };
+        let mut summary = call_unity_rs_object_export(&input_path, &options, &path_registry)?;
+        summary
+            .phase_ms
+            .insert("cpu_budget.wait".to_string(), cpu_wait_ms);
+        Ok(summary)
+    })
+    .await
+    .map_err(|source| ExportPipelineError::WorkerPanic {
+        worker: "unity-rs direct export".to_string(),
+        message: source.to_string(),
+    })?
+}
+
+fn call_unity_rs_object_export(
+    input_path: &Path,
+    options: &NativeObjectExportOptions<'_>,
+    path_registry: &NativeSemanticExportPathRegistry,
+) -> Result<NativeObjectExportSummary, ExportPipelineError> {
+    let open_started = Instant::now();
+    let unity_version_override = (!options.region.runtime.unity_version.trim().is_empty())
+        .then(|| options.region.runtime.unity_version.parse())
+        .transpose()
+        .map_err(
+            |error: unity_rs_core::unity_version::ParseUnityVersionError| {
+                ExportPipelineError::UnityRs {
+                    message: error.to_string(),
+                }
+            },
+        )?;
+    let studio = Studio::open_with_options(
+        input_path,
+        AssetLoadOptions {
+            unity_version_override,
+            ..AssetLoadOptions::default()
+        },
     )
-    .await;
-
-    match result {
-        Ok(summary) => Ok(summary),
-        Err(error) if is_native_worker_signal_failure(&error) => {
-            warn!(
-                process_concurrency = app_config.effective_asset_studio_ffi_process_concurrency(),
-                error = %error,
-                "assetstudio ffi object export worker crashed; retrying bundle once with an exclusive fresh worker"
-            );
-            let _recovery_guard = native_process_recovery_lock().await;
-            call_assetstudio_ffi_object_export_pooled(
-                &pool,
-                true,
-                app_config.effective_cpu_budget(),
-                &open_request,
-                &unpack_options,
-            )
-            .await
-        }
-        Err(error) => Err(error),
-    }
-}
-
-pub(super) async fn call_assetstudio_ffi_object_export_pooled(
-    pool: &Arc<AssetStudioWorkerPool>,
-    exclusive: bool,
-    cpu_budget: usize,
-    open_request: &AssetStudioFfiContextOpenRequest,
-    options: &NativeObjectExportOptions<'_>,
-) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    let wait_started = Instant::now();
-    let cpu_budget_slot = acquire_cpu_budget_permit(cpu_budget).await?;
-    let mut lease = if exclusive {
-        pool.acquire_exclusive().await?
-    } else {
-        pool.acquire().await?
+    .map_err(unity_rs_error)?;
+    let object_refs = studio.objects().collect::<Vec<_>>();
+    let assets = object_refs
+        .iter()
+        .enumerate()
+        .map(|(index, object)| unity_asset_info(index, *object))
+        .collect::<Vec<_>>();
+    let mut object_read_plan = NativeObjectReadPlanStats {
+        inspected_objects: assets.len(),
+        ..NativeObjectReadPlanStats::default()
     };
-    let wait_ms = wait_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    let call_result =
-        call_assetstudio_ffi_object_export_worker(&mut lease, open_request, options).await;
-
-    match call_result {
-        Ok(mut summary) => {
-            let worker_stats = lease.finish_success().await;
-            record_worker_lease_stats(
-                &mut summary.phase_ms,
-                wait_ms,
-                cpu_budget_slot.wait_ms,
-                &worker_stats,
-            );
-            drop(cpu_budget_slot.permit);
-            Ok(summary)
-        }
-        Err(error) => {
-            lease.kill();
-            drop(cpu_budget_slot.permit);
-            Err(error)
-        }
+    for asset in &assets {
+        object_type_read_stats_mut(&mut object_read_plan, asset).inspected_objects += 1;
     }
-}
-
-pub(super) fn record_worker_lease_stats(
-    phase_ms: &mut HashMap<String, u64>,
-    wait_ms: u64,
-    cpu_budget_wait_ms: u64,
-    stats: &WorkerLeaseStats,
-) {
-    phase_ms.insert("worker_pool.wait".to_string(), wait_ms);
-    phase_ms.insert(
-        "worker_pool.cpu_budget_wait".to_string(),
-        cpu_budget_wait_ms,
-    );
-    phase_ms.insert("cpu_budget.wait".to_string(), cpu_budget_wait_ms);
-    phase_ms.insert("worker_pool.worker_id".to_string(), stats.worker_id);
-    phase_ms.insert(
-        "worker_pool.worker_completed_calls".to_string(),
-        stats.worker_completed_calls,
-    );
-    phase_ms.insert("worker_pool.spawned".to_string(), stats.pool.spawned);
-    phase_ms.insert("worker_pool.recycled".to_string(), stats.pool.recycled);
-    phase_ms.insert("worker_pool.killed".to_string(), stats.pool.killed);
-    phase_ms.insert(
-        "worker_pool.protocol_errors".to_string(),
-        stats.pool.protocol_errors,
-    );
-    phase_ms.insert(
-        "worker_pool.completed_calls".to_string(),
-        stats.pool.completed_calls,
-    );
-    phase_ms.insert(
-        "worker_pool.max_call_ms".to_string(),
-        stats.pool.max_call_ms,
-    );
-}
-
-pub(super) async fn call_assetstudio_ffi_object_export_worker(
-    worker: &mut WorkerLease,
-    open_request: &AssetStudioFfiContextOpenRequest,
-    options: &NativeObjectExportOptions<'_>,
-) -> Result<NativeObjectExportSummary, ExportPipelineError> {
-    call_assetstudio_ffi_object_export_with_caller(worker, open_request, options).await
-}
-
-pub(super) trait AssetStudioObjectExportCaller {
-    async fn call(
-        &mut self,
-        request: &AssetStudioFfiRequest,
-    ) -> Result<WorkerOutput, ExportPipelineError>;
-}
-
-impl AssetStudioObjectExportCaller for WorkerLease {
-    async fn call(
-        &mut self,
-        request: &AssetStudioFfiRequest,
-    ) -> Result<WorkerOutput, ExportPipelineError> {
-        Ok(WorkerLease::call(self, request).await?)
-    }
-}
-
-async fn call_assetstudio_ffi_object_export_with_caller<C>(
-    caller: &mut C,
-    open_request: &AssetStudioFfiContextOpenRequest,
-    options: &NativeObjectExportOptions<'_>,
-) -> Result<NativeObjectExportSummary, ExportPipelineError>
-where
-    C: AssetStudioObjectExportCaller,
-{
-    let open_request = AssetStudioFfiRequest::ContextOpen(open_request.clone());
-    let open_output = caller.call(&open_request).await?;
-    let open_response = parse_assetstudio_ffi_context_open_worker_output(open_output)?;
-    let context_id = open_response.context_id;
     let mut summary = NativeObjectExportSummary {
         written_files: Vec::new(),
         acb_sources: Vec::new(),
         pending_image_writes: Vec::new(),
-        phase_ms: open_response.phase_ms.clone(),
+        phase_ms: HashMap::from([("unity_rs.open".to_string(), elapsed_millis(open_started))]),
         skipped_object_reads: Vec::new(),
-        object_read_plan: NativeObjectReadPlanStats {
-            inspected_objects: open_response.exportable_asset_count,
-            ..NativeObjectReadPlanStats::default()
-        },
-        worker_crash_skipped: false,
+        object_read_plan,
     };
+    summary
+        .phase_ms
+        .insert("unity_rs.files".to_string(), studio.file_count() as u64);
+    let configured_asset_types = asset_studio_export_type_list(options.region);
+    let mut readable_assets =
+        select_native_object_readable_assets(&assets, &configured_asset_types, &mut summary);
+    sort_native_object_reads_for_failure_isolation(&mut readable_assets);
 
-    let unpack_result = async {
-        let assets = list_assetstudio_ffi_context_objects_worker(
-            caller,
-            context_id,
-            &open_response,
-            &mut summary,
-        )
-        .await?;
-        let configured_asset_types = asset_studio_export_type_list(options.region);
-        let mut readable_assets =
-            select_native_object_readable_assets(&assets, &configured_asset_types, &mut summary);
-        sort_native_object_reads_for_failure_isolation(&mut readable_assets);
-
-        let read_batch_size =
-            native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
-        let mut path_state = NativeSemanticExportPathState::default();
-        let mut playable_outputs = Vec::new();
-        for asset_chunk in readable_assets.chunks(read_batch_size) {
-            let read_subchunks = native_object_read_subchunks(asset_chunk, options.image_format);
-            for asset_chunk in read_subchunks {
-                summary.object_read_plan.batch_count += 1;
-                let request = native_object_read_batch_request(
-                    context_id,
-                    asset_chunk,
-                    options.read_kinds,
-                    options.image_format,
-                );
-                let request = AssetStudioFfiRequest::ContextReadObjects(request);
-                let output = match caller.call(&request).await {
-                    Ok(output) => output,
-                    Err(error)
-                        if asset_chunk.len() == 1
-                            && is_native_worker_signal_failure(&error)
-                            && is_native_image_asset(asset_chunk[0]) =>
-                    {
-                        let asset = asset_chunk[0];
-                        warn!(
-                            path_id = asset.path_id,
-                            asset_type = asset.asset_type.as_deref().unwrap_or(""),
-                            name = asset.name.as_deref().unwrap_or(""),
-                            error = %error,
-                            "assetstudio ffi image read crashed worker; skipping image object"
-                        );
-                        summary.skipped_object_reads.push(NativeSkippedObjectRead {
-                            path_id: asset.path_id,
-                            asset_type: asset.asset_type.clone(),
-                            name: asset.name.clone(),
-                            container: asset.container.clone(),
-                            error: format!("assetstudio ffi image read crashed worker: {error}"),
-                        });
-                        summary.object_read_plan.skipped_reads += 1;
-                        summary.worker_crash_skipped = true;
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                };
-                let read_outputs =
-                    parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
-                        output,
-                        asset_chunk,
-                    )?;
-                record_native_object_read_batch_diagnostics(
-                    &mut summary,
-                    asset_chunk,
-                    &read_outputs,
-                );
-                for (asset, read_output) in asset_chunk.iter().zip(read_outputs.results) {
-                    let read_output = match read_output {
-                        NativeObjectReadParseResult::Read(read_output) => {
-                            summary.object_read_plan.successful_reads += 1;
-                            read_output
-                        }
-                        NativeObjectReadParseResult::Skipped(skipped) => {
-                            // A skipped read is data loss for this object; without the
-                            // warning a systematic failure (e.g. a native dependency
-                            // that cannot load) is invisible outside summary metadata.
-                            warn!(
-                                path_id = skipped.path_id,
-                                asset_type = skipped.asset_type.as_deref().unwrap_or(""),
-                                name = skipped.name.as_deref().unwrap_or(""),
-                                error = %skipped.error,
-                                "assetstudio ffi object read failed; skipping object"
-                            );
-                            summary.skipped_object_reads.push(skipped);
-                            summary.object_read_plan.skipped_reads += 1;
-                            continue;
-                        }
-                    };
+    let read_batch_size =
+        native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
+    let mut path_state = NativeSemanticExportPathState::with_registry(path_registry.clone());
+    let mut playable_outputs = Vec::new();
+    for asset_chunk in readable_assets.chunks(read_batch_size) {
+        summary.object_read_plan.batch_count += 1;
+        let batch_started = Instant::now();
+        for asset in asset_chunk {
+            let object = object_refs[asset.index];
+            let read_kind = native_read_kind_for_asset(asset, options.read_kinds);
+            match read_unity_rs_object(&studio, object, asset, &read_kind, options.image_format) {
+                Ok(read_output) => {
+                    summary.object_read_plan.successful_reads += 1;
+                    summary.object_read_plan.payload_bundle_bytes +=
+                        read_output.payload.len() as u64;
+                    let type_stats =
+                        object_type_read_stats_mut(&mut summary.object_read_plan, asset);
+                    type_stats.successful_reads += 1;
+                    type_stats.payload_bytes += read_output.payload.len() as u64;
                     merge_phase_ms(&mut summary.phase_ms, &read_output.response.phase_ms);
                     if is_playable_mono_typetree(asset, &read_output) {
-                        // Deep-copy the (small) typetree payload: playable outputs are
-                        // held until the end of the path export and must not pin the
-                        // whole read-batch bundle their Bytes slice points into.
-                        let mut playable_output = (*read_output).clone();
-                        playable_output.payload =
-                            bytes::Bytes::from(playable_output.payload.to_vec());
-                        playable_outputs.push(((*asset).clone(), playable_output));
+                        playable_outputs.push(((*asset).clone(), read_output));
                     } else {
                         write_native_object_payload(options, &mut path_state, asset, &read_output)?;
                     }
                 }
+                Err(error) => {
+                    warn!(
+                        path_id = asset.path_id,
+                        asset_type = asset.asset_type.as_deref().unwrap_or(""),
+                        name = asset.name.as_deref().unwrap_or(""),
+                        error = %error,
+                        "unity-rs object read failed; skipping object"
+                    );
+                    summary.skipped_object_reads.push(NativeSkippedObjectRead {
+                        path_id: asset.path_id,
+                        asset_type: asset.asset_type.clone(),
+                        name: asset.name.clone(),
+                        container: asset.container.clone(),
+                        error: error.to_string(),
+                    });
+                    summary.object_read_plan.failed_reads += 1;
+                    summary.object_read_plan.skipped_reads += 1;
+                    let type_stats =
+                        object_type_read_stats_mut(&mut summary.object_read_plan, asset);
+                    type_stats.failed_reads += 1;
+                    type_stats.skipped_reads += 1;
+                }
             }
         }
-        write_assetstudio_playable_payloads(options, &mut path_state, playable_outputs)?;
-        summary.written_files = path_state.written_files;
-        summary.acb_sources = path_state.acb_sources;
-        summary.pending_image_writes = path_state.pending_image_writes;
-        Ok(summary)
+        *summary
+            .phase_ms
+            .entry("unity_rs.read_batches".to_string())
+            .or_default() += elapsed_millis(batch_started);
     }
-    .await;
+    write_assetstudio_playable_payloads(options, &mut path_state, playable_outputs)?;
+    summary.written_files = path_state.written_files;
+    summary.acb_sources = path_state.acb_sources;
+    summary.pending_image_writes = path_state.pending_image_writes;
+    Ok(summary)
+}
 
-    let close_request = AssetStudioFfiContextCloseRequest { context_id };
-    let close_request = AssetStudioFfiRequest::ContextClose(close_request);
-    let close_result = match caller.call(&close_request).await {
-        Ok(output) => parse_assetstudio_ffi_context_close_worker_output(output),
-        Err(error) => Err(error),
-    };
-
-    match (unpack_result, close_result) {
-        (Ok(phase_ms), Ok(())) => Ok(phase_ms),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(summary), Err(error)) if summary.worker_crash_skipped => {
-            warn!(error = %error, "assetstudio ffi context close failed after recoverable worker crash; keeping partial object export");
-            Ok(summary)
-        }
-        (Ok(_), Err(error)) => Err(error),
-        (Err(unpack_error), Err(close_error)) => {
-            warn!(error = %close_error, "assetstudio ffi context close failed after object export error");
-            Err(unpack_error)
-        }
+fn unity_asset_info(index: usize, object: StudioObject<'_>) -> UnityAssetInfo {
+    let asset_type = unity_class_name(object.class_id());
+    UnityAssetInfo {
+        index,
+        name: object
+            .name()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| Some(format!("{asset_type}_#{index}"))),
+        container: object
+            .container()
+            .filter(|container| !container.is_empty())
+            .map(str::to_string),
+        asset_type: Some(asset_type),
+        type_id: object.class_id(),
+        path_id: object.path_id(),
+        unique_id: Some(format!("_#{index}")),
+        size: i64::try_from(object.byte_size()).unwrap_or(i64::MAX),
+        source_file: Some(object.source_path().to_string()),
     }
 }
 
-pub(super) async fn list_assetstudio_ffi_context_objects_worker(
-    caller: &mut impl AssetStudioObjectExportCaller,
-    context_id: i64,
-    open_response: &AssetStudioFfiContextOpenResponse,
-    summary: &mut NativeObjectExportSummary,
-) -> Result<Vec<AssetStudioFfiAssetInfo>, ExportPipelineError> {
-    if !open_response.assets.is_empty() && !open_response.has_more_assets {
-        summary.phase_ms.insert(
-            "context_list.returned_asset_count".to_string(),
-            open_response.assets.len() as u64,
-        );
-        return Ok(open_response.assets.clone());
-    }
-
-    let mut assets = Vec::with_capacity(open_response.exportable_asset_count);
-    let mut offset = 0usize;
-    let mut page_count = 0usize;
-    loop {
-        let request = AssetStudioFfiContextListObjectsRequest {
-            context_id,
-            offset,
-            limit: NATIVE_AOT_CONTEXT_LIST_PAGE_SIZE,
-        };
-        let request = AssetStudioFfiRequest::ContextListObjects(request);
-        let output = caller.call(&request).await?;
-        let response = parse_assetstudio_ffi_context_list_objects_worker_output(output)?;
-        merge_optional_max_phase_ms(
-            &mut summary.phase_ms,
-            "context_list.duration_ms",
-            response.duration_ms,
-        );
-        page_count += 1;
-        assets.extend(response.assets);
-        match response.next_offset {
-            Some(next_offset) => offset = next_offset,
-            None => {
-                summary
-                    .phase_ms
-                    .insert("context_list.pages".to_string(), page_count as u64);
-                summary
-                    .phase_ms
-                    .insert("context_list.objects".to_string(), assets.len() as u64);
-                break;
+fn read_unity_rs_object(
+    studio: &Studio,
+    object: StudioObject<'_>,
+    asset: &UnityAssetInfo,
+    kind: &str,
+    image_format: &str,
+) -> Result<UnityObjectReadOutput, ExportPipelineError> {
+    const MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+    let started = Instant::now();
+    let normalized = if kind.trim().is_empty() {
+        "auto"
+    } else {
+        kind.trim()
+    };
+    let (payload, payload_kind, suggested_extension) = match (object.class_id(), normalized) {
+        (49, "auto" | "text_bytes") => (
+            object
+                .read_text_bytes(MAX_PAYLOAD_BYTES as usize)
+                .map_err(unity_rs_error)?,
+            "text_bytes",
+            ".bytes".to_string(),
+        ),
+        (TEXTURE_2D_CLASS_ID, "auto" | "image") => {
+            require_raw_rgba(image_format, "Texture2D")?;
+            let limits = TextureReadLimits {
+                maximum_payload_bytes: MAX_PAYLOAD_BYTES,
+                maximum_output_bytes: MAX_PAYLOAD_BYTES.saturating_sub(36),
+                ..TextureReadLimits::default()
+            };
+            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
+            let texture =
+                read_texture2d(studio.collection(), loaded, object.object_index(), limits)
+                    .map_err(unity_rs_error)?;
+            if texture.data.is_empty() {
+                // Unity legitimately serializes empty dynamic-font atlases and fills them at
+                // runtime. There is no image to encode, but retaining the complete object keeps
+                // an `all` export lossless and avoids misclassifying the placeholder as a decoder
+                // failure.
+                (
+                    object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
+                    "raw",
+                    ".dat".to_string(),
+                )
+            } else {
+                let image = texture
+                    .decode_mip_rgba8(0, limits)
+                    .map_err(unity_rs_error)?;
+                let mut payload = Vec::new();
+                write_rgba_ir(&image, &mut payload).map_err(unity_rs_error)?;
+                (payload, "image_raw_rgba", ".rgba".to_string())
             }
         }
+        (TEXTURE_2D_ARRAY_CLASS_ID, "auto" | "image" | "image_archive") => {
+            require_raw_rgba(image_format, "Texture2DArray")?;
+            let limits = TextureArrayReadLimits {
+                maximum_payload_bytes: MAX_PAYLOAD_BYTES,
+                maximum_output_bytes: MAX_PAYLOAD_BYTES,
+                maximum_bundle_bytes: MAX_PAYLOAD_BYTES,
+                ..TextureArrayReadLimits::default()
+            };
+            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
+            let texture =
+                read_texture2d_array(studio.collection(), loaded, object.object_index(), limits)
+                    .map_err(unity_rs_error)?;
+            let mut payload = Vec::new();
+            write_texture2d_array_rgba_bundle(&texture, limits, &mut payload)
+                .map_err(unity_rs_error)?;
+            (payload, "image_array_bundle_raw_rgba", String::new())
+        }
+        (SPRITE_CLASS_ID, "auto" | "image") => {
+            require_raw_rgba(image_format, "Sprite")?;
+            let image_bytes = MAX_PAYLOAD_BYTES.saturating_sub(36);
+            let sprite_limits = SpriteReadLimits {
+                maximum_output_pixels: image_bytes / 4,
+                maximum_output_bytes: image_bytes,
+                ..SpriteReadLimits::default()
+            };
+            let texture_limits = TextureReadLimits {
+                maximum_payload_bytes: MAX_PAYLOAD_BYTES,
+                maximum_output_bytes: image_bytes,
+                ..TextureReadLimits::default()
+            };
+            let image = object
+                .decode_sprite(sprite_limits, texture_limits)
+                .map_err(unity_rs_error)?;
+            let mut payload = Vec::new();
+            write_rgba_ir_display_order(&image, &mut payload).map_err(unity_rs_error)?;
+            (payload, "image_raw_rgba", ".rgba".to_string())
+        }
+        (SHADER_CLASS_ID, "auto" | "shader" | "text") => (
+            object
+                .read_shader_text(MAX_PAYLOAD_BYTES)
+                .map_err(unity_rs_error)?,
+            "shader_text",
+            ".shader".to_string(),
+        ),
+        (unity_rs_core::mesh::MESH_CLASS_ID, "auto" | "mesh" | "obj") => (
+            object
+                .read_mesh_obj(MeshReadLimits {
+                    maximum_output_bytes: MAX_PAYLOAD_BYTES,
+                    ..MeshReadLimits::default()
+                })
+                .map_err(unity_rs_error)?,
+            "mesh_obj",
+            ".obj".to_string(),
+        ),
+        (MONO_BEHAVIOUR_CLASS_ID, "auto" | "typetree_json") => {
+            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
+            let limits = MonoBehaviourReadLimits {
+                maximum_json_bytes: MAX_PAYLOAD_BYTES as usize,
+                ..MonoBehaviourReadLimits::default()
+            };
+            match read_mono_behaviour_json(loaded, object.object_index(), false, limits) {
+                Ok(json) => (json.into_bytes(), "typetree_json", ".json".to_string()),
+                Err(unity_rs_core::Error::Unsupported(_)) => (
+                    object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
+                    "raw",
+                    ".dat".to_string(),
+                ),
+                Err(error) => return Err(unity_rs_error(error)),
+            }
+        }
+        (AUDIO_CLIP_CLASS_ID, "auto" | "audio" | "raw") => {
+            let simple = object
+                .read_audio_clip(SimpleAssetReadLimits::default())
+                .map_err(unity_rs_error)?;
+            let extension = simple.raw_extension;
+            let payload = simple
+                .payload
+                .read_to_vec(MAX_PAYLOAD_BYTES)
+                .map_err(unity_rs_error)?;
+            (payload, "audio_raw", extension)
+        }
+        (VIDEO_CLIP_CLASS_ID, "auto" | "video" | "raw") => read_simple_asset(
+            object.read_video_clip(SimpleAssetReadLimits::default()),
+            MAX_PAYLOAD_BYTES,
+        )?,
+        (MOVIE_TEXTURE_CLASS_ID, "auto" | "video" | "raw") => read_simple_asset(
+            object.read_movie_texture(SimpleAssetReadLimits::default()),
+            MAX_PAYLOAD_BYTES,
+        )?,
+        (FONT_CLASS_ID, "auto" | "font" | "raw") => read_simple_asset(
+            object.read_font(SimpleAssetReadLimits::default()),
+            MAX_PAYLOAD_BYTES,
+        )?,
+        (_, "raw") => (
+            object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
+            "raw",
+            ".dat".to_string(),
+        ),
+        (_, "auto" | "typetree_json") => {
+            match object.read_type_tree_json(false, MAX_PAYLOAD_BYTES as usize) {
+                Ok(payload) => (payload, "typetree_json", ".json".to_string()),
+                Err(_) => (
+                    object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
+                    "raw",
+                    ".dat".to_string(),
+                ),
+            }
+        }
+        _ => {
+            return Err(ExportPipelineError::UnityRs {
+                message: format!(
+                    "requested kind `{normalized}` is unsupported for {}",
+                    asset.asset_type.as_deref().unwrap_or("unknown object")
+                ),
+            });
+        }
+    };
+    let duration_ms = elapsed_millis(started);
+    Ok(UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some(payload_kind.to_string()),
+            payload_len: i64::try_from(payload.len()).unwrap_or(i64::MAX),
+            suggested_extension: Some(suggested_extension),
+            warnings: Vec::new(),
+            phase_ms: HashMap::from([("unity_rs.read_object".to_string(), duration_ms)]),
+            error: None,
+            duration_ms: Some(duration_ms),
+        },
+        payload: payload.into(),
+    })
+}
+
+fn read_simple_asset(
+    result: unity_rs_core::Result<unity_rs_core::simple_assets::SimpleBinaryAsset>,
+    maximum_bytes: u64,
+) -> Result<(Vec<u8>, &'static str, String), ExportPipelineError> {
+    let simple = result.map_err(unity_rs_error)?;
+    let payload = simple
+        .payload
+        .read_to_vec(maximum_bytes)
+        .map_err(unity_rs_error)?;
+    Ok((payload, simple.payload_kind, simple.suggested_extension))
+}
+
+fn require_raw_rgba(image_format: &str, asset_type: &str) -> Result<(), ExportPipelineError> {
+    if image_format == UNITY_ENGINE_DEFAULT_IMAGE_FORMAT {
+        return Ok(());
     }
-    Ok(assets)
+    Err(ExportPipelineError::UnityRs {
+        message: format!("{asset_type} reads only support raw_rgba"),
+    })
+}
+
+fn unity_rs_error(error: unity_rs_core::Error) -> ExportPipelineError {
+    ExportPipelineError::UnityRs {
+        message: error.to_string(),
+    }
+}
+
+fn elapsed_millis(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn unity_class_name(class_id: i32) -> String {
+    match class_id {
+        1 => "GameObject",
+        4 => "Transform",
+        21 => "Material",
+        23 => "MeshRenderer",
+        TEXTURE_2D_CLASS_ID => "Texture2D",
+        33 => "MeshFilter",
+        43 => "Mesh",
+        SHADER_CLASS_ID => "Shader",
+        49 => "TextAsset",
+        AUDIO_CLIP_CLASS_ID => "AudioClip",
+        95 => "Animator",
+        MONO_BEHAVIOUR_CLASS_ID => "MonoBehaviour",
+        FONT_CLASS_ID => "Font",
+        137 => "SkinnedMeshRenderer",
+        MOVIE_TEXTURE_CLASS_ID => "MovieTexture",
+        TEXTURE_2D_ARRAY_CLASS_ID => "Texture2DArray",
+        SPRITE_CLASS_ID => "Sprite",
+        VIDEO_CLIP_CLASS_ID => "VideoClip",
+        other => return format!("ClassID{other}"),
+    }
+    .to_string()
 }
 
 pub(super) fn native_read_batch_size_for_assets(
     configured_size: usize,
-    assets: &[&AssetStudioFfiAssetInfo],
+    assets: &[&UnityAssetInfo],
 ) -> usize {
     let configured_size = configured_size.max(1);
     if assets.is_empty() {
@@ -420,14 +466,15 @@ pub(super) fn native_read_batch_size_for_assets(
     tuned_size.max(1).min(assets.len().max(1))
 }
 
+#[cfg(test)]
 pub(super) fn native_object_read_subchunks<'a>(
-    asset_chunk: &'a [&'a AssetStudioFfiAssetInfo],
+    asset_chunk: &'a [&'a UnityAssetInfo],
     image_format: &str,
-) -> Vec<&'a [&'a AssetStudioFfiAssetInfo]> {
+) -> Vec<&'a [&'a UnityAssetInfo]> {
     let mut subchunks = Vec::new();
     let mut group_start = 0usize;
     for (index, asset) in asset_chunk.iter().enumerate() {
-        if !is_native_aot_non_bmp_image_read(asset, image_format) {
+        if !is_unity_engine_non_bmp_image_read(asset, image_format) {
             continue;
         }
         if group_start < index {
@@ -442,18 +489,19 @@ pub(super) fn native_object_read_subchunks<'a>(
     subchunks
 }
 
-pub(super) fn is_native_aot_non_bmp_image_read(
-    asset: &AssetStudioFfiAssetInfo,
+#[cfg(test)]
+pub(super) fn is_unity_engine_non_bmp_image_read(
+    asset: &UnityAssetInfo,
     image_format: &str,
 ) -> bool {
     is_native_image_asset(asset) && native_image_format_for_asset(asset, image_format) != "bmp"
 }
 
 pub(super) fn select_native_object_readable_assets<'a>(
-    assets: &'a [AssetStudioFfiAssetInfo],
+    assets: &'a [UnityAssetInfo],
     configured_asset_types: &[String],
     summary: &mut NativeObjectExportSummary,
-) -> Vec<&'a AssetStudioFfiAssetInfo> {
+) -> Vec<&'a UnityAssetInfo> {
     let mut readable_assets = Vec::new();
     let texture2d_array_containers = texture2d_array_parent_containers(assets);
     for asset in assets {
@@ -468,6 +516,7 @@ pub(super) fn select_native_object_readable_assets<'a>(
                 container: asset.container.clone(),
                 error: "Texture2DArrayImage is covered by its Texture2DArray parent".to_string(),
             });
+            object_type_read_stats_mut(&mut summary.object_read_plan, asset).skipped_reads += 1;
             continue;
         }
         if !is_native_object_supported_asset(asset) {
@@ -476,12 +525,16 @@ pub(super) fn select_native_object_readable_assets<'a>(
                     path_id = skipped.path_id,
                     asset_type = skipped.asset_type.as_deref().unwrap_or(""),
                     name = skipped.name.as_deref().unwrap_or(""),
-                    "assetstudio ffi object type is not readable yet; skipping object"
+                    "unity-rs object type is not readable yet; skipping object"
                 );
                 summary.skipped_object_reads.push(skipped);
+                object_type_read_stats_mut(&mut summary.object_read_plan, asset).skipped_reads += 1;
             }
             continue;
         }
+        let type_stats = object_type_read_stats_mut(&mut summary.object_read_plan, asset);
+        type_stats.planned_objects += 1;
+        type_stats.readable_objects += 1;
         readable_assets.push(asset);
     }
     summary.object_read_plan.planned_objects = readable_assets.len();
@@ -490,16 +543,22 @@ pub(super) fn select_native_object_readable_assets<'a>(
     readable_assets
 }
 
-pub(super) fn sort_native_object_reads_for_failure_isolation(
-    assets: &mut Vec<&AssetStudioFfiAssetInfo>,
-) {
+fn object_type_read_stats_mut<'a>(
+    plan: &'a mut NativeObjectReadPlanStats,
+    asset: &UnityAssetInfo,
+) -> &'a mut NativeObjectTypeReadStats {
+    let asset_type = asset.asset_type.as_deref().unwrap_or("Unknown");
+    plan.by_type.entry(asset_type.to_string()).or_default()
+}
+
+pub(super) fn sort_native_object_reads_for_failure_isolation(assets: &mut Vec<&UnityAssetInfo>) {
     assets.sort_by_key(|asset| {
         let priority = if is_native_image_asset(asset) { 1 } else { 0 };
         (priority, asset.index)
     });
 }
 
-pub(super) fn is_native_image_asset(asset: &AssetStudioFfiAssetInfo) -> bool {
+pub(super) fn is_native_image_asset(asset: &UnityAssetInfo) -> bool {
     asset.asset_type.as_deref().is_some_and(|asset_type| {
         assetstudio_type_selector_matches("Texture2D", asset_type)
             || assetstudio_type_selector_matches("Texture2DArray", asset_type)
@@ -507,9 +566,7 @@ pub(super) fn is_native_image_asset(asset: &AssetStudioFfiAssetInfo) -> bool {
     })
 }
 
-pub(super) fn texture2d_array_parent_containers(
-    assets: &[AssetStudioFfiAssetInfo],
-) -> HashSet<String> {
+pub(super) fn texture2d_array_parent_containers(assets: &[UnityAssetInfo]) -> HashSet<String> {
     assets
         .iter()
         .filter(|asset| {
@@ -522,7 +579,7 @@ pub(super) fn texture2d_array_parent_containers(
 }
 
 pub(super) fn is_texture2d_array_image_with_parent(
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     parent_containers: &HashSet<String>,
 ) -> bool {
     asset.asset_type.as_deref().is_some_and(|asset_type| {
@@ -531,7 +588,7 @@ pub(super) fn is_texture2d_array_image_with_parent(
         .is_some_and(|container| parent_containers.contains(&container))
 }
 
-pub(super) fn normalized_native_asset_container(asset: &AssetStudioFfiAssetInfo) -> Option<String> {
+pub(super) fn normalized_native_asset_container(asset: &UnityAssetInfo) -> Option<String> {
     asset
         .container
         .as_deref()
@@ -540,309 +597,12 @@ pub(super) fn normalized_native_asset_container(asset: &AssetStudioFfiAssetInfo)
         .filter(|container| !container.is_empty())
 }
 
-pub(super) fn native_object_read_batch_request(
-    context_id: i64,
-    asset_chunk: &[&AssetStudioFfiAssetInfo],
-    read_kinds: &BTreeMap<String, String>,
-    image_format: &str,
-) -> AssetStudioFfiContextReadObjectsRequest {
-    AssetStudioFfiContextReadObjectsRequest {
-        context_id,
-        objects: asset_chunk
-            .iter()
-            .map(|asset| AssetStudioFfiContextReadObjectItemRequest {
-                path_id: asset.path_id,
-                kind: native_read_kind_for_asset(asset, read_kinds),
-                image_format: native_image_format_for_asset(asset, image_format),
-            })
-            .collect(),
-        payload_capacity_hint: native_object_read_payload_capacity_hint(asset_chunk, image_format),
-    }
+#[cfg(test)]
+pub(super) fn native_image_format_for_asset(_asset: &UnityAssetInfo, _configured: &str) -> String {
+    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT.to_string()
 }
 
-/// Generous upper bound for the batch's packed payload block. Images decode from
-/// compressed GPU formats to raw RGBA (up to ~16x for ASTC 8x8), other kinds stay
-/// close to their source size. The spill file backing this reservation is sparse,
-/// so overestimating is free; underestimating only costs one fallback copy in the
-/// worker.
-pub(super) fn native_object_read_payload_capacity_hint(
-    asset_chunk: &[&AssetStudioFfiAssetInfo],
-    image_format: &str,
-) -> u64 {
-    asset_chunk
-        .iter()
-        .map(|asset| {
-            let size = asset.size.max(0) as u64;
-            if is_native_aot_non_bmp_image_read(asset, image_format) {
-                size.saturating_mul(16).saturating_add(1024 * 1024)
-            } else {
-                size.saturating_mul(2).saturating_add(64 * 1024)
-            }
-        })
-        .fold(0u64, u64::saturating_add)
-}
-
-pub(super) fn native_image_format_for_asset(
-    _asset: &AssetStudioFfiAssetInfo,
-    _configured: &str,
-) -> String {
-    NATIVE_AOT_DEFAULT_IMAGE_FORMAT.to_string()
-}
-
-pub(super) fn record_native_object_read_batch_diagnostics(
-    summary: &mut NativeObjectExportSummary,
-    asset_chunk: &[&AssetStudioFfiAssetInfo],
-    read_outputs: &NativeObjectReadBatchParseOutput,
-) {
-    if read_outputs.object_count != asset_chunk.len() {
-        warn!(
-            requested_objects = asset_chunk.len(),
-            response_objects = read_outputs.object_count,
-            "assetstudio ffi object read batch diagnostic count mismatch"
-        );
-    }
-    summary.object_read_plan.payload_bundle_bytes += read_outputs.payload_bundle_bytes;
-    summary.object_read_plan.read_payload_ms += read_outputs.read_payload_ms;
-    summary.object_read_plan.failed_reads += read_outputs.failed_count;
-    record_max_phase_ms(
-        &mut summary.phase_ms,
-        "read_batch.payload_bundle_version",
-        u64::from(read_outputs.payload_bundle_version),
-    );
-    add_phase_ms(
-        &mut summary.phase_ms,
-        "read_batch.payload_bundle_entry_count",
-        read_outputs.payload_bundle_entry_count as u64,
-    );
-    add_phase_ms(
-        &mut summary.phase_ms,
-        "read_batch.payload_data_bytes",
-        read_outputs.payload_data_bytes,
-    );
-    merge_prefixed_phase_ms(
-        &mut summary.phase_ms,
-        "read_batch.phase",
-        &read_outputs.phase_ms,
-    );
-    merge_prefixed_usize_counts(
-        &mut summary.phase_ms,
-        "read_batch.payload_kind_count",
-        &read_outputs.payload_kind_counts,
-    );
-    merge_prefixed_u64_counts(
-        &mut summary.phase_ms,
-        "read_batch.payload_bytes_by_kind",
-        &read_outputs.payload_bytes_by_kind,
-    );
-    debug!(
-        requested_objects = asset_chunk.len(),
-        response_objects = read_outputs.object_count,
-        payload_bundle_version = read_outputs.payload_bundle_version,
-        payload_bundle_entry_count = read_outputs.payload_bundle_entry_count,
-        payload_bundle_bytes = read_outputs.payload_bundle_bytes,
-        payload_data_bytes = read_outputs.payload_data_bytes,
-        failed_reads = read_outputs.failed_count,
-        read_payload_ms = read_outputs.read_payload_ms,
-        phase_ms = ?read_outputs.phase_ms,
-        payload_kind_counts = ?read_outputs.payload_kind_counts,
-        payload_bytes_by_kind = ?read_outputs.payload_bytes_by_kind,
-        "assetstudio ffi object read batch diagnostics"
-    );
-}
-
-pub(super) fn parse_assetstudio_ffi_object_read_batch_worker_output_recoverable(
-    output: WorkerOutput,
-    assets: &[&AssetStudioFfiAssetInfo],
-) -> Result<NativeObjectReadBatchParseOutput, ExportPipelineError> {
-    let response = output.response.into_object_read_batch()?;
-    for warning in &response.warnings {
-        warn!(warning = %warning, "assetstudio ffi object read batch warning");
-    }
-
-    let payload: bytes::Bytes = if !output.payload.is_empty() {
-        if let Some(payload_file) = output.payload_file {
-            let _ = remove_file_if_exists(&payload_file);
-        }
-        output.payload.into()
-    } else if let Some(payload_file) = output.payload_file {
-        // Spilled payloads are mapped, not read: the worker wrote them into tmpfs
-        // (when available) and the mapping is shared straight through to the
-        // per-object Bytes slices and the image encoders.
-        map_spilled_payload(&payload_file)?
-    } else {
-        bytes::Bytes::new()
-    };
-
-    if !(output.status_success && response.success) && response.reads.len() != assets.len() {
-        let message = response.error.clone().unwrap_or_else(|| {
-            format!(
-                "native context_read_objects failed with status {}: {}",
-                output.status,
-                output.stderr.trim()
-            )
-        });
-        let results = assets
-            .iter()
-            .map(|asset| {
-                NativeObjectReadParseResult::Skipped(NativeSkippedObjectRead {
-                    path_id: asset.path_id,
-                    asset_type: asset.asset_type.clone(),
-                    name: asset.name.clone(),
-                    container: asset.container.clone(),
-                    error: message.clone(),
-                })
-            })
-            .collect();
-        return Ok(NativeObjectReadBatchParseOutput {
-            results,
-            object_count: response_object_count(&response, assets.len()),
-            payload_bundle_version: response.payload_bundle_version,
-            payload_bundle_entry_count: response.payload_bundle_entry_count,
-            payload_bundle_bytes: object_read_batch_payload_bundle_bytes(&response, payload.len()),
-            payload_data_bytes: object_read_batch_payload_data_bytes(&response),
-            failed_count: if response.failed_count > 0 {
-                response.failed_count
-            } else {
-                assets.len()
-            },
-            read_payload_ms: response.read_payload_ms,
-            phase_ms: response.phase_ms,
-            payload_kind_counts: response.payload_kind_counts,
-            payload_bytes_by_kind: response.payload_bytes_by_kind,
-        });
-    }
-
-    if response.reads.len() != assets.len() {
-        return Err(ExportPipelineError::AssetStudioFfi {
-            message: format!(
-                "native context_read_objects response count mismatch: requested {}, got {}",
-                assets.len(),
-                response.reads.len()
-            ),
-        });
-    }
-
-    // Per-object payloads become refcounted sub-slices of the bundle instead of
-    // per-object heap copies. Images are sub-chunked into single-object batches
-    // upstream, so a retained image slice pins a bundle of roughly its own size
-    // rather than a large mixed batch.
-    let payloads = if payload.is_empty() {
-        HashMap::new()
-    } else {
-        parse_payload_bundle_shared(&payload)?
-            .into_iter()
-            .collect::<HashMap<_, _>>()
-    };
-
-    let object_count = response_object_count(&response, assets.len());
-    let payload_bundle_version = response.payload_bundle_version;
-    let payload_bundle_entry_count = response.payload_bundle_entry_count;
-    let payload_bundle_bytes = object_read_batch_payload_bundle_bytes(&response, payload.len());
-    let payload_data_bytes = object_read_batch_payload_data_bytes(&response);
-    let mut failed_count = response.failed_count;
-    let read_payload_ms = response.read_payload_ms;
-    let phase_ms = response.phase_ms.clone();
-    let payload_kind_counts = response.payload_kind_counts.clone();
-    let payload_bytes_by_kind = response.payload_bytes_by_kind.clone();
-    let mut observed_failed_count = 0usize;
-    let mut results = Vec::with_capacity(assets.len());
-    for (asset, read_response) in assets.iter().zip(response.reads) {
-        for warning in &read_response.warnings {
-            warn!(warning = %warning, "assetstudio ffi object read warning");
-        }
-        if !read_response.success {
-            observed_failed_count += 1;
-            let message = read_response.error.clone().unwrap_or_else(|| {
-                format!(
-                    "native context_read_objects failed for path_id {}",
-                    asset.path_id
-                )
-            });
-            warn!(
-                path_id = asset.path_id,
-                asset_type = asset.asset_type.as_deref().unwrap_or(""),
-                name = asset.name.as_deref().unwrap_or(""),
-                error = %message,
-                "assetstudio ffi object read failed; skipping object"
-            );
-            results.push(NativeObjectReadParseResult::Skipped(
-                NativeSkippedObjectRead {
-                    path_id: asset.path_id,
-                    asset_type: asset.asset_type.clone(),
-                    name: asset.name.clone(),
-                    container: asset.container.clone(),
-                    error: message,
-                },
-            ));
-            continue;
-        }
-
-        let object_payload = payloads
-            .get(&asset.path_id.to_string())
-            .cloned()
-            .unwrap_or_default();
-        results.push(NativeObjectReadParseResult::Read(Box::new(
-            AssetStudioFfiObjectReadOutput {
-                response: read_response,
-                payload: object_payload,
-            },
-        )));
-    }
-
-    if failed_count == 0 {
-        failed_count = observed_failed_count;
-    }
-
-    Ok(NativeObjectReadBatchParseOutput {
-        results,
-        object_count,
-        payload_bundle_version,
-        payload_bundle_entry_count,
-        payload_bundle_bytes,
-        payload_data_bytes,
-        failed_count,
-        read_payload_ms,
-        phase_ms,
-        payload_kind_counts,
-        payload_bytes_by_kind,
-    })
-}
-
-pub(super) fn response_object_count(
-    response: &AssetStudioFfiObjectReadBatchResponse,
-    fallback: usize,
-) -> usize {
-    if response.object_count > 0 {
-        response.object_count
-    } else {
-        fallback
-    }
-}
-
-pub(super) fn object_read_batch_payload_bundle_bytes(
-    response: &AssetStudioFfiObjectReadBatchResponse,
-    fallback_payload_len: usize,
-) -> u64 {
-    if response.payload_bundle_bytes > 0 {
-        response.payload_bundle_bytes as u64
-    } else if response.payload_len > 0 {
-        response.payload_len as u64
-    } else {
-        fallback_payload_len as u64
-    }
-}
-
-pub(super) fn object_read_batch_payload_data_bytes(
-    response: &AssetStudioFfiObjectReadBatchResponse,
-) -> u64 {
-    if response.payload_data_bytes > 0 {
-        response.payload_data_bytes
-    } else {
-        response.payload_bytes_by_kind.values().sum()
-    }
-}
-
-pub(super) fn is_native_object_supported_asset(asset: &AssetStudioFfiAssetInfo) -> bool {
+pub(super) fn is_native_object_supported_asset(asset: &UnityAssetInfo) -> bool {
     asset
         .asset_type
         .as_deref()
@@ -850,7 +610,7 @@ pub(super) fn is_native_object_supported_asset(asset: &AssetStudioFfiAssetInfo) 
 }
 
 pub(super) fn assetstudio_object_mode_type_enabled(
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     configured_asset_types: &[String],
 ) -> bool {
     let Some(asset_type) = asset.asset_type.as_deref() else {
@@ -898,7 +658,7 @@ pub(super) fn assetstudio_type_selector_matches(selector: &str, asset_type: &str
 }
 
 pub(super) fn native_read_kind_for_asset(
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
     configured_kinds: &BTreeMap<String, String>,
 ) -> String {
     let asset_type = asset.asset_type.as_deref().unwrap_or_default();
@@ -930,9 +690,8 @@ pub(super) fn default_native_read_kind(asset_type: &str) -> &'static str {
         "audioclip" => "audio",
         "videoclip" | "movietexture" => "video",
         "font" => "font",
-        "shader" | "shadervariantcollection" => "shader",
+        "shader" => "shader",
         "mesh" => "obj",
-        "animator" => "fbx",
         _ => "typetree_json",
     }
 }
@@ -947,7 +706,7 @@ pub(super) fn normalize_assetstudio_type_name(value: &str) -> String {
 }
 
 pub(super) fn native_skipped_unsupported_asset(
-    asset: &AssetStudioFfiAssetInfo,
+    asset: &UnityAssetInfo,
 ) -> Option<NativeSkippedObjectRead> {
     let asset_type = asset.asset_type.as_deref()?;
     let error = if assetstudio_object_mode_known_unreadable_type(asset_type) {

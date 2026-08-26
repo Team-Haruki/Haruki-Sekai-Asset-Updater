@@ -257,15 +257,15 @@ pub enum ExportPipelineError {
     },
     #[error("media conversion failed: {message}")]
     Media { message: String },
-    #[error("assetstudio ffi backend failed: {message}")]
-    AssetStudioFfi { message: String },
-    #[error("failed to serialize assetstudio ffi request: {source}")]
-    FfiSerialize {
+    #[error("unity-rs export failed: {message}")]
+    UnityRs { message: String },
+    #[error("failed to serialize Unity export JSON: {source}")]
+    JsonSerialize {
         #[source]
         source: sonic_rs::Error,
     },
-    #[error("failed to parse assetstudio ffi response: {source}")]
-    FfiParse {
+    #[error("failed to parse Unity export JSON: {source}")]
+    JsonParse {
         #[source]
         source: sonic_rs::Error,
     },

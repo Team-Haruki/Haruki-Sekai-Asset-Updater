@@ -6,11 +6,10 @@
 
 - 本仓库已经整理为 Rust 主项目。
 - 旧 Go 主程序已经移除，不要再按 Go 服务结构新增主程序代码。
-- `tools/ffi/` 可以保留面向第三方开发者的 Python / Go AssetStudioFFI 调用示例。
+- 资产解包只保留直接链接 `unity-rs-core` 的纯 Rust 路径。
 - 当前仓库为 Cargo workspace：
   - `Cargo.toml`
   - `src/`
-  - `crates/assetstudio-ffi/`
   - `tests/`
 - 对外 HTTP 接口目前使用 v2 路径：
   - `GET /healthz`
@@ -22,8 +21,6 @@
 
 - `src/`
   Rust 主服务代码。
-- `crates/assetstudio-ffi/`
-  AssetStudio FFI ABI 与 `assetstudio_ffi_worker`。
 - `src/core/`
   核心业务逻辑，例如配置、下载、导出、上传、git 同步。
 - `src/service/`
@@ -35,8 +32,6 @@
   `se_0126_01.acb` 放在外部目录，并设置 `HARUKI_CODEC_SAMPLE_DIR`。
 - `docs/migration/`
   当前保留 `v2-api.md`，用于记录 HTTP v2 API 说明。
-- `tools/ffi/`
-  AssetStudioFFI typed ABI 与 `assetstudio_ffi_worker` 的跨语言示例代码；这些示例不属于主服务运行路径。
 
 ## 3. 配置文件约定
 
@@ -50,8 +45,7 @@
 当前常用环境变量包括：
 
 - `HARUKI_CONFIG_PATH`
-- `HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH`
-- `HARUKI_ASSET_STUDIO_FFI_WORKER_PATH`
+- `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE`
 - `HARUKI_MEDIA_BACKEND`
 - `HARUKI_SHARED_AES_KEY_HEX`
 - `HARUKI_SHARED_AES_IV_HEX`
@@ -65,7 +59,11 @@
 - YAML 处理统一使用 `yaml_serde`，不要新增 `serde_yaml` 依赖。
 - codec 后端统一依赖 crates.io 上的 `cridecoder`。
 - 图片转换优先保持纯 Rust 路径，不要重新引入外部 WebP 工具链。
-- `AssetStudioFFI` NativeAOT 动态库、`assetstudio_ffi_worker` 与 `ffmpeg` 继续作为外部运行依赖。
+- 资产引擎为 crates.io 发布的 `unity-rs-core` crate，由 `Cargo.lock` 锁定版本并直接编译进二进制；
+  没有动态库，也不需要 .NET 工具链。
+- `unity-rs-core` 使用公开 crates.io registry，不需要私有 Git 依赖构建凭据。
+- 主服务直接调用 `unity-rs-core` 的纯 Rust API，这是唯一的资产引擎运行路径。
+- FFmpeg 是仅存的外部运行依赖（使用 media FFI feature 时链接其系统库）。
 
 ## 5. 代码风格约定
 
@@ -93,10 +91,8 @@ cargo test --workspace
   检查 `src/core/config.rs` 相关测试是否覆盖。
 - 样本导出：
   确认 `tests/codec_smoke.rs` 通过。
-- AssetStudio worker：
-  确认 workspace 构建仍生成 `assetstudio_ffi_worker`。
-- FFI 示例：
-  如果修改 `tools/ffi/`，至少运行对应 Python smoke / Go smoke 或 `go test ./...`。
+- unity-rs 集成：
+  确认主服务直接链接 `unity-rs-core`，且 release 只交付主服务二进制。
 - HTTP/任务流：
   确认 `tests/api.rs` 通过。
 - 日志：
@@ -107,7 +103,7 @@ cargo test --workspace
 ## 8. 对代理的特殊要求
 
 - 不要重新引入 Go 主程序、Go 服务结构或 Go 运行配置。
-- `tools/ffi/go*` 下的 Go 代码只作为 AssetStudioFFI 示例保留，不应成为主服务依赖。
+- 不要新增其他资产引擎运行时或跨语言资产解包绑定。
 - 不要把一次性调试输出、手工 smoke 配置、临时导出目录提交进仓库。
 - 不要在仓库里写入真实密钥、真实 token、真实云存储凭据。
 - 如果修改 CI，请确保：
@@ -115,7 +111,7 @@ cargo test --workspace
   - `cargo test --workspace`
   仍然能跑通。
 - 如果修改 release / docker 流程，请保持 Git tag 版本号能正确传递到 Rust 构建物。
-- Release artifact 与 Docker 镜像必须包含 `assetstudio_ffi_worker`，因为主服务生产路径通过 worker pool bridge 调用 AssetStudioFFI。
+- Release artifact 与 Docker 镜像只需包含主服务二进制；`unity-rs-core` 已直接编译进主服务。
 
 ## 9. 推荐工作流
 

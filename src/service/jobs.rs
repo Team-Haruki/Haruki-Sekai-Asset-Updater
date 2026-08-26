@@ -745,38 +745,38 @@ async fn progress_consumer(
                         format!("exported bundle `{bundle}` in {elapsed_ms} ms"),
                     );
                 }
-                ExecutionProgressUpdate::BundleFfiExportPhases { bundle, phase_ms } => {
+                ExecutionProgressUpdate::BundleUnityRsExportPhases { bundle, phase_ms } => {
                     tracing::debug!(
                         job_id = %id,
                         region = %job.region,
                         bundle = %bundle,
-                        phases = %format_ffi_export_phases(&phase_ms),
-                        "ffi export phases"
+                        phases = %format_unity_rs_export_phases(&phase_ms),
+                        "unity-rs export phases"
                     );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
                         format!(
-                            "ffi export phases for `{bundle}`: {}",
-                            format_ffi_export_phases(&phase_ms)
+                            "unity-rs export phases for `{bundle}`: {}",
+                            format_unity_rs_export_phases(&phase_ms)
                         ),
                     );
                 }
-                ExecutionProgressUpdate::BundleFfiSkippedObjectReads { bundle, count } => {
+                ExecutionProgressUpdate::BundleUnityRsSkippedObjectReads { bundle, count } => {
                     tracing::debug!(
                         job_id = %id,
                         region = %job.region,
                         bundle = %bundle,
                         count,
-                        "ffi skipped object reads"
+                        "unity-rs skipped object reads"
                     );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
-                        format!("ffi skipped {count} object read(s) for `{bundle}`"),
+                        format!("unity-rs skipped {count} object read(s) for `{bundle}`"),
                     );
                 }
-                ExecutionProgressUpdate::BundleFfiObjectReadPlan { bundle, plan } => {
+                ExecutionProgressUpdate::BundleUnityRsObjectReadPlan { bundle, plan } => {
                     tracing::debug!(
                         job_id = %id,
                         region = %job.region,
@@ -786,13 +786,13 @@ async fn progress_consumer(
                         skipped = plan.skipped_reads,
                         batches = plan.batch_count,
                         payload_bytes = plan.payload_bundle_bytes,
-                        "ffi object read plan"
+                        "unity-rs object read plan"
                     );
                     push_progress_event(
                         job,
                         JobPhase::DownloadingBundles,
                         format!(
-                            "ffi object reads for `{bundle}`: planned={}, read={}, skipped={}, batches={}, payload={} bytes",
+                            "unity-rs object reads for `{bundle}`: planned={}, read={}, skipped={}, batches={}, payload={} bytes",
                             plan.planned_objects,
                             plan.successful_reads,
                             plan.skipped_reads,
@@ -875,7 +875,7 @@ async fn progress_consumer(
     }
 }
 
-fn format_ffi_export_phases(phase_ms: &HashMap<String, u64>) -> String {
+fn format_unity_rs_export_phases(phase_ms: &HashMap<String, u64>) -> String {
     let mut phases: Vec<_> = phase_ms.iter().collect();
     phases.sort_by_key(|(phase, _)| *phase);
     phases

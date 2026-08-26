@@ -401,7 +401,7 @@ pub(super) async fn handle_usm_files(
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|source| ExportPipelineError::AssetStudioFfi {
+                .map_err(|source| ExportPipelineError::UnityRs {
                     message: format!("failed to create USM post-process runtime: {source}"),
                 })?;
             runtime.block_on(process_usm_input_with_metrics(

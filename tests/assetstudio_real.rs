@@ -1,9 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use haruki_assetstudio_ffi::{configured_worker_path, AssetStudioWorkerPool};
 use haruki_sekai_asset_updater::core::config::{
     AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionExportConfig, RegionPathsConfig,
     RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
@@ -21,18 +19,17 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// Opt-in: point `ASSET_STUDIO_BUNDLE_PATH` at a real bundle to run it. The
+/// engine is linked into the test binary, so no library path is involved.
 #[test]
-fn real_assetstudio_ffi_exports_expected_file_when_configured() {
-    let Some(asset_studio_ffi_library_path) = required_env("ASSET_STUDIO_FFI_LIBRARY_PATH") else {
-        return;
-    };
-    run_real_assetstudio_export(asset_studio_ffi_library_path);
-}
-
-fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
+fn real_unity_rs_exports_expected_file_when_configured() {
     let Some(bundle_path) = required_env("ASSET_STUDIO_BUNDLE_PATH") else {
         return;
     };
+    run_real_assetstudio_export(bundle_path);
+}
+
+fn run_real_assetstudio_export(bundle_path: String) {
     let expected_relative_file = required_env("ASSET_STUDIO_EXPECTED_RELATIVE_FILE");
 
     let unity_version =
@@ -92,17 +89,8 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
                 ffmpeg_path: "ffmpeg".to_string(),
                 ..haruki_sekai_asset_updater::core::config::MediaBackendConfig::default()
             },
-            asset_studio: haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig {
-                library_path: Some(asset_studio_ffi_library_path),
-                worker_path: required_env("ASSET_STUDIO_FFI_WORKER_PATH")
-                    .or_else(|| required_env("HARUKI_ASSET_STUDIO_FFI_WORKER_PATH")),
-                worker_idle_timeout_seconds: required_env(
-                    "ASSET_STUDIO_WORKER_IDLE_TIMEOUT_SECONDS",
-                )
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(60),
-                ..haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default()
-            },
+            asset_studio:
+                haruki_sekai_asset_updater::core::config::AssetStudioBackendConfig::default(),
             ..haruki_sekai_asset_updater::core::config::BackendsConfig::default()
         },
         storage: StorageConfig {
@@ -134,6 +122,25 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
             &category,
         ))
         .unwrap();
+    let object_plan = &summary.unity_rs_object_read_plan;
+    eprintln!(
+        "unity-rs objects: inspected={}, planned={}, succeeded={}, failed={}, skipped={}",
+        object_plan.inspected_objects,
+        object_plan.planned_objects,
+        object_plan.successful_reads,
+        object_plan.failed_reads,
+        object_plan.skipped_reads
+    );
+    assert_eq!(
+        object_plan.successful_reads + object_plan.failed_reads,
+        object_plan.planned_objects,
+        "every selected unity-rs object should be attempted"
+    );
+    assert_eq!(
+        object_plan.failed_reads, 0,
+        "real unity-rs export contained failed object reads: {:?}",
+        summary.unity_rs_skipped_object_reads
+    );
 
     let export_root = if by_category {
         output_dir
@@ -143,12 +150,14 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
     } else {
         output_dir.path().join(&export_path)
     };
+    let exported_files = walk_files(&export_root);
     if let Some(expected_relative_file) = expected_relative_file {
         let expected_path = export_root.join(PathBuf::from(expected_relative_file));
         assert!(
             expected_path.exists(),
-            "expected AssetStudio output missing: {}",
-            expected_path.display()
+            "expected AssetStudio output missing: {}; exported: {:?}",
+            expected_path.display(),
+            exported_files
         );
     }
     assert!(
@@ -157,53 +166,8 @@ fn run_real_assetstudio_export(asset_studio_ffi_library_path: String) {
         summary.export_root.display()
     );
 
-    let exported_count = walk_files(&export_root).len();
+    let exported_count = exported_files.len();
     assert!(exported_count > 0, "no files exported by AssetStudio");
-
-    if parse_bool_env("ASSET_STUDIO_ASSERT_IDLE_REAP", false) {
-        let idle_timeout =
-            Duration::from_secs(config.backends.asset_studio.worker_idle_timeout_seconds as u64);
-        let worker_path =
-            configured_worker_path(config.backends.asset_studio.worker_path.as_deref()).unwrap();
-        let pool = AssetStudioWorkerPool::shared_with_idle_timeout(
-            &worker_path,
-            config
-                .backends
-                .asset_studio
-                .library_path
-                .as_deref()
-                .unwrap(),
-            config.effective_asset_studio_ffi_process_concurrency(),
-            config.backends.asset_studio.worker_max_calls,
-            idle_timeout,
-        );
-        assert!(
-            runtime.block_on(pool.idle_worker_count()) > 0
-                || pool.maintenance_stats_snapshot().idle_reaped > 0
-        );
-        runtime
-            .block_on(async {
-                tokio::time::timeout(idle_timeout + Duration::from_secs(5), async {
-                    loop {
-                        let stats = pool.maintenance_stats_snapshot();
-                        let allocator_trimmed = !cfg!(all(target_os = "linux", target_env = "gnu"))
-                            || stats.allocator_trim_attempts > 0;
-                        if pool.idle_worker_count().await == 0
-                            && stats.idle_reaped > 0
-                            && allocator_trimmed
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                })
-                .await
-            })
-            .expect("AssetStudio worker pool did not become idle");
-        assert!(pool.maintenance_stats_snapshot().idle_reaped > 0);
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        assert!(pool.maintenance_stats_snapshot().allocator_trim_attempts > 0);
-    }
 }
 
 fn walk_files(dir: &Path) -> Vec<PathBuf> {

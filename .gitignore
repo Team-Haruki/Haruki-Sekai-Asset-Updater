@@ -45,3 +45,4 @@ haruki-sekai-asset-updater
 
 # Nested worktrees
 cricodecs/target/
+node_modules/

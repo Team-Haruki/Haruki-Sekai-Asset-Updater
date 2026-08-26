@@ -22,8 +22,9 @@ use crate::core::config::{AppConfig, AssetHttpVersion, RegionConfig, RegionProvi
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::export_pipeline::{
-    export_unity_asset_bundle_payloads, flush_pending_native_image_writes,
-    post_process_exported_files, NativeObjectReadPlanStats, UnityAssetBundlePayloadExport,
+    export_unity_asset_bundle_payloads_with_registry, flush_pending_native_image_writes,
+    post_process_exported_files, NativeObjectReadPlanStats, NativeSemanticExportPathRegistry,
+    UnityAssetBundlePayloadExport,
 };
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
@@ -33,6 +34,7 @@ use crate::core::retry::retry_async;
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+static BUNDLE_CACHE_WRITE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum AssetCategory {
@@ -177,15 +179,15 @@ pub enum ExecutionProgressUpdate {
         bundle: String,
         elapsed_ms: u128,
     },
-    BundleFfiExportPhases {
+    BundleUnityRsExportPhases {
         bundle: String,
         phase_ms: HashMap<String, u64>,
     },
-    BundleFfiSkippedObjectReads {
+    BundleUnityRsSkippedObjectReads {
         bundle: String,
         count: usize,
     },
-    BundleFfiObjectReadPlan {
+    BundleUnityRsObjectReadPlan {
         bundle: String,
         plan: NativeObjectReadPlanStats,
     },
@@ -384,6 +386,7 @@ impl AssetExecutionContext {
         let post_process_active = std::sync::Arc::new(AtomicUsize::new(0));
         let mut joins = JoinSet::new();
         let mut post_process_joins = JoinSet::new();
+        let export_path_registry = NativeSemanticExportPathRegistry::default();
         let app_config_cloned = app_config.clone();
         let haruki_3d_work_root = self.haruki_3d_work_asset_root();
         let bundle_hash_index_path = self.haruki_3d_bundle_hash_index_path();
@@ -419,6 +422,7 @@ impl AssetExecutionContext {
             let progress = progress.clone();
             let cancel_flag = cancel_flag.clone();
             let haruki_3d_work_root = haruki_3d_work_root.clone();
+            let export_path_registry = export_path_registry.clone();
             let bundle_hash_index = bundle_hash_index.clone();
             joins.spawn(async move {
                 let download_slot_wait_started = Instant::now();
@@ -454,6 +458,7 @@ impl AssetExecutionContext {
                         &task,
                         &progress,
                         haruki_3d_work_root.as_deref(),
+                        &export_path_registry,
                         bundle_hash_index.as_ref(),
                     )
                     .await
@@ -775,7 +780,11 @@ impl AssetExecutionContext {
                 message: "building prefetch task list".to_string(),
             },
         );
-        let tasks = self.build_raw_bundle_filter_tasks(&info);
+        let tasks = if configured_asset_bundle_cache_dir(app_config).is_some() {
+            self.build_standard_download_tasks(&info, &DownloadRecord::new())
+        } else {
+            self.build_raw_bundle_filter_tasks(&info)
+        };
         Self::send_progress(
             &progress,
             ExecutionProgressUpdate::DownloadsPlanned { total: tasks.len() },
@@ -1061,7 +1070,7 @@ impl AssetExecutionContext {
         )
         .await?;
 
-        let mut phase_ms = job.payload_export.ffi_export_phase_ms;
+        let mut phase_ms = job.payload_export.unity_rs_export_phase_ms;
         phase_ms.extend(image_phase_ms);
         phase_ms.extend(post_process_summary.post_process_phase_ms);
         phase_ms.insert(
@@ -1082,27 +1091,27 @@ impl AssetExecutionContext {
         if !phase_ms.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleFfiExportPhases {
+                ExecutionProgressUpdate::BundleUnityRsExportPhases {
                     bundle: job.bundle_path.clone(),
                     phase_ms,
                 },
             );
         }
-        if !job.payload_export.ffi_skipped_object_reads.is_empty() {
+        if !job.payload_export.unity_rs_skipped_object_reads.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleFfiSkippedObjectReads {
+                ExecutionProgressUpdate::BundleUnityRsSkippedObjectReads {
                     bundle: job.bundle_path.clone(),
-                    count: job.payload_export.ffi_skipped_object_reads.len(),
+                    count: job.payload_export.unity_rs_skipped_object_reads.len(),
                 },
             );
         }
-        if !job.payload_export.ffi_object_read_plan.is_empty() {
+        if !job.payload_export.unity_rs_object_read_plan.is_empty() {
             Self::send_progress(
                 progress,
-                ExecutionProgressUpdate::BundleFfiObjectReadPlan {
+                ExecutionProgressUpdate::BundleUnityRsObjectReadPlan {
                     bundle: job.bundle_path.clone(),
-                    plan: job.payload_export.ffi_object_read_plan,
+                    plan: job.payload_export.unity_rs_object_read_plan,
                 },
             );
         }
@@ -1437,6 +1446,7 @@ impl AssetExecutionContext {
         task: &DownloadTask,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
         haruki_3d_work_root: Option<&Path>,
+        export_path_registry: &NativeSemanticExportPathRegistry,
         bundle_hash_index: Option<&Arc<std::sync::Mutex<DownloadRecord>>>,
     ) -> Result<Option<NativeBundlePostProcessJob>, AssetExecutionError> {
         let asset_save_dir = self.region.paths.asset_save_dir.clone().ok_or_else(|| {
@@ -1446,14 +1456,14 @@ impl AssetExecutionContext {
         })?;
         let bundle_url = self.render_bundle_url(task)?;
         let download_started = Instant::now();
-        let network_started = Instant::now();
-        let body = self.get_with_retry(&bundle_url).await?;
-        let network_download_ms = Some(network_started.elapsed().as_millis());
+        let fetch = self
+            .fetch_deobfuscated_bundle(app_config, &bundle_url, task)
+            .await?;
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDownloaded {
                 bundle: task.bundle_path.clone(),
-                bytes: body.len(),
+                bytes: fetch.body.len(),
                 elapsed_ms: download_started.elapsed().as_millis(),
             },
         );
@@ -1461,10 +1471,10 @@ impl AssetExecutionContext {
             progress,
             ExecutionProgressUpdate::BundleFetchDetails {
                 bundle: task.bundle_path.clone(),
-                source: "network".to_string(),
-                cache_read_ms: None,
-                network_download_ms,
-                cache_write_ms: None,
+                source: fetch.source.as_str().to_string(),
+                cache_read_ms: fetch.cache_read_ms,
+                network_download_ms: fetch.network_download_ms,
+                cache_write_ms: fetch.cache_write_ms,
             },
         );
 
@@ -1494,10 +1504,10 @@ impl AssetExecutionContext {
         // serve HTTP and other jobs) aren't stalled while many bundles process concurrently.
         let blocking_started = Instant::now();
         let temp_file_for_blocking = task.export_payloads.then(|| temp_file.clone());
+        let deobfuscated = fetch.body;
         let bundle_hash_index = bundle_hash_index.cloned();
         let bundle_hash_index_key = bundle_hash_index_key(&task.bundle_path)?;
         tokio::task::spawn_blocking(move || -> Result<(), AssetExecutionError> {
-            let deobfuscated = deobfuscate(&body);
             if let Some(raw_path) = raw_bundle_target {
                 Self::write_raw_bundle(&raw_path, &deobfuscated)?;
             }
@@ -1562,13 +1572,14 @@ impl AssetExecutionContext {
             AssetCategory::Other(_) => "OnDemand",
         };
         let export_started = Instant::now();
-        let payload_export = export_unity_asset_bundle_payloads(
+        let payload_export = export_unity_asset_bundle_payloads_with_registry(
             app_config,
             &self.region,
             &temp_file,
             &task.bundle_path,
             Path::new(&asset_save_dir),
             category,
+            export_path_registry,
         )
         .await;
         let _ = remove_file_if_exists(&temp_file);
@@ -1597,14 +1608,14 @@ impl AssetExecutionContext {
         })?;
         let bundle_url = self.render_bundle_url(task)?;
         let download_started = Instant::now();
-        let network_started = Instant::now();
-        let body = self.get_with_retry(&bundle_url).await?;
-        let network_download_ms = Some(network_started.elapsed().as_millis());
+        let fetch = self
+            .fetch_deobfuscated_bundle(app_config, &bundle_url, task)
+            .await?;
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDownloaded {
                 bundle: task.bundle_path.clone(),
-                bytes: body.len(),
+                bytes: fetch.body.len(),
                 elapsed_ms: download_started.elapsed().as_millis(),
             },
         );
@@ -1612,32 +1623,169 @@ impl AssetExecutionContext {
             progress,
             ExecutionProgressUpdate::BundleFetchDetails {
                 bundle: task.bundle_path.clone(),
-                source: "network".to_string(),
-                cache_read_ms: None,
-                network_download_ms,
-                cache_write_ms: None,
+                source: fetch.source.as_str().to_string(),
+                cache_read_ms: fetch.cache_read_ms,
+                network_download_ms: fetch.network_download_ms,
+                cache_write_ms: fetch.cache_write_ms,
             },
         );
 
-        let deobfuscate_started = Instant::now();
-        let deobfuscated = deobfuscate(&body);
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDeobfuscated {
                 bundle: task.bundle_path.clone(),
-                elapsed_ms: deobfuscate_started.elapsed().as_millis(),
+                elapsed_ms: 0,
             },
         );
 
-        let raw_path = self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?;
-        Self::write_raw_bundle(&raw_path, &deobfuscated)?;
-        tracing::debug!(
-            region = %self.region_name,
-            bundle = %task.bundle_path,
-            output = %raw_path.display(),
-            http_version = ?app_config.server.asset_http_version,
-            "prefetched raw asset bundle"
-        );
+        if configured_asset_bundle_cache_dir(app_config).is_none()
+            || self.matches_raw_bundle_filters(&task.bundle_path)
+        {
+            let raw_path = self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?;
+            Self::write_raw_bundle(&raw_path, &fetch.body)?;
+            tracing::debug!(
+                region = %self.region_name,
+                bundle = %task.bundle_path,
+                output = %raw_path.display(),
+                http_version = ?app_config.server.asset_http_version,
+                "prefetched raw asset bundle"
+            );
+        }
+        Ok(())
+    }
+
+    async fn fetch_deobfuscated_bundle(
+        &self,
+        app_config: &AppConfig,
+        bundle_url: &str,
+        task: &DownloadTask,
+    ) -> Result<BundleFetch, AssetExecutionError> {
+        let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) else {
+            let network_started = Instant::now();
+            let body = self.get_with_retry(bundle_url).await?;
+            return Ok(BundleFetch {
+                body: deobfuscate(&body),
+                source: BundleFetchSource::Network,
+                cache_read_ms: None,
+                network_download_ms: Some(network_started.elapsed().as_millis()),
+                cache_write_ms: None,
+            });
+        };
+
+        self.get_bundle_with_cache(bundle_url, task, &cache_dir)
+            .await
+    }
+
+    async fn get_bundle_with_cache(
+        &self,
+        bundle_url: &str,
+        task: &DownloadTask,
+        cache_dir: &Path,
+    ) -> Result<BundleFetch, AssetExecutionError> {
+        let safe_bundle_path = validate_relative_bundle_path(&task.bundle_path)?;
+        let cache_file = cache_dir.join(&self.region_name).join(safe_bundle_path);
+        let cache_read_started = Instant::now();
+        match tokio::fs::read(&cache_file).await {
+            Ok(body) if Self::cache_entry_matches(&cache_file, &body, task).await => {
+                return Ok(BundleFetch {
+                    body: deobfuscate(&body),
+                    source: BundleFetchSource::CacheHit,
+                    cache_read_ms: Some(cache_read_started.elapsed().as_millis()),
+                    network_download_ms: None,
+                    cache_write_ms: None,
+                });
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    region = %self.region_name,
+                    bundle = %task.bundle_path,
+                    cache = %cache_file.display(),
+                    "asset bundle cache entry is stale or incomplete; refreshing it"
+                );
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(AssetExecutionError::ReadTempFile {
+                    path: cache_file,
+                    source,
+                });
+            }
+        }
+
+        let network_started = Instant::now();
+        let network_body = self.get_with_retry(bundle_url).await?;
+        let network_download_ms = network_started.elapsed().as_millis();
+        let body = deobfuscate(&network_body);
+        let cache_write_started = Instant::now();
+        Self::write_bundle_cache_entry(&cache_file, &task.bundle_hash, &body).await?;
+        Ok(BundleFetch {
+            body,
+            source: BundleFetchSource::CacheMiss,
+            cache_read_ms: None,
+            network_download_ms: Some(network_download_ms),
+            cache_write_ms: Some(cache_write_started.elapsed().as_millis()),
+        })
+    }
+
+    async fn cache_entry_matches(cache_file: &Path, body: &[u8], task: &DownloadTask) -> bool {
+        let metadata_path = bundle_cache_metadata_path(cache_file);
+        match tokio::fs::read_to_string(&metadata_path).await {
+            Ok(cached_hash) => cached_hash.trim() == task.bundle_hash,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                // Compatibility with caches produced before hash sidecars were
+                // introduced. Network payloads carry a four-byte obfuscation
+                // marker that the persistent cache omits.
+                let expected = usize::try_from(task.file_size)
+                    .ok()
+                    .filter(|size| *size > 0);
+                expected.is_none_or(|expected| {
+                    body.len() == expected || body.len().checked_add(4) == Some(expected)
+                })
+            }
+            Err(_) => false,
+        }
+    }
+
+    async fn write_bundle_cache_entry(
+        cache_file: &Path,
+        bundle_hash: &str,
+        body: &[u8],
+    ) -> Result<(), AssetExecutionError> {
+        if let Some(parent) = cache_file.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|source| {
+                AssetExecutionError::CreateTempDir {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        Self::atomic_write_bundle_cache_file(cache_file, body).await?;
+        let metadata_path = bundle_cache_metadata_path(cache_file);
+        Self::atomic_write_bundle_cache_file(&metadata_path, bundle_hash.as_bytes()).await
+    }
+
+    async fn atomic_write_bundle_cache_file(
+        path: &Path,
+        body: &[u8],
+    ) -> Result<(), AssetExecutionError> {
+        let sequence = BUNDLE_CACHE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut temp_name = std::ffi::OsString::from(".");
+        temp_name.push(path.file_name().unwrap_or_default());
+        temp_name.push(format!(".tmp-{}-{sequence}", std::process::id()));
+        let temp_path = path.with_file_name(temp_name);
+        tokio::fs::write(&temp_path, body).await.map_err(|source| {
+            AssetExecutionError::WriteTempFile {
+                path: temp_path.clone(),
+                source,
+            }
+        })?;
+        if let Err(source) = tokio::fs::rename(&temp_path, path).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(AssetExecutionError::WriteTempFile {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
         Ok(())
     }
 
@@ -2283,6 +2431,50 @@ fn raw_bundle_output_path(root: &Path, bundle_path: &str) -> Result<PathBuf, Ass
     Ok(path)
 }
 
+#[derive(Debug)]
+struct BundleFetch {
+    /// Deobfuscated bytes ready to pass directly to unity-rs.
+    body: Vec<u8>,
+    source: BundleFetchSource,
+    cache_read_ms: Option<u128>,
+    network_download_ms: Option<u128>,
+    cache_write_ms: Option<u128>,
+}
+
+#[derive(Debug)]
+enum BundleFetchSource {
+    CacheHit,
+    CacheMiss,
+    Network,
+}
+
+impl BundleFetchSource {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::CacheHit => "cache_hit",
+            Self::CacheMiss => "cache_miss",
+            Self::Network => "network",
+        }
+    }
+}
+
+fn configured_asset_bundle_cache_dir(app_config: &AppConfig) -> Option<PathBuf> {
+    app_config
+        .execution
+        .asset_bundle_cache_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn bundle_cache_metadata_path(cache_file: &Path) -> PathBuf {
+    let mut file_name = std::ffi::OsString::from(".");
+    file_name.push(cache_file.file_name().unwrap_or_default());
+    file_name.push(".haruki-cache-hash");
+    cache_file.with_file_name(file_name)
+}
+
 fn bundle_hash_index_key(bundle_path: &str) -> Result<String, AssetExecutionError> {
     Ok(raw_bundle_output_path(Path::new(""), bundle_path)?
         .to_string_lossy()
@@ -2542,10 +2734,11 @@ mod tests {
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
     use super::{
-        bundle_dependency_closure, bundle_hash_index_key, decrypt_asset_bundle_info, deobfuscate,
-        exporter_metric_lines, missing_haruki_3d_bundle_paths, post_process_backlog_capacity,
-        raw_bundle_output_path, should_download_bundle, AssetBundleDetail, AssetBundleInfo,
-        AssetCategory, AssetExecutionContext,
+        bundle_cache_metadata_path, bundle_dependency_closure, bundle_hash_index_key,
+        decrypt_asset_bundle_info, deobfuscate, exporter_metric_lines,
+        missing_haruki_3d_bundle_paths, post_process_backlog_capacity, raw_bundle_output_path,
+        should_download_bundle, AssetBundleDetail, AssetBundleInfo, AssetCategory,
+        AssetExecutionContext, DownloadTask,
     };
 
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
@@ -3218,6 +3411,140 @@ mod tests {
             vec![1, 2, 3]
         );
         assert_eq!(deobfuscate(&[9, 8, 7]), vec![9, 8, 7]);
+    }
+
+    #[tokio::test]
+    async fn bundle_cache_downloads_once_then_avoids_network() {
+        let temp = tempdir().unwrap();
+        let cache_root = temp.path().join("bundle-cache");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let network_body = [
+            &[0x20, 0x00, 0x00, 0x00],
+            b"UnityFS cached test bundle".as_slice(),
+        ]
+        .concat();
+        let app = Router::new().route(
+            "/bundle/ond/a",
+            get({
+                let request_count = request_count.clone();
+                let network_body = network_body.clone();
+                move || {
+                    let request_count = request_count.clone();
+                    let network_body = network_body.clone();
+                    async move {
+                        request_count.fetch_add(1, Ordering::SeqCst);
+                        Body::from(network_body)
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: String::new(),
+            asset_bundle_url_template: format!("http://{addr}/bundle/{{bundle_path}}"),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::from([("production".to_string(), "abc".to_string())]),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let mut config = AppConfig::default();
+        config.execution.asset_bundle_cache_dir = Some(cache_root.to_string_lossy().into_owned());
+        let request = AssetUpdateRequest {
+            region: "cn".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let context = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        let task = DownloadTask {
+            download_path: "ond/a".to_string(),
+            bundle_path: "ond/a".to_string(),
+            bundle_hash: "hash-a".to_string(),
+            category: AssetCategory::OnDemand,
+            file_size: network_body.len() as i64,
+            priority: 0,
+            export_payloads: true,
+            stage_haruki_3d: false,
+        };
+        let url = format!("http://{addr}/bundle/ond/a");
+
+        let first = context
+            .fetch_deobfuscated_bundle(&config, &url, &task)
+            .await
+            .unwrap();
+        let second = context
+            .fetch_deobfuscated_bundle(&config, &url, &task)
+            .await
+            .unwrap();
+
+        assert_eq!(first.source.as_str(), "cache_miss");
+        assert_eq!(second.source.as_str(), "cache_hit");
+        assert_eq!(first.body, b"UnityFS cached test bundle");
+        assert_eq!(second.body, first.body);
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        let cache_file = cache_root.join("cn/ond/a");
+        assert_eq!(tokio::fs::read(&cache_file).await.unwrap(), first.body);
+        assert_eq!(
+            tokio::fs::read_to_string(bundle_cache_metadata_path(&cache_file))
+                .await
+                .unwrap(),
+            "hash-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_deobfuscated_bundle_cache_is_reused_without_network() {
+        let temp = tempdir().unwrap();
+        let cache_root = temp.path().join("bundle-cache");
+        let cache_file = cache_root.join("cn/start/a");
+        let cached_body = b"UnityFS legacy cached bundle";
+        tokio::fs::create_dir_all(cache_file.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&cache_file, cached_body).await.unwrap();
+
+        let region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: String::new(),
+            asset_bundle_url_template: "http://127.0.0.1:1/{bundle_path}".to_string(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::from([("production".to_string(), "abc".to_string())]),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let mut config = AppConfig::default();
+        config.execution.asset_bundle_cache_dir = Some(cache_root.to_string_lossy().into_owned());
+        let request = AssetUpdateRequest {
+            region: "cn".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let context = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        let task = DownloadTask {
+            download_path: "start/a".to_string(),
+            bundle_path: "start/a".to_string(),
+            bundle_hash: "hash-a".to_string(),
+            category: AssetCategory::StartApp,
+            file_size: (cached_body.len() + 4) as i64,
+            priority: 0,
+            export_payloads: true,
+            stage_haruki_3d: false,
+        };
+
+        let fetch = context
+            .fetch_deobfuscated_bundle(&config, "http://127.0.0.1:1/never", &task)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.source.as_str(), "cache_hit");
+        assert_eq!(fetch.body, cached_body);
     }
 
     #[test]

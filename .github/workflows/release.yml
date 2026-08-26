@@ -17,16 +17,10 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   BINARY_NAME: haruki-sekai-asset-updater
-  WORKER_BINARY_NAME: assetstudio_ffi_worker
-  ASSETSTUDIO_REPOSITORY: https://github.com/Team-Haruki/AssetStudio.git
-  ASSETSTUDIO_BRANCH: sekai-modified
 
 jobs:
   build:
     name: Build ${{ matrix.name }}
-    needs:
-      - assetstudio-revision
-      - assetstudio-ffi
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -34,19 +28,16 @@ jobs:
         include:
           - os: ubuntu-latest
             name: linux-x64
-            ffi_name: linux-x64
             archive: tar.gz
           - os: macos-latest
             name: macos-arm64
-            ffi_name: macos-arm64
             archive: tar.gz
           - os: windows-2025
             name: windows-x64
-            ffi_name: win-x64
             archive: zip
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -67,21 +58,15 @@ jobs:
           import sys
 
           version = sys.argv[1]
-          for manifest in (Path("Cargo.toml"), Path("crates/assetstudio-ffi/Cargo.toml")):
-              text = manifest.read_text()
-              text = re.sub(r'(?m)^(version = )"[^"]+"', rf'\1"{version}"', text, count=1)
-              manifest.write_text(text)
+          manifest = Path("Cargo.toml")
+          text = manifest.read_text()
+          text = re.sub(r'(?m)^(version = )"[^"]+"', rf'\1"{version}"', text, count=1)
+          manifest.write_text(text)
           PY
           cargo generate-lockfile
 
       - name: Build release binaries
-        run: cargo build --release --locked -p haruki-sekai-asset-updater -p haruki-assetstudio-ffi
-
-      - name: Download AssetStudioFFI artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}
-          path: assetstudio-ffi-package
+        run: cargo build --release --locked -p haruki-sekai-asset-updater
 
       - name: Package archive (Unix)
         if: runner.os != 'Windows'
@@ -90,11 +75,6 @@ jobs:
           package_dir="${{ env.BINARY_NAME }}-${{ matrix.name }}"
           mkdir -p "dist/${package_dir}"
           cp "target/release/${{ env.BINARY_NAME }}" "dist/${package_dir}/${{ env.BINARY_NAME }}"
-          cp "target/release/${{ env.WORKER_BINARY_NAME }}" "dist/${package_dir}/${{ env.WORKER_BINARY_NAME }}"
-          mkdir -p "dist/${package_dir}/assetstudio"
-          mkdir -p assetstudio-ffi-unpacked
-          tar -xzf "assetstudio-ffi-package/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}.tar.gz" -C assetstudio-ffi-unpacked
-          cp -R assetstudio-ffi-unpacked/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}/. "dist/${package_dir}/assetstudio/"
           tar -czf "dist/${package_dir}.tar.gz" -C dist "${package_dir}"
 
       - name: Package archive (Windows)
@@ -105,10 +85,6 @@ jobs:
           $packageDir = "${{ env.BINARY_NAME }}-${{ matrix.name }}"
           New-Item -ItemType Directory -Force -Path "dist/$packageDir" | Out-Null
           Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "dist/$packageDir/${{ env.BINARY_NAME }}.exe"
-          Copy-Item "target/release/${{ env.WORKER_BINARY_NAME }}.exe" "dist/$packageDir/${{ env.WORKER_BINARY_NAME }}.exe"
-          New-Item -ItemType Directory -Force -Path "dist/$packageDir/assetstudio", "assetstudio-ffi-unpacked" | Out-Null
-          Expand-Archive -Path "assetstudio-ffi-package/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}.zip" -DestinationPath "assetstudio-ffi-unpacked" -Force
-          Copy-Item -Path "assetstudio-ffi-unpacked/assetstudio-ffi-${{ matrix.ffi_name }}-${{ needs.assetstudio-revision.outputs.short_sha }}/*" -Destination "dist/$packageDir/assetstudio" -Recurse -Force
           Compress-Archive -Path "dist/$packageDir" -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.zip" -Force
 
       - name: Upload packaged artifact
@@ -116,160 +92,6 @@ jobs:
         with:
           name: ${{ env.BINARY_NAME }}-${{ matrix.name }}
           path: dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.${{ matrix.archive }}
-          if-no-files-found: error
-
-  assetstudio-revision:
-    name: Check AssetStudio revision
-    runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.revision.outputs.sha }}
-      short_sha: ${{ steps.revision.outputs.short_sha }}
-    steps:
-      - name: Resolve AssetStudio branch head
-        id: revision
-        run: |
-          sha="$(git ls-remote --heads "${ASSETSTUDIO_REPOSITORY}" "${ASSETSTUDIO_BRANCH}" | awk '{print $1}')"
-          if [ -z "${sha}" ]; then
-            echo "AssetStudio branch ${ASSETSTUDIO_BRANCH} was not found in ${ASSETSTUDIO_REPOSITORY}" >&2
-            exit 1
-          fi
-          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
-          echo "AssetStudio ${ASSETSTUDIO_BRANCH}: ${sha}"
-
-  assetstudio-ffi:
-    name: AssetStudioFFI ${{ matrix.name }}
-    needs: assetstudio-revision
-    runs-on: ${{ matrix.os }}
-    env:
-      FFI_PACKAGE_NAME: assetstudio-ffi-${{ matrix.name }}-${{ needs.assetstudio-revision.outputs.short_sha }}
-      FFI_ARCHIVE_PATH: assetstudio-cache/assetstudio-ffi-${{ matrix.name }}-${{ needs.assetstudio-revision.outputs.short_sha }}.${{ matrix.archive }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-2025
-            name: win-x64
-            rid: win-x64
-            archive: zip
-          - os: ubuntu-latest
-            name: linux-x64
-            rid: linux-x64
-            archive: tar.gz
-          - os: macos-latest
-            name: macos-arm64
-            rid: osx-arm64
-            archive: tar.gz
-    steps:
-      - name: Restore packaged AssetStudioFFI
-        id: ffi-cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.FFI_ARCHIVE_PATH }}
-          key: assetstudio-ffi-${{ matrix.name }}-${{ needs.assetstudio-revision.outputs.sha }}-v1
-
-      - name: Reuse AssetStudioFFI from previous release
-        id: previous-ffi
-        if: steps.ffi-cache.outputs.cache-hit != 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p assetstudio-cache
-          previous_tag="$(
-            gh release list \
-              --repo "${GITHUB_REPOSITORY}" \
-              --exclude-drafts \
-              --exclude-pre-releases \
-              --limit 20 \
-              --json tagName \
-              -q '[.[] | select(.tagName != "${{ github.ref_name }}")][0].tagName // ""'
-          )"
-          if [ -z "${previous_tag}" ]; then
-            echo "hit=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          package_file="$(basename "${FFI_ARCHIVE_PATH}")"
-          if gh release download "${previous_tag}" --repo "${GITHUB_REPOSITORY}" --pattern "${package_file}" --dir assetstudio-cache --clobber; then
-            echo "Reused ${package_file} from release ${previous_tag}"
-            echo "hit=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No reusable AssetStudioFFI archive named ${package_file} in release ${previous_tag}"
-            rm -f "${FFI_ARCHIVE_PATH}"
-            echo "hit=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout AssetStudio
-        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
-        uses: actions/checkout@v7
-        with:
-          repository: Team-Haruki/AssetStudio
-          ref: ${{ needs.assetstudio-revision.outputs.sha }}
-          path: AssetStudio
-
-      - name: Install .NET SDK
-        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: Install Linux NativeAOT dependencies
-        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true' && runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang zlib1g-dev binutils
-
-      - name: Publish AssetStudioFFI
-        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
-        shell: bash
-        run: |
-          dotnet publish AssetStudio/AssetStudioFFI/AssetStudioFFI.csproj \
-            -c Release \
-            -r "${{ matrix.rid }}" \
-            -f net10.0 \
-            --self-contained true \
-            -o assetstudio-publish \
-            -p:TargetFrameworks=net10.0 \
-            -p:PublishAot=true \
-            -p:InvariantGlobalization=true
-
-      - name: Write AssetStudioFFI build metadata
-        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true'
-        shell: bash
-        run: |
-          {
-            echo "repository=${ASSETSTUDIO_REPOSITORY}"
-            echo "branch=${ASSETSTUDIO_BRANCH}"
-            echo "commit=${{ needs.assetstudio-revision.outputs.sha }}"
-            echo "runtime=${{ matrix.rid }}"
-            echo "archive=${{ matrix.name }}"
-          } > assetstudio-publish/ASSETSTUDIO_FFI_BUILD.txt
-
-      - name: Package AssetStudioFFI (Unix)
-        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true' && runner.os != 'Windows'
-        run: |
-          mkdir -p assetstudio-cache dist
-          package_dir="${FFI_PACKAGE_NAME}"
-          mkdir -p "dist/${package_dir}"
-          cp -R assetstudio-publish/. "dist/${package_dir}/"
-          tar -czf "${FFI_ARCHIVE_PATH}" -C dist "${package_dir}"
-
-      - name: Package AssetStudioFFI (Windows)
-        if: steps.ffi-cache.outputs.cache-hit != 'true' && steps.previous-ffi.outputs.hit != 'true' && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path assetstudio-cache, dist | Out-Null
-          $packageDir = $env:FFI_PACKAGE_NAME
-          New-Item -ItemType Directory -Force -Path "dist/$packageDir" | Out-Null
-          Copy-Item -Path assetstudio-publish/* -Destination "dist/$packageDir" -Recurse -Force
-          Compress-Archive -Path "dist/$packageDir" -DestinationPath $env:FFI_ARCHIVE_PATH -Force
-
-      - name: Upload AssetStudioFFI artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ env.FFI_PACKAGE_NAME }}
-          path: ${{ env.FFI_ARCHIVE_PATH }}
           if-no-files-found: error
 
   publish:
