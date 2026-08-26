@@ -17,7 +17,6 @@ env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   BINARY_NAME: haruki-sekai-asset-updater
-  UNITY_RS_TOKEN: ${{ secrets.UNITY_RS_TOKEN }}
 
 jobs:
   build:
@@ -47,19 +46,6 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
-
-      - name: Authenticate the unity-rs dependency fetch
-        if: env.UNITY_RS_TOKEN != ''
-        shell: bash
-        run: |
-          # The asset engine is a Cargo git dependency. While that repository is
-          # private, cargo needs a credential to fetch it. Runners are ephemeral
-          # and Actions masks the secret in logs. With no secret configured this
-          # step is skipped and an anonymous fetch is used, which is all a public
-          # repository needs.
-          git config --global \
-            url."https://x-access-token:${UNITY_RS_TOKEN}@github.com/".insteadOf \
-            "https://github.com/"
 
       - name: Apply tag package version
         if: startsWith(github.ref, 'refs/tags/v')

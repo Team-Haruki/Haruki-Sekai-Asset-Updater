@@ -16,7 +16,7 @@
 - Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
 - Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
-- Uses the linked-in [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs)
+- Uses the linked-in [`seiunx-dev/unity-rs`](https://github.com/seiunx-dev/unity-rs)
   `unity-rs-core` library directly. FFmpeg/rsmpeg FFI handles media;
   FFmpeg CLI remains available as a fallback where FFI is unavailable.
 
@@ -100,7 +100,7 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
 
 ### unity-rs Engine
 
-The asset engine is [`Team-Haruki/unity-rs`](https://github.com/Team-Haruki/unity-rs),
+The asset engine is [`seiunx-dev/unity-rs`](https://github.com/seiunx-dev/unity-rs),
 a Rust implementation of AssetStudio. It is an ordinary Cargo dependency pinned
 by revision. The service calls `unity_rs_core::studio::Studio` and
 `StudioObject` directly from blocking Rust tasks, so the engine is compiled into
@@ -124,28 +124,6 @@ With a cache directory configured, `mode: "prefetch_raw_bundles"` prefetches
 every StartApp/OnDemand bundle selected by the region filters into that cache;
 `export.raw_bundles` continues to control the optional second raw-bundle copy in
 the asset output tree.
-
-#### Build-time credential
-
-The engine is a build dependency, not a runtime one, so this affects whoever
-compiles the project and nobody who runs it. While `Team-Haruki/unity-rs` is a
-private repository, the fetch needs a credential:
-
-```bash
-# Local build
-export CARGO_NET_GIT_FETCH_WITH_CLI=true   # reuse your existing git credentials
-
-# Docker build
-printf '%s' "$GITHUB_TOKEN" > /tmp/gh_token
-docker build --secret id=gh_token,src=/tmp/gh_token .
-```
-
-CI reads the same token from a repository secret named `UNITY_RS_TOKEN`;
-`ci.yml`, `docker.yml` and `release.yml` each skip their authentication step
-when it is unset. Nothing needs the token once `unity-rs` is public -- the
-skipped step and the absent Docker secret both fall through to an anonymous
-fetch -- so making the repository public removes this requirement without any
-change to the build files.
 
 ## Runtime Tuning
 
