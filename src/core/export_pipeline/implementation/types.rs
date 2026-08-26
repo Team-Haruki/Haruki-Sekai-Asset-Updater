@@ -74,7 +74,7 @@ pub struct UnityAssetBundlePayloadExport {
     pub(crate) pending_image_writes: Vec<PendingNativeImageWrite>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct NativeSkippedObjectRead {
     pub path_id: i64,
     pub asset_type: Option<String>,
@@ -83,7 +83,7 @@ pub struct NativeSkippedObjectRead {
     pub error: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct NativeObjectReadPlanStats {
     pub inspected_objects: usize,
     pub planned_objects: usize,
@@ -94,12 +94,24 @@ pub struct NativeObjectReadPlanStats {
     pub batch_count: usize,
     pub payload_bundle_bytes: u64,
     pub read_payload_ms: u64,
+    pub by_type: BTreeMap<String, NativeObjectTypeReadStats>,
 }
 
 impl NativeObjectReadPlanStats {
     pub fn is_empty(&self) -> bool {
         self == &Self::default()
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NativeObjectTypeReadStats {
+    pub inspected_objects: usize,
+    pub planned_objects: usize,
+    pub readable_objects: usize,
+    pub successful_reads: usize,
+    pub failed_reads: usize,
+    pub skipped_reads: usize,
+    pub payload_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -2902,7 +2902,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3233,7 +3233,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "unity-rs-core"
 version = "0.1.0"
-source = "git+https://github.com/Team-Haruki/unity-rs.git?rev=648d0c9#648d0c902aa28510045c8a207242581fbb75753e"
+source = "git+https://github.com/Team-Haruki/unity-rs.git?rev=4dd7d1c#4dd7d1ce983c0fc544078becf2d6ed398d1b372c"
 dependencies = [
  "brotli",
  "flate2",

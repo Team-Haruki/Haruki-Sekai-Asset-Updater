@@ -28,7 +28,8 @@ use unity_rs_core::simple_assets::{
 use unity_rs_core::sprite::{SpriteReadLimits, SPRITE_CLASS_ID};
 use unity_rs_core::studio::{Studio, StudioObject};
 use unity_rs_core::texture::{
-    write_rgba_ir, write_rgba_ir_display_order, TextureReadLimits, TEXTURE_2D_CLASS_ID,
+    read_texture2d, write_rgba_ir, write_rgba_ir_display_order, TextureReadLimits,
+    TEXTURE_2D_CLASS_ID,
 };
 use unity_rs_core::texture_array::{
     read_texture2d_array, write_texture2d_array_rgba_bundle, TextureArrayReadLimits,
@@ -72,8 +73,8 @@ use self::types::*;
 
 pub use self::media_postprocess::post_process_exported_files;
 pub use self::types::{
-    NativeInMemoryMediaSource, NativeObjectReadPlanStats, NativeSkippedObjectRead,
-    PostProcessSummary, UnityAssetBundlePayloadExport,
+    NativeInMemoryMediaSource, NativeObjectReadPlanStats, NativeObjectTypeReadStats,
+    NativeSkippedObjectRead, PostProcessSummary, UnityAssetBundlePayloadExport,
 };
 
 pub fn get_export_group(export_path: &str) -> &'static str {

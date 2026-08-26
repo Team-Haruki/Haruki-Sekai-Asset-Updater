@@ -80,16 +80,20 @@ fn call_unity_rs_object_export(
         .enumerate()
         .map(|(index, object)| unity_asset_info(index, *object))
         .collect::<Vec<_>>();
+    let mut object_read_plan = NativeObjectReadPlanStats {
+        inspected_objects: assets.len(),
+        ..NativeObjectReadPlanStats::default()
+    };
+    for asset in &assets {
+        object_type_read_stats_mut(&mut object_read_plan, asset).inspected_objects += 1;
+    }
     let mut summary = NativeObjectExportSummary {
         written_files: Vec::new(),
         acb_sources: Vec::new(),
         pending_image_writes: Vec::new(),
         phase_ms: HashMap::from([("unity_rs.open".to_string(), elapsed_millis(open_started))]),
         skipped_object_reads: Vec::new(),
-        object_read_plan: NativeObjectReadPlanStats {
-            inspected_objects: assets.len(),
-            ..NativeObjectReadPlanStats::default()
-        },
+        object_read_plan,
     };
     summary
         .phase_ms
@@ -114,6 +118,10 @@ fn call_unity_rs_object_export(
                     summary.object_read_plan.successful_reads += 1;
                     summary.object_read_plan.payload_bundle_bytes +=
                         read_output.payload.len() as u64;
+                    let type_stats =
+                        object_type_read_stats_mut(&mut summary.object_read_plan, asset);
+                    type_stats.successful_reads += 1;
+                    type_stats.payload_bytes += read_output.payload.len() as u64;
                     merge_phase_ms(&mut summary.phase_ms, &read_output.response.phase_ms);
                     if is_playable_mono_typetree(asset, &read_output) {
                         playable_outputs.push(((*asset).clone(), read_output));
@@ -138,6 +146,10 @@ fn call_unity_rs_object_export(
                     });
                     summary.object_read_plan.failed_reads += 1;
                     summary.object_read_plan.skipped_reads += 1;
+                    let type_stats =
+                        object_type_read_stats_mut(&mut summary.object_read_plan, asset);
+                    type_stats.failed_reads += 1;
+                    type_stats.skipped_reads += 1;
                 }
             }
         }
@@ -204,12 +216,28 @@ fn read_unity_rs_object(
                 maximum_output_bytes: MAX_PAYLOAD_BYTES.saturating_sub(36),
                 ..TextureReadLimits::default()
             };
-            let image = object
-                .decode_texture_mip(0, limits)
-                .map_err(unity_rs_error)?;
-            let mut payload = Vec::new();
-            write_rgba_ir(&image, &mut payload).map_err(unity_rs_error)?;
-            (payload, "image_raw_rgba", ".rgba".to_string())
+            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
+            let texture =
+                read_texture2d(studio.collection(), loaded, object.object_index(), limits)
+                    .map_err(unity_rs_error)?;
+            if texture.data.is_empty() {
+                // Unity legitimately serializes empty dynamic-font atlases and fills them at
+                // runtime. There is no image to encode, but retaining the complete object keeps
+                // an `all` export lossless and avoids misclassifying the placeholder as a decoder
+                // failure.
+                (
+                    object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
+                    "raw",
+                    ".dat".to_string(),
+                )
+            } else {
+                let image = texture
+                    .decode_mip_rgba8(0, limits)
+                    .map_err(unity_rs_error)?;
+                let mut payload = Vec::new();
+                write_rgba_ir(&image, &mut payload).map_err(unity_rs_error)?;
+                (payload, "image_raw_rgba", ".rgba".to_string())
+            }
         }
         (TEXTURE_2D_ARRAY_CLASS_ID, "auto" | "image" | "image_archive") => {
             require_raw_rgba(image_format, "Texture2DArray")?;
@@ -488,6 +516,7 @@ pub(super) fn select_native_object_readable_assets<'a>(
                 container: asset.container.clone(),
                 error: "Texture2DArrayImage is covered by its Texture2DArray parent".to_string(),
             });
+            object_type_read_stats_mut(&mut summary.object_read_plan, asset).skipped_reads += 1;
             continue;
         }
         if !is_native_object_supported_asset(asset) {
@@ -499,15 +528,27 @@ pub(super) fn select_native_object_readable_assets<'a>(
                     "unity-rs object type is not readable yet; skipping object"
                 );
                 summary.skipped_object_reads.push(skipped);
+                object_type_read_stats_mut(&mut summary.object_read_plan, asset).skipped_reads += 1;
             }
             continue;
         }
+        let type_stats = object_type_read_stats_mut(&mut summary.object_read_plan, asset);
+        type_stats.planned_objects += 1;
+        type_stats.readable_objects += 1;
         readable_assets.push(asset);
     }
     summary.object_read_plan.planned_objects = readable_assets.len();
     summary.object_read_plan.readable_objects = readable_assets.len();
     summary.object_read_plan.skipped_reads = summary.skipped_object_reads.len();
     readable_assets
+}
+
+fn object_type_read_stats_mut<'a>(
+    plan: &'a mut NativeObjectReadPlanStats,
+    asset: &UnityAssetInfo,
+) -> &'a mut NativeObjectTypeReadStats {
+    let asset_type = asset.asset_type.as_deref().unwrap_or("Unknown");
+    plan.by_type.entry(asset_type.to_string()).or_default()
 }
 
 pub(super) fn sort_native_object_reads_for_failure_isolation(assets: &mut Vec<&UnityAssetInfo>) {

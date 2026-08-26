@@ -2720,4 +2720,16 @@ fn readable_assets_skip_texture2d_array_images_when_parent_is_present() {
     );
     assert_eq!(summary.object_read_plan.planned_objects, 2);
     assert_eq!(summary.object_read_plan.skipped_reads, 1);
+    assert_eq!(
+        summary.object_read_plan.by_type["Texture2DArray"].planned_objects,
+        1
+    );
+    assert_eq!(
+        summary.object_read_plan.by_type["Texture2DArrayImage"].planned_objects,
+        1
+    );
+    assert_eq!(
+        summary.object_read_plan.by_type["Texture2DArrayImage"].skipped_reads,
+        1
+    );
 }
