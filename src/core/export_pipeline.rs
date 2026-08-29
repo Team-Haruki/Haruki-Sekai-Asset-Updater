@@ -6,5 +6,6 @@ pub use implementation::{
     NativeSkippedObjectRead, PostProcessSummary, UnityAssetBundlePayloadExport,
 };
 pub(crate) use implementation::{
-    export_unity_asset_bundle_payloads_with_registry, NativeSemanticExportPathRegistry,
+    export_unity_asset_bundle_payloads_with_registry, flat_pipeline_enabled,
+    NativeSemanticExportPathRegistry,
 };

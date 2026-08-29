@@ -462,6 +462,27 @@ impl AssetExecutionContext {
                     )
                     .await
                 {
+                    Ok(Some(mut job)) if crate::core::export_pipeline::flat_pipeline_enabled() => {
+                        // Flat mode: this worker finishes its own bundle instead of
+                        // handing it to a second pool, so there is no queue between
+                        // the stages and no backlog to bound. Parallelism is exactly
+                        // the number of workers, which is what the Python front-end
+                        // this is measured against does.
+                        job._memory_permit = memory_permit.take();
+                        match Self::finish_native_bundle_post_process(
+                            &app_config,
+                            &ctx.region_name,
+                            &ctx.region,
+                            &progress,
+                            *Box::new(job),
+                            0,
+                        )
+                        .await
+                        {
+                            Ok(()) => Ok(BundleWorkOutput::Completed),
+                            Err(error) => Err(error),
+                        }
+                    }
                     Ok(Some(mut job)) => {
                         let backlog_wait_started = Instant::now();
                         let backlog_permit = post_process_backlog_semaphore

@@ -70,6 +70,7 @@ use self::limits::*;
 #[allow(unused_imports)]
 use self::media_postprocess::*;
 use self::paths::*;
+pub(crate) use self::payload::flat_pipeline_enabled;
 use self::payload::*;
 use self::tasks::*;
 pub(crate) use self::types::NativeSemanticExportPathRegistry;

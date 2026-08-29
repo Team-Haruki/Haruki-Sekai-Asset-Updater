@@ -722,6 +722,27 @@ pub(super) fn write_native_image_payload_final_files_with_registry(
     )
 }
 
+/// Benchmark switch for the flat execution shape.
+///
+/// The shipped pipeline is staged: a bundle is downloaded and read in one pool,
+/// then handed to a second pool for image encoding, and every CPU-heavy section
+/// takes a permit from one global budget. The Python front-end this service is
+/// benchmarked against is instead a flat pool -- N workers, each doing one
+/// bundle end to end, nothing shared. That reaches 9.8 of 10 cores where the
+/// staged shape reaches 8.4, so this switch exists to measure how much of the
+/// difference is the shape itself rather than the work.
+///
+/// Off unless `HARUKI_FLAT_PIPELINE=1`. Not a supported production mode: it
+/// drops the CPU budget entirely, which is what bounds this service when it
+/// shares a host.
+pub(crate) fn flat_pipeline_enabled() -> bool {
+    static FLAT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAT.get_or_init(|| {
+        std::env::var("HARUKI_FLAT_PIPELINE")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    })
+}
+
 pub(super) fn native_image_surrogate_public_target(
     target: &Path,
     region: &RegionConfig,
