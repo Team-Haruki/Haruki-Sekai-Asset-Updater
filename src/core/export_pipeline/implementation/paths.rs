@@ -5,10 +5,12 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 use crate::core::errors::ExportPipelineError;
 
-use super::assetstudio::normalize_assetstudio_type_name;
-use super::payload::safe_payload_bundle_path;
+use crate::core::config::ImageOutputFormat;
+
+use super::selectors::normalize_assetstudio_type_name;
 use super::types::{
-    UnityAssetInfo, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+    image_format_extension, UnityAssetInfo, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
 };
 
 pub(super) fn native_object_output_path(
@@ -476,4 +478,22 @@ pub(super) fn strip_container_prefix(container: &str, strip_path_prefix: &str) -
             _ => None,
         })
         .collect()
+}
+
+pub(super) fn safe_payload_bundle_path(name: &str) -> PathBuf {
+    let mut safe = PathBuf::new();
+    for component in Path::new(name).components() {
+        if let std::path::Component::Normal(value) = component {
+            safe.push(value);
+        }
+    }
+    if safe.as_os_str().is_empty() {
+        PathBuf::from("payload.bin")
+    } else {
+        safe
+    }
+}
+
+pub(super) fn image_output_file_for_format(target: &Path, format: ImageOutputFormat) -> PathBuf {
+    target.with_extension(image_format_extension(format))
 }

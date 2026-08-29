@@ -10,6 +10,7 @@ mod limits;
 mod media_postprocess;
 mod paths;
 mod payload;
+mod selectors;
 mod tasks;
 mod types;
 

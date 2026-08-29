@@ -7,8 +7,6 @@ use serde::Serialize;
 
 use crate::core::config::{ImageBackendConfig, ImageOutputFormat, RegionConfig};
 
-use super::payload::image_format_extension;
-
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub(super) struct UnityAssetInfo {
     pub(super) index: usize,
@@ -255,4 +253,12 @@ pub(super) struct NativePlayableExportObject {
     pub(super) name: Option<String>,
     pub(super) asset_type: Option<String>,
     pub(super) data: sonic_rs::Value,
+}
+
+pub(super) fn image_format_extension(format: ImageOutputFormat) -> &'static str {
+    match format {
+        ImageOutputFormat::Png => "png",
+        ImageOutputFormat::Jpg => "jpg",
+        ImageOutputFormat::Webp => "webp",
+    }
 }

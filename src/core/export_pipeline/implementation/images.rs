@@ -1,9 +1,11 @@
+use std::borrow::Cow;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
-use image::{ExtendedColorType, ImageEncoder};
+use image::{ExtendedColorType, ImageEncoder, ImageReader};
 
 use crate::core::config::{
     ImageBackendConfig, ImageOutputFormat, ImagePngCompression, RegionConfig,
@@ -11,12 +13,12 @@ use crate::core::config::{
 use crate::core::errors::ExportPipelineError;
 
 use super::limits::acquire_cpu_budget_permit_blocking;
-use super::payload::{
-    decode_image_payload_bytes, image_output_file_for_format, native_rgba_ir_contiguous_pixels,
-    NativeRgbaIr,
-};
+use super::paths::image_output_file_for_format;
 use super::tasks::{post_process_files_by_extension, remove_export_file_if_exists, run_path_tasks};
-use super::types::UNITY_ENGINE_IMAGE_SURROGATE_FORMAT;
+use super::types::{
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT, UNITY_ENGINE_RGBA_IR_HEADER_LEN,
+    UNITY_ENGINE_RGBA_IR_MAGIC,
+};
 
 pub(super) async fn handle_png_conversion(
     export_path: &Path,
@@ -326,4 +328,159 @@ pub(super) fn png_compression_type(compression: ImagePngCompression) -> Compress
         ImagePngCompression::Default => CompressionType::Default,
         ImagePngCompression::Best => CompressionType::Best,
     }
+}
+
+// The decoded-RGBA interchange form and the decoders that read it. These sat
+// in `payload`, which made `images` import `payload` while `payload` already
+// imported `images` -- the last cycle in this module.
+pub(super) fn decode_image_payload_bytes(
+    payload: &[u8],
+    target: &Path,
+) -> Result<image::DynamicImage, ExportPipelineError> {
+    if payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
+        return decode_native_rgba_ir_payload(payload, target);
+    }
+    ImageReader::new(Cursor::new(payload))
+        .with_guessed_format()
+        .map_err(|source| ExportPipelineError::Io {
+            path: target.to_path_buf(),
+            source,
+        })?
+        .decode()
+        .map_err(|source| ExportPipelineError::Image {
+            path: target.to_path_buf(),
+            source,
+        })
+}
+
+pub(super) fn decode_native_rgba_ir_payload(
+    payload: &[u8],
+    target: &Path,
+) -> Result<image::DynamicImage, ExportPipelineError> {
+    let raw_rgba = parse_native_rgba_ir_payload(payload, target)?;
+    let pixels = native_rgba_ir_contiguous_pixels(&raw_rgba).into_owned();
+    image::RgbaImage::from_raw(raw_rgba.width, raw_rgba.height, pixels)
+        .map(image::DynamicImage::ImageRgba8)
+        .ok_or_else(|| ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` could not be converted to an image",
+                target.display()
+            ),
+        })
+}
+
+pub(super) fn parse_native_rgba_ir_payload<'a>(
+    payload: &'a [u8],
+    target: &Path,
+) -> Result<NativeRgbaIr<'a>, ExportPipelineError> {
+    if payload.len() < UNITY_ENGINE_RGBA_IR_HEADER_LEN {
+        return Err(ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` is too short: {} bytes",
+                target.display(),
+                payload.len()
+            ),
+        });
+    }
+    if !payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
+        return Err(ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` has invalid magic",
+                target.display()
+            ),
+        });
+    }
+    let read_u32 = |offset: usize| -> u32 {
+        u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap())
+    };
+    let width = read_u32(16);
+    let height = read_u32(20);
+    let stride = read_u32(24) as usize;
+    let pixel_format = read_u32(28);
+    if pixel_format != 1 {
+        return Err(ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` has unsupported pixel format {}",
+                target.display(),
+                pixel_format
+            ),
+        });
+    }
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` has invalid width {}",
+                target.display(),
+                width
+            ),
+        })?;
+    if stride < row_bytes {
+        return Err(ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` has invalid stride {} for width {}",
+                target.display(),
+                stride,
+                width
+            ),
+        });
+    }
+    let height_usize = usize::try_from(height).map_err(|_| ExportPipelineError::UnityRs {
+        message: format!(
+            "native raw RGBA image payload for `{}` has invalid height {}",
+            target.display(),
+            height
+        ),
+    })?;
+    let pixel_bytes = stride
+        .checked_mul(height_usize)
+        .and_then(|value| value.checked_add(UNITY_ENGINE_RGBA_IR_HEADER_LEN))
+        .ok_or_else(|| ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` is too large",
+                target.display()
+            ),
+        })?;
+    if payload.len() < pixel_bytes {
+        return Err(ExportPipelineError::UnityRs {
+            message: format!(
+                "native raw RGBA image payload for `{}` is truncated: expected at least {}, got {}",
+                target.display(),
+                pixel_bytes,
+                payload.len()
+            ),
+        });
+    }
+    Ok(NativeRgbaIr {
+        width,
+        height,
+        stride,
+        row_bytes,
+        height_usize,
+        pixels: &payload[UNITY_ENGINE_RGBA_IR_HEADER_LEN..pixel_bytes],
+    })
+}
+
+pub(super) fn native_rgba_ir_contiguous_pixels<'a>(
+    raw_rgba: &'a NativeRgbaIr<'a>,
+) -> Cow<'a, [u8]> {
+    if raw_rgba.stride == raw_rgba.row_bytes {
+        return Cow::Borrowed(&raw_rgba.pixels[..raw_rgba.row_bytes * raw_rgba.height_usize]);
+    }
+    let mut pixels = Vec::with_capacity(raw_rgba.row_bytes * raw_rgba.height_usize);
+    for y in 0..raw_rgba.height_usize {
+        let start = y * raw_rgba.stride;
+        pixels.extend_from_slice(&raw_rgba.pixels[start..start + raw_rgba.row_bytes]);
+    }
+    Cow::Owned(pixels)
+}
+
+pub(super) struct NativeRgbaIr<'a> {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) stride: usize,
+    pub(super) row_bytes: usize,
+    pub(super) height_usize: usize,
+    pub(super) pixels: &'a [u8],
 }

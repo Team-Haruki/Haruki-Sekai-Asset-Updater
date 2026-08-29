@@ -3,31 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::core::cleanup::remove_file_if_exists;
-use crate::core::config::{RegionConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES};
 use crate::core::errors::ExportPipelineError;
-
-use super::assetstudio::assetstudio_export_type_selector;
-
-pub(super) fn asset_studio_export_type_list(region: &RegionConfig) -> Vec<String> {
-    let mut export_types = Vec::new();
-    for asset_type in &region.export.asset_studio_types {
-        let asset_type = asset_type.trim();
-        let asset_type = assetstudio_export_type_selector(asset_type).unwrap_or(asset_type);
-        if asset_type.is_empty() || export_types.iter().any(|value| value == asset_type) {
-            continue;
-        }
-        export_types.push(asset_type.to_string());
-    }
-
-    if export_types.is_empty() {
-        DEFAULT_ASSET_STUDIO_EXPORT_TYPES
-            .iter()
-            .map(|value| (*value).to_string())
-            .collect()
-    } else {
-        export_types
-    }
-}
 
 pub(super) fn run_path_tasks<F>(
     paths: Vec<PathBuf>,

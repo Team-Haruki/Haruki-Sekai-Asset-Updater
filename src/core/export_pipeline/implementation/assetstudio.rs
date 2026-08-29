@@ -32,7 +32,10 @@ use super::merge_phase_ms;
 use super::payload::{
     is_playable_mono_typetree, write_assetstudio_playable_payloads, write_native_object_payload,
 };
-use super::tasks::asset_studio_export_type_list;
+use super::selectors::{
+    asset_studio_export_type_list, assetstudio_type_selector_matches,
+    normalize_assetstudio_type_name,
+};
 use super::types::{
     NativeImageEncodeSettings, NativeObjectExportOptions, NativeObjectExportSummary,
     NativeObjectReadPlanStats, NativeObjectTypeReadStats, NativeSemanticExportPathRegistry,
@@ -668,42 +671,6 @@ pub(super) fn assetstudio_object_mode_type_enabled(
         .any(|configured| assetstudio_type_selector_matches(configured, asset_type))
 }
 
-pub(super) fn assetstudio_type_selector_matches(selector: &str, asset_type: &str) -> bool {
-    let selector = selector.trim();
-    if selector.eq_ignore_ascii_case("all") {
-        return true;
-    }
-
-    let normalized_selector = normalize_assetstudio_type_name(selector);
-    let normalized_asset_type = normalize_assetstudio_type_name(asset_type);
-    if normalized_selector == normalized_asset_type {
-        return true;
-    }
-
-    match normalized_selector.as_str() {
-        "tex2d" | "texture2d" => normalized_asset_type == "texture2d",
-        "tex2darray" | "texture2darray" => {
-            normalized_asset_type == "texture2darray"
-                || normalized_asset_type == "texture2darrayimage"
-        }
-        "sprite" => normalized_asset_type == "sprite",
-        "textasset" => normalized_asset_type == "textasset",
-        "monobehaviour" | "monobehavior" => normalized_asset_type == "monobehaviour",
-        "audio" | "audioclip" => normalized_asset_type == "audioclip",
-        "video" | "videoclip" => normalized_asset_type == "videoclip",
-        "movietexture" => normalized_asset_type == "movietexture",
-        "font" => normalized_asset_type == "font",
-        "shader" => {
-            normalized_asset_type == "shader" || normalized_asset_type == "shadervariantcollection"
-        }
-        "mesh" => normalized_asset_type == "mesh",
-        "animator" => {
-            normalized_asset_type == "animator" || normalized_asset_type == "animatorcontroller"
-        }
-        _ => false,
-    }
-}
-
 pub(super) fn native_read_kind_for_asset(
     asset: &UnityAssetInfo,
     configured_kinds: &BTreeMap<String, String>,
@@ -741,15 +708,6 @@ pub(super) fn default_native_read_kind(asset_type: &str) -> &'static str {
         "mesh" => "obj",
         _ => "typetree_json",
     }
-}
-
-pub(super) fn normalize_assetstudio_type_name(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .filter(|ch| *ch != '_' && *ch != '-' && !ch.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 pub(super) fn native_skipped_unsupported_asset(
@@ -805,24 +763,4 @@ pub(super) fn assetstudio_object_mode_known_unreadable_type(asset_type: &str) ->
             | "Texture3D"
             | "Transform"
     )
-}
-
-pub(super) fn assetstudio_export_type_selector(asset_type: &str) -> Option<&'static str> {
-    match asset_type.trim().to_ascii_lowercase().as_str() {
-        "texture2d" | "tex2d" => Some("tex2d"),
-        "texture2darray" | "tex2darray" | "tex2d_array" => Some("tex2dArray"),
-        "sprite" => Some("sprite"),
-        "textasset" | "text_asset" => Some("textAsset"),
-        "monobehaviour" | "monobehavior" | "mono_behaviour" | "mono_behavior" => {
-            Some("monoBehaviour")
-        }
-        "font" => Some("font"),
-        "shader" => Some("shader"),
-        "audioclip" | "audio" => Some("audio"),
-        "videoclip" | "video" => Some("video"),
-        "movietexture" | "movie_texture" => Some("movieTexture"),
-        "mesh" => Some("mesh"),
-        "animator" => Some("animator"),
-        _ => None,
-    }
 }

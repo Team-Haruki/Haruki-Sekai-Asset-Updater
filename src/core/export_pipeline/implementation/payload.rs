@@ -12,21 +12,25 @@ use tracing::debug;
 use crate::core::config::{ImageBackendConfig, ImageOutputFormat, RegionConfig};
 use crate::core::errors::ExportPipelineError;
 
-use super::assetstudio::assetstudio_type_selector_matches;
-use super::images::{encode_dynamic_image, encode_native_rgba_ir, write_encoded_image};
+use super::images::{
+    decode_image_payload_bytes, encode_dynamic_image, encode_native_rgba_ir,
+    parse_native_rgba_ir_payload, write_encoded_image,
+};
 use super::limits::{acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking};
 use super::paths::{
-    assetbundle_typetree_output_path, native_object_output_path, strip_container_prefix,
+    assetbundle_typetree_output_path, image_output_file_for_format, native_object_output_path,
+    safe_payload_bundle_path, strip_container_prefix,
 };
+use super::selectors::assetstudio_type_selector_matches;
 use super::types::{
-    NativeAssetStudioExportManifestEntry, NativeImageEncodeSettings, NativeInMemoryMediaSource,
-    NativeObjectExportOptions, NativePayloadSignature, NativePlayableExport,
-    NativePlayableExportObject, NativeSemanticExportClaim, NativeSemanticExportPathRegistry,
-    NativeSemanticExportPathState, NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
-    ASSETSTUDIO_MANIFEST_APPEND_LOCKS, ASSETSTUDIO_MANIFEST_LOCKS,
-    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT, UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC,
-    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC,
-    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION, UNITY_ENGINE_RGBA_IR_HEADER_LEN,
+    image_format_extension, NativeAssetStudioExportManifestEntry, NativeImageEncodeSettings,
+    NativeInMemoryMediaSource, NativeObjectExportOptions, NativePayloadSignature,
+    NativePlayableExport, NativePlayableExportObject, NativeSemanticExportClaim,
+    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
+    UnityAssetInfo, UnityObjectReadOutput, ASSETSTUDIO_MANIFEST_APPEND_LOCKS,
+    ASSETSTUDIO_MANIFEST_LOCKS, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
     UNITY_ENGINE_RGBA_IR_MAGIC,
 };
 
@@ -830,170 +834,6 @@ pub(super) fn native_image_surrogate_public_target(
     target.with_extension(image_format_extension(format))
 }
 
-pub(super) fn image_output_file_for_format(target: &Path, format: ImageOutputFormat) -> PathBuf {
-    target.with_extension(image_format_extension(format))
-}
-
-pub(super) fn image_format_extension(format: ImageOutputFormat) -> &'static str {
-    match format {
-        ImageOutputFormat::Png => "png",
-        ImageOutputFormat::Jpg => "jpg",
-        ImageOutputFormat::Webp => "webp",
-    }
-}
-
-pub(super) fn decode_image_payload_bytes(
-    payload: &[u8],
-    target: &Path,
-) -> Result<image::DynamicImage, ExportPipelineError> {
-    if payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
-        return decode_native_rgba_ir_payload(payload, target);
-    }
-    ImageReader::new(Cursor::new(payload))
-        .with_guessed_format()
-        .map_err(|source| ExportPipelineError::Io {
-            path: target.to_path_buf(),
-            source,
-        })?
-        .decode()
-        .map_err(|source| ExportPipelineError::Image {
-            path: target.to_path_buf(),
-            source,
-        })
-}
-
-pub(super) fn decode_native_rgba_ir_payload(
-    payload: &[u8],
-    target: &Path,
-) -> Result<image::DynamicImage, ExportPipelineError> {
-    let raw_rgba = parse_native_rgba_ir_payload(payload, target)?;
-    let pixels = native_rgba_ir_contiguous_pixels(&raw_rgba).into_owned();
-    image::RgbaImage::from_raw(raw_rgba.width, raw_rgba.height, pixels)
-        .map(image::DynamicImage::ImageRgba8)
-        .ok_or_else(|| ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` could not be converted to an image",
-                target.display()
-            ),
-        })
-}
-
-pub(super) struct NativeRgbaIr<'a> {
-    pub(super) width: u32,
-    pub(super) height: u32,
-    pub(super) stride: usize,
-    pub(super) row_bytes: usize,
-    pub(super) height_usize: usize,
-    pub(super) pixels: &'a [u8],
-}
-
-pub(super) fn parse_native_rgba_ir_payload<'a>(
-    payload: &'a [u8],
-    target: &Path,
-) -> Result<NativeRgbaIr<'a>, ExportPipelineError> {
-    if payload.len() < UNITY_ENGINE_RGBA_IR_HEADER_LEN {
-        return Err(ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` is too short: {} bytes",
-                target.display(),
-                payload.len()
-            ),
-        });
-    }
-    if !payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
-        return Err(ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` has invalid magic",
-                target.display()
-            ),
-        });
-    }
-    let read_u32 = |offset: usize| -> u32 {
-        u32::from_le_bytes(payload[offset..offset + 4].try_into().unwrap())
-    };
-    let width = read_u32(16);
-    let height = read_u32(20);
-    let stride = read_u32(24) as usize;
-    let pixel_format = read_u32(28);
-    if pixel_format != 1 {
-        return Err(ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` has unsupported pixel format {}",
-                target.display(),
-                pixel_format
-            ),
-        });
-    }
-    let row_bytes = usize::try_from(width)
-        .ok()
-        .and_then(|value| value.checked_mul(4))
-        .ok_or_else(|| ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` has invalid width {}",
-                target.display(),
-                width
-            ),
-        })?;
-    if stride < row_bytes {
-        return Err(ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` has invalid stride {} for width {}",
-                target.display(),
-                stride,
-                width
-            ),
-        });
-    }
-    let height_usize = usize::try_from(height).map_err(|_| ExportPipelineError::UnityRs {
-        message: format!(
-            "native raw RGBA image payload for `{}` has invalid height {}",
-            target.display(),
-            height
-        ),
-    })?;
-    let pixel_bytes = stride
-        .checked_mul(height_usize)
-        .and_then(|value| value.checked_add(UNITY_ENGINE_RGBA_IR_HEADER_LEN))
-        .ok_or_else(|| ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` is too large",
-                target.display()
-            ),
-        })?;
-    if payload.len() < pixel_bytes {
-        return Err(ExportPipelineError::UnityRs {
-            message: format!(
-                "native raw RGBA image payload for `{}` is truncated: expected at least {}, got {}",
-                target.display(),
-                pixel_bytes,
-                payload.len()
-            ),
-        });
-    }
-    Ok(NativeRgbaIr {
-        width,
-        height,
-        stride,
-        row_bytes,
-        height_usize,
-        pixels: &payload[UNITY_ENGINE_RGBA_IR_HEADER_LEN..pixel_bytes],
-    })
-}
-
-pub(super) fn native_rgba_ir_contiguous_pixels<'a>(
-    raw_rgba: &'a NativeRgbaIr<'a>,
-) -> Cow<'a, [u8]> {
-    if raw_rgba.stride == raw_rgba.row_bytes {
-        return Cow::Borrowed(&raw_rgba.pixels[..raw_rgba.row_bytes * raw_rgba.height_usize]);
-    }
-    let mut pixels = Vec::with_capacity(raw_rgba.row_bytes * raw_rgba.height_usize);
-    for y in 0..raw_rgba.height_usize {
-        let start = y * raw_rgba.stride;
-        pixels.extend_from_slice(&raw_rgba.pixels[start..start + raw_rgba.row_bytes]);
-    }
-    Cow::Owned(pixels)
-}
-
 pub(super) fn write_payload_bundle(
     target: &Path,
     payload: &[u8],
@@ -1169,20 +1009,6 @@ pub(super) fn payload_bundle_entry_target(target: &Path, entry_name: &str) -> Pa
         .filter(|value| !value.is_empty())
         .unwrap_or("asset");
     parent.join(stem).join(safe_payload_bundle_path(entry_name))
-}
-
-pub(super) fn safe_payload_bundle_path(name: &str) -> PathBuf {
-    let mut safe = PathBuf::new();
-    for component in Path::new(name).components() {
-        if let std::path::Component::Normal(value) = component {
-            safe.push(value);
-        }
-    }
-    if safe.as_os_str().is_empty() {
-        PathBuf::from("payload.bin")
-    } else {
-        safe
-    }
 }
 
 #[cfg(test)]
