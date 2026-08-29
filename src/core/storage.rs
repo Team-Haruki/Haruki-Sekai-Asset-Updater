@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use opendal::Operator;
 use regex::Regex;
+use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -107,27 +108,62 @@ pub async fn upload_to_all_storages(
     let public_read_matcher =
         PublicReadMatcher::new(options.public_read_include, options.public_read_exclude)?;
 
-    let semaphore = Arc::new(Semaphore::new(options.concurrency.max(1)));
+    let concurrency = options.concurrency.max(1);
+    let semaphore = global_upload_semaphore(concurrency);
     let mut tasks = JoinSet::new();
-
-    for target in targets {
-        for file in files {
-            let file = file.clone();
-            let extracted_save_path = extracted_save_path.to_path_buf();
-            let semaphore = semaphore.clone();
-            let target = target.clone();
-            let public_read =
-                public_read_matcher.matches_file(extracted_save_path.as_ref(), file.as_path())?;
-            let retry = options.retry.clone();
-            tasks.spawn(async move {
-                let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
-                upload_single_file(&target, &extracted_save_path, &file, public_read, &retry).await
-            });
+    let extracted_save_path = Arc::new(extracted_save_path.to_path_buf());
+    let retry = Arc::new(options.retry.clone());
+    let mut target_index = 0usize;
+    let mut file_index = 0usize;
+    let mut next_upload = || -> Result<_, StorageError> {
+        if target_index >= targets.len() {
+            return Ok(None);
         }
+        let target = targets[target_index].clone();
+        let file = files[file_index].clone();
+        let public_read =
+            public_read_matcher.matches_file(extracted_save_path.as_ref(), file.as_path())?;
+        file_index += 1;
+        if file_index == files.len() {
+            file_index = 0;
+            target_index += 1;
+        }
+        Ok(Some((target, file, public_read)))
+    };
+    let spawn_upload =
+        |tasks: &mut JoinSet<_>,
+         (target, file, public_read): (StorageOperatorTarget, PathBuf, bool)| {
+            let extracted_save_path = extracted_save_path.clone();
+            let semaphore = semaphore.clone();
+            let retry = retry.clone();
+            tasks.spawn(async move {
+                // This semaphore is shared by every bundle and Job in the process. Waiting tasks hold
+                // only paths/operators; they do not read a file until a global slot is available.
+                let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
+                upload_single_file(
+                    &target,
+                    extracted_save_path.as_ref(),
+                    &file,
+                    public_read,
+                    retry.as_ref(),
+                )
+                .await
+            });
+        };
+
+    // Keep each caller's future set bounded as well as the process-wide active upload count.
+    for _ in 0..concurrency {
+        let Some(upload) = next_upload()? else {
+            break;
+        };
+        spawn_upload(&mut tasks, upload);
     }
 
     while let Some(result) = tasks.join_next().await {
         result??;
+        if let Some(upload) = next_upload()? {
+            spawn_upload(&mut tasks, upload);
+        }
     }
 
     if options.remove_local {
@@ -142,6 +178,15 @@ pub async fn upload_to_all_storages(
     }
 
     Ok(())
+}
+
+fn global_upload_semaphore(concurrency: usize) -> Arc<Semaphore> {
+    // AppConfig is immutable after service startup, so the first upload establishes the process
+    // limit used by all regions and Jobs. Unit-test processes also get one deterministic limiter.
+    static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(concurrency.max(1))))
+        .clone()
 }
 
 pub fn resolve_bucket_template(bucket: &str, region_name: &str) -> String {
@@ -210,8 +255,35 @@ async fn upload_single_file(
     let content_type = mime_guess::from_path(file_path)
         .first_or_octet_stream()
         .to_string();
-    // Hold the body as an opendal `Buffer` (refcounted) so the per-retry clone below is a cheap
-    // pointer bump instead of a full second copy of the (potentially tens-of-MB) file.
+    let metadata = tokio::fs::metadata(file_path)
+        .await
+        .map_err(|source| StorageError::Io {
+            path: file_path.to_path_buf(),
+            source,
+        })?;
+
+    const WHOLE_FILE_UPLOAD_THRESHOLD_BYTES: u64 = 1024 * 1024;
+    if metadata.len() > WHOLE_FILE_UPLOAD_THRESHOLD_BYTES {
+        return retry_async(
+            retry,
+            "streaming storage upload",
+            |_| {
+                upload_streaming_file_once(
+                    target,
+                    file_path,
+                    &remote_path,
+                    &content_type,
+                    public_read,
+                    metadata.len(),
+                )
+            },
+            is_retryable_storage_error,
+        )
+        .await;
+    }
+
+    // Small-file fast path: hold the body as an OpenDAL `Buffer` so retry clones are cheap pointer
+    // bumps. Larger files use the bounded streaming path above.
     let content = opendal::Buffer::from(tokio::fs::read(file_path).await.map_err(|source| {
         StorageError::Io {
             path: file_path.to_path_buf(),
@@ -247,6 +319,77 @@ async fn upload_single_file(
     )
     .await?;
 
+    Ok(())
+}
+
+async fn upload_streaming_file_once(
+    target: &StorageOperatorTarget,
+    file_path: &Path,
+    remote_path: &str,
+    content_type: &str,
+    public_read: bool,
+    file_len: u64,
+) -> Result<(), StorageError> {
+    const UPLOAD_STREAM_CHUNK_SIZE: usize = 8 * 1024 * 1024;
+
+    let mut input = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|source| StorageError::Io {
+            path: file_path.to_path_buf(),
+            source,
+        })?;
+    let operator = target.operator_for_file(public_read).clone();
+    let mut writer = operator
+        .writer_with(remote_path)
+        .content_type(content_type)
+        .chunk(UPLOAD_STREAM_CHUNK_SIZE)
+        // OpenDAL can run multipart chunks concurrently, but keeping this at one makes the memory
+        // bound explicit. Parallelism comes from the process-wide file upload limiter instead.
+        .concurrent(1)
+        .await
+        .map_err(|source| StorageError::Upload {
+            provider: target.provider.clone(),
+            path: file_path.to_path_buf(),
+            source,
+        })?;
+    let read_chunk_size = usize::try_from(file_len)
+        .unwrap_or(UPLOAD_STREAM_CHUNK_SIZE)
+        .clamp(1, UPLOAD_STREAM_CHUNK_SIZE);
+
+    loop {
+        let mut chunk = vec![0u8; read_chunk_size];
+        let read = match input.read(&mut chunk).await {
+            Ok(read) => read,
+            Err(source) => {
+                let _ = writer.abort().await;
+                return Err(StorageError::Io {
+                    path: file_path.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        chunk.truncate(read);
+        if let Err(source) = writer.write(chunk).await {
+            let _ = writer.abort().await;
+            return Err(StorageError::Upload {
+                provider: target.provider.clone(),
+                path: file_path.to_path_buf(),
+                source,
+            });
+        }
+    }
+
+    if let Err(source) = writer.close().await {
+        let _ = writer.abort().await;
+        return Err(StorageError::Upload {
+            provider: target.provider.clone(),
+            path: file_path.to_path_buf(),
+            source,
+        });
+    }
     Ok(())
 }
 
@@ -848,6 +991,52 @@ mod tests {
         assert_eq!(
             fs::read(target_root.path().join("music").join("file.txt")).unwrap(),
             b"hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_to_fs_storage_streams_large_files() {
+        let source_root = tempdir().unwrap();
+        let target_root = tempdir().unwrap();
+        let nested = source_root.path().join("movie").join("large.bin");
+        fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        let content = (0..(3 * 1024 * 1024 + 17))
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&nested, &content).unwrap();
+
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                scheme: "fs".to_string(),
+                root: Some(target_root.path().to_string_lossy().into_owned()),
+                ..StorageProviderConfig::default()
+            }],
+        };
+
+        upload_to_all_storages(
+            &storage,
+            "jp",
+            source_root.path(),
+            std::slice::from_ref(&nested),
+            StorageUploadOptions {
+                selected_providers: &[],
+                public_read_include: &[],
+                public_read_exclude: &[],
+                remove_local: false,
+                concurrency: 2,
+                retry: &RetryConfig {
+                    attempts: 1,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fs::read(target_root.path().join("movie").join("large.bin")).unwrap(),
+            content
         );
     }
 
