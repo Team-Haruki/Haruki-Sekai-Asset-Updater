@@ -9,6 +9,8 @@
 - 资产解包只保留直接链接 `unity-rs-core` 的纯 Rust 路径。
 - 当前仓库为 Cargo workspace：
   - `Cargo.toml`
+  - `crates/sekai-asset-client/`
+  - `crates/sekai-asset-pipeline/`
   - `src/`
   - `tests/`
 - 对外 HTTP 接口目前使用 v2 路径：
@@ -21,7 +23,13 @@
 ## 2. 目录约定
 
 - `src/`
-  Rust 主服务代码。
+  Rust 主服务应用代码；负责 HTTP、任务状态、批量调度、发布和 Git 同步。
+- `crates/sekai-asset-pipeline/`
+  可复用的单 bundle 执行内核；负责 provider/manifest 数据结构、crypto、Unity 导出、
+  CRI/媒体后处理、安全路径与确定性产物清单，不依赖主服务。
+- `crates/sekai-asset-client/`
+  轻量 provider HTTP 客户端；负责版本解析、Cookie、manifest 获取和有界原子
+  bundle 下载，不包含批量调度、持久缓存、发布或任务状态。
 - `src/core/`
   核心业务逻辑，例如配置、下载、导出、上传、git 同步。
 - `src/service/`
@@ -69,7 +77,11 @@
 - 资产引擎为 crates.io 发布的 `unity-rs-core` crate，由 `Cargo.lock` 锁定版本并直接编译进二进制；
   没有动态库，也不需要 .NET 工具链。
 - `unity-rs-core` 使用公开 crates.io registry，不需要私有 Git 依赖构建凭据。
-- 主服务直接调用 `unity-rs-core` 的纯 Rust API，这是唯一的资产引擎运行路径。
+- 共享 pipeline crate 直接调用 `unity-rs-core` 的纯 Rust API，这是唯一的资产引擎运行路径。
+- `unity-rs-core`、`cridecoder` 和可选的 `rsmpeg` 由
+  `sekai-asset-pipeline` crate 统一持有；主服务通过该 crate 使用这些能力。
+- 共享 crate 不得反向依赖 Axum、JobManager、下载记录、OpenDAL 发布、Haruki 3D
+  或 Git 同步等应用层能力。
 - FFmpeg 是仅存的外部运行依赖（使用 media FFI feature 时链接其系统库）。
 
 ## 5. 代码风格约定
@@ -99,7 +111,7 @@ cargo test --workspace
 - 样本导出：
   确认 `tests/codec_smoke.rs` 通过。
 - unity-rs 集成：
-  确认主服务直接链接 `unity-rs-core`，且 release 只交付主服务二进制。
+  确认主服务通过共享 pipeline crate 链接 `unity-rs-core`，且 release 只交付主服务二进制。
 - HTTP/任务流：
   确认 `tests/api.rs` 通过。
 - 日志：

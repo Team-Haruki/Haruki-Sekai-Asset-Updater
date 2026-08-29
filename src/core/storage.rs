@@ -11,7 +11,7 @@ use tokio::task::JoinSet;
 use crate::core::config::{RetryConfig, StorageConfig, StorageProviderConfig};
 use crate::core::errors::StorageError;
 use crate::core::models::StorageTargetPlan;
-use crate::core::retry::retry_async;
+use sekai_asset_pipeline::retry_async;
 
 #[derive(Debug, Clone)]
 struct ResolvedStorageProvider {

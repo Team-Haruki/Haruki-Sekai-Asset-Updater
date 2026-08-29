@@ -28,30 +28,61 @@ cargo test --test api
 # Pre-commit checks (must all pass)
 cargo fmt
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo test --workspace --all-features
 
 # Docker
 docker compose up --build
 ```
 
+`--all-features` turns on `media-ffi`, which builds `rsmpeg` against the
+installed FFmpeg. It must be FFmpeg 7: rsmpeg's bindings are version-specific,
+and a newer one fails to compile with type errors inside rsmpeg itself rather
+than with anything that names the version. On macOS with Homebrew, the default
+`pkg-config` path resolves to whatever `ffmpeg` points at, so point it at
+`ffmpeg@7` explicitly:
+
+```bash
+export PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
+export FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
+```
+
+Without these the `media-ffi` half of the shared crate --
+`crates/sekai-asset-pipeline/src/media/ffi.rs`, the largest unsafe surface in
+the project -- is silently excluded from every local check. CI builds Linux,
+where the container pins FFmpeg 7 already.
+
 ## Architecture
 
 **Entry point:** `src/main.rs` -- starts an Axum HTTP server with graceful shutdown.
 
-**Two-layer module structure (flat, no `mod.rs` files):**
+**Cargo workspace with shared transport and execution crates plus an application package
+(flat modules, no `mod.rs` files):**
+
+- `crates/sekai-asset-pipeline/` -- transport-neutral single-bundle pipeline:
+  - provider/release and manifest data contracts
+  - crypto/deobfuscation and path validation
+  - direct `unity-rs-core` export
+  - CRI decoding and FFmpeg media conversion
+  - `process_bundle` and deterministic `ArtifactManifest`
+  - no HTTP, job state, batch scheduler, publishing, download records, Haruki 3D,
+    or Git synchronization
+
+- `crates/sekai-asset-client/` -- provider-aware HTTP transport:
+  - provider URL templates and CN/TW/KR release resolution
+  - JP/EN cookie bootstrap and bounded manifest retrieval
+  - atomic streaming bundle download with prefix-only deobfuscation
+  - typed retry, HTTP, response-size, size-mismatch, and file-write errors
+  - no persistent cache, batch scheduler, publishing, or job state
 
 - `src/core.rs` / `src/core/` -- business logic:
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
+    and projection into `sekai_asset_pipeline::PipelineOptions`
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
-  - `asset_execution.rs` -- runs the plan (download, decrypt, export, upload)
-  - `export_pipeline` module -- direct unity-rs export, PNG/WebP encoding, media conversion
-  - `codec.rs` -- wraps the `cridecoder` crate for USM/ACB decoding
-  - `media.rs` -- ffmpeg-based conversions (USM/M2V to MP4, WAV to FLAC/MP3)
+  - `asset_execution.rs` -- application batch runner; calls the client for network
+    transport and the pipeline for safe paths, Unity export, and media post-processing
   - `storage.rs` -- S3-compatible upload via OpenDAL
   - `git_sync.rs` -- chart hash sync via Git CLI
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection
-  - `retry.rs` -- generic async retry helper
-  - `cleanup.rs` -- workspace/temp directory cleanup
   - `download_records.rs` -- tracks previously downloaded assets
   - `models.rs` / `errors.rs` -- shared types and error enums
 

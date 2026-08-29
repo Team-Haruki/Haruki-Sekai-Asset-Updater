@@ -23,9 +23,31 @@
 
 ## Layout
 
-- `src/`: application code
+- `crates/sekai-asset-pipeline/`: reusable, transport-neutral single-bundle pipeline
+- `crates/sekai-asset-client/`: provider-aware release, manifest, cookie, and bundle HTTP client
+- `src/`: HTTP service, batch scheduling, progress, publishing, and Git synchronization
 - `tests/`: integration tests
 - `docs/migration/v2-api.md`: current HTTP API notes
+
+The pipeline crate owns the serializable provider/release contracts, manifest
+types and crypto primitives, Unity export, CRI decoding, media conversion, path
+validation, and the deterministic artifact contract. Its `process_bundle` API
+accepts one resolved, already-downloaded and deobfuscated bundle and returns an
+`ArtifactManifest` containing relative paths, sizes, and SHA-256 digests.
+
+The client crate owns provider URL templates, release resolution, cookie
+bootstrap, bounded manifest requests, and atomic streaming bundle downloads.
+It keeps cookies, AES keys, proxy configuration, and request headers out of
+`BundleRequest`. Haruki and queue workers can therefore share transport logic
+without importing the long-running service.
+
+Application concerns deliberately remain in the root package: Axum, job state,
+batch concurrency, cancellation, download records, storage publication,
+Haruki 3D, and Git synchronization. A queue worker such as AWS Lambda can depend
+on the two shared crates without importing those long-running service concerns. See
+[`crates/sekai-asset-client/README.md`](crates/sekai-asset-client/README.md) and
+[`crates/sekai-asset-pipeline/README.md`](crates/sekai-asset-pipeline/README.md)
+for the boundary and API example.
 
 ## Secret Config
 
@@ -104,9 +126,10 @@ curl -X POST http://127.0.0.1:8080/v2/assets/update \
 The asset engine is the published [`unity-rs-core`](https://crates.io/crates/unity-rs-core)
 crate from [`seiunx-dev/unity-rs`](https://github.com/seiunx-dev/unity-rs), a Rust
 implementation of AssetStudio. Cargo resolves it from crates.io and `Cargo.lock`
-pins the exact release. The service calls `unity_rs_core::studio::Studio` and
-`StudioObject` directly from blocking Rust tasks, so the engine is compiled into
-the single `haruki-sekai-asset-updater` binary and is the only asset-unpacking path.
+pins the exact release. The `sekai-asset-pipeline` crate calls
+`unity_rs_core::studio::Studio` and `StudioObject` directly from blocking Rust
+tasks. The engine is compiled into the `haruki-sekai-asset-updater` binary and
+remains the only asset-unpacking path.
 
 Set both `regions.<name>.filters.start_app` and `on_demand` to `[".*"]` to
 include every bundle in those categories. `asset_studio_types: [all]` makes the

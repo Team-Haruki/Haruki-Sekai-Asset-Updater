@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use haruki_sekai_asset_updater::core::codec::{
+use sekai_asset_pipeline::{
     codec_summary, decode_hca_to_wav, export_acb, export_usm, read_usm_metadata, CODEC_BACKEND,
 };
 use tempfile::tempdir;

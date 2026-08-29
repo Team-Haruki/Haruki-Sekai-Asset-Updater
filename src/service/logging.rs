@@ -20,8 +20,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt as tsfmt, EnvFilter, Layer};
 
-use crate::core::config::{AppConfig, LogFormat};
-use crate::service::http::AppState;
+use crate::core::config::{AccessLogConfig, AppConfig, LogFormat};
 
 const COLOR_GREEN: &str = "\x1b[32m";
 const COLOR_BLUE: &str = "\x1b[34m";
@@ -185,11 +184,10 @@ fn main_log_file_writer(config: &AppConfig) -> io::Result<Option<BoxMakeWriter>>
 }
 
 pub async fn access_log_middleware(
-    State(state): State<AppState>,
+    State(access): State<AccessLogConfig>,
     request: Request,
     next: Next,
 ) -> Response {
-    let access = &state.config().logging.access;
     if !access.enabled {
         return next.run(request).await;
     }
@@ -490,7 +488,79 @@ fn component_color(component: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::format_access_line;
+    use super::{access_log_middleware, format_access_line};
+
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::middleware::from_fn_with_state;
+    use axum::routing::get;
+    use axum::Router;
+    use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    use crate::core::config::AccessLogConfig;
+
+    fn router(access: AccessLogConfig) -> Router {
+        Router::new()
+            .route("/healthz", get(|| async { "ok" }))
+            .layer(from_fn_with_state(access, access_log_middleware))
+    }
+
+    async fn get_healthz(router: Router) -> StatusCode {
+        router
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// The middleware takes the access-log block rather than the whole
+    /// `AppState`; taking the state is what made this module import
+    /// `service::http` and closed a cycle between the two. Driving it through a
+    /// real router keeps that wiring honest -- a signature this narrow is easy
+    /// to widen again by accident.
+    #[tokio::test]
+    async fn access_log_middleware_writes_one_line_per_request() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("access.log");
+        let access = AccessLogConfig {
+            enabled: true,
+            format: "${status} ${method} ${path}\n".to_string(),
+            file: Some(file.to_string_lossy().into_owned()),
+        };
+
+        assert_eq!(get_healthz(router(access.clone())).await, StatusCode::OK);
+        assert_eq!(get_healthz(router(access)).await, StatusCode::OK);
+
+        let logged = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            logged.lines().collect::<Vec<_>>(),
+            vec!["200 GET /healthz", "200 GET /healthz"]
+        );
+    }
+
+    #[tokio::test]
+    async fn access_log_middleware_writes_nothing_when_disabled() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("access.log");
+        let access = AccessLogConfig {
+            enabled: false,
+            format: "${status} ${method} ${path}\n".to_string(),
+            file: Some(file.to_string_lossy().into_owned()),
+        };
+
+        assert_eq!(get_healthz(router(access)).await, StatusCode::OK);
+
+        assert!(
+            !file.exists(),
+            "a disabled access log must not create a file"
+        );
+    }
 
     #[test]
     fn access_line_replaces_known_tokens_and_appends_newline() {

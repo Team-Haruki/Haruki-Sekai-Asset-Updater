@@ -966,21 +966,17 @@ name = "haruki-sekai-asset-updater"
 version = "6.0.5"
 dependencies = [
  "aes",
- "ahash",
  "axum",
- "bytes",
  "cbc",
  "chrono",
- "cridecoder",
  "hex",
- "image",
- "libc",
  "mime_guess",
  "opendal",
  "regex",
  "reqwest",
  "rmp-serde",
- "rsmpeg",
+ "sekai-asset-client",
+ "sekai-asset-pipeline",
  "serde",
  "sha2",
  "sonic-rs",
@@ -990,7 +986,6 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
- "unity-rs-core",
  "uuid",
  "yaml_serde",
 ]
@@ -2191,8 +2186,6 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
- "serde",
- "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -2463,6 +2456,49 @@ checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "sekai-asset-client"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "axum",
+ "cbc",
+ "chrono",
+ "futures-util",
+ "hex",
+ "reqwest",
+ "rmp-serde",
+ "sekai-asset-pipeline",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sekai-asset-pipeline"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "ahash",
+ "bytes",
+ "cbc",
+ "cridecoder",
+ "hex",
+ "image",
+ "libc",
+ "rmp-serde",
+ "rsmpeg",
+ "serde",
+ "sha2",
+ "sonic-rs",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "unity-rs-core",
 ]
 
 [[package]]

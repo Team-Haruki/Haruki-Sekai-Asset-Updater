@@ -3,10 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use haruki_sekai_asset_updater::core::config::{
-    AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionExportConfig, RegionPathsConfig,
-    RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig, RetryConfig, StorageConfig,
+    pipeline_options, AppConfig, ChartHashConfig, GitSyncConfig, RegionConfig, RegionExportConfig,
+    RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig, RegionUploadConfig, RetryConfig,
+    StorageConfig,
 };
-use haruki_sekai_asset_updater::core::export_pipeline::extract_unity_asset_bundle;
+use sekai_asset_pipeline::extract_unity_asset_bundle;
 use tempfile::tempdir;
 
 fn required_env(name: &str) -> Option<String> {
@@ -111,11 +112,10 @@ fn run_real_assetstudio_export(bundle_path: String) {
     };
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
+    let options = pipeline_options(&config, &region);
     let summary = runtime
         .block_on(extract_unity_asset_bundle(
-            &config,
-            "jp",
-            &region,
+            &options,
             Path::new(&bundle_path),
             &export_path,
             output_dir.path(),

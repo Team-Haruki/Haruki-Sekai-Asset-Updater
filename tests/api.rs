@@ -210,9 +210,7 @@ async fn submit_update_dry_run_reports_progress_shape() {
     use axum::routing::get;
     use axum::Router;
     use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
-    use haruki_sekai_asset_updater::core::asset_execution::{
-        AssetBundleDetail, AssetBundleInfo, AssetCategory,
-    };
+    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
     use std::collections::HashMap;
     use tempfile::tempdir;
 

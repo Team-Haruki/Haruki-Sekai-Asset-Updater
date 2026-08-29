@@ -3,6 +3,8 @@ use regex::Regex;
 use crate::core::config::{AppConfig, RegionConfig, RegionFiltersConfig, RegionProviderConfig};
 use crate::core::errors::RegionError;
 use crate::core::models::{AssetUpdateRequest, UrlPreview};
+use sekai_asset_client::ProviderEndpoint;
+use sekai_asset_pipeline::ResolvedRelease;
 
 pub fn select_region<'a>(
     config: &'a AppConfig,
@@ -41,38 +43,36 @@ pub fn build_url_preview(region: &RegionConfig, request: &AssetUpdateRequest) ->
                 notes.push(format!("profile hash for `{profile}` is missing"));
             }
 
+            let preview_release = ResolvedRelease {
+                asset_version: request
+                    .asset_version
+                    .clone()
+                    .unwrap_or_else(|| "<asset-version>".to_string()),
+                asset_hash: request
+                    .asset_hash
+                    .clone()
+                    .unwrap_or_else(|| "<asset-hash>".to_string()),
+            };
+            let endpoint = ProviderEndpoint::ColorfulPalette {
+                asset_info_url_template: asset_info_url_template.clone(),
+                asset_bundle_url_template: asset_bundle_url_template.clone(),
+                profile: profile.clone(),
+                profile_hash: profile_hash
+                    .clone()
+                    .unwrap_or_else(|| "<profile-hash>".to_string()),
+            };
             let asset_info_url = match (&request.asset_version, &request.asset_hash, &profile_hash)
             {
-                (Some(asset_version), Some(asset_hash), Some(profile_hash)) => Some(
-                    asset_info_url_template
-                        .replace("{env}", profile)
-                        .replace("{hash}", profile_hash)
-                        .replace("{asset_version}", asset_version)
-                        .replace("{asset_hash}", asset_hash),
-                ),
+                (Some(_), Some(_), Some(_)) => {
+                    Some(endpoint.render_asset_info_url(&preview_release, ""))
+                }
                 _ => {
                     notes.push("asset info URL preview is incomplete until asset_version, asset_hash, and profile hash are known".to_string());
                     None
                 }
             };
-
-            let asset_bundle_url_template = asset_bundle_url_template
-                .replace("{env}", profile)
-                .replace(
-                    "{hash}",
-                    profile_hash.as_deref().unwrap_or("<profile-hash>"),
-                )
-                .replace(
-                    "{asset_version}",
-                    request
-                        .asset_version
-                        .as_deref()
-                        .unwrap_or("<asset-version>"),
-                )
-                .replace(
-                    "{asset_hash}",
-                    request.asset_hash.as_deref().unwrap_or("<asset-hash>"),
-                );
+            let asset_bundle_url_template =
+                endpoint.render_bundle_url(&preview_release, "{bundle_path}", "");
 
             UrlPreview {
                 provider_kind: "colorful_palette".to_string(),
@@ -102,19 +102,25 @@ pub fn build_url_preview(region: &RegionConfig, request: &AssetUpdateRequest) ->
                     .to_string(),
             );
 
+            let endpoint = ProviderEndpoint::Nuverse {
+                asset_version_url_template: asset_version_url.clone(),
+                asset_info_url_template: asset_info_url_template.clone(),
+                asset_bundle_url_template: asset_bundle_url_template.clone(),
+                app_version: app_version.clone(),
+            };
+            let preview_release = ResolvedRelease {
+                asset_version: "<resolved-at-runtime>".to_string(),
+                asset_hash: String::new(),
+            };
             UrlPreview {
                 provider_kind: "nuverse".to_string(),
-                asset_info_url: Some(
-                    asset_info_url_template
-                        .replace("{app_version}", app_version)
-                        .replace("{asset_version}", "<resolved-at-runtime>"),
+                asset_info_url: Some(endpoint.render_asset_info_url(&preview_release, "")),
+                asset_version_lookup_url: endpoint.render_release_url(),
+                asset_bundle_url_template: endpoint.render_bundle_url(
+                    &preview_release,
+                    "{bundle_path}",
+                    "",
                 ),
-                asset_version_lookup_url: Some(
-                    asset_version_url.replace("{app_version}", app_version),
-                ),
-                asset_bundle_url_template: asset_bundle_url_template
-                    .replace("{app_version}", app_version)
-                    .replace("{asset_version}", "<resolved-at-runtime>"),
                 notes,
             }
         }

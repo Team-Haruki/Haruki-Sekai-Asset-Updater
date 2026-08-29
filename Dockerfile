@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 COPY Cargo.toml Cargo.toml
 COPY Cargo.lock Cargo.lock
+# The workspace members the root crate depends on. Without these the build
+# fails at manifest resolution, before it ever reaches a source file.
+COPY crates crates
 COPY src src
 COPY tests tests
 
