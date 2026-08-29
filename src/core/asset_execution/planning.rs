@@ -237,6 +237,7 @@ impl AssetExecutionContext {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::pipeline::prepare_asset_run;
     use std::collections::{BTreeMap, HashMap};
     use std::path::Path;
 
@@ -277,9 +278,15 @@ mod tests {
             dry_run: false,
             mode: AssetUpdateMode::Update,
         };
-        let config = AppConfig::default();
+        let mut config = AppConfig::default();
+        config.regions.insert("jp".to_string(), region.clone());
 
-        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         assert!(
             executor.matches_raw_bundle_filters("live_pv/model/characterv2/body/01"),
             "raw bundle retention must remain independent while 3D is disabled"
@@ -330,7 +337,8 @@ mod tests {
             required_cookies: false,
             cookie_bootstrap_url: None,
         });
-        let config = AppConfig::default();
+        let mut config = AppConfig::default();
+        config.regions.insert("jp".to_string(), region.clone());
         let request = AssetUpdateRequest {
             region: "jp".to_string(),
             asset_version: Some("1".to_string()),
@@ -338,7 +346,12 @@ mod tests {
             dry_run: false,
             mode: AssetUpdateMode::Update,
         };
-        let ctx = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let ctx = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
 
         let detail = |hash: &str| AssetBundleDetail {
             bundle_name: String::new(),
@@ -411,7 +424,8 @@ mod tests {
             include: vec!["^(start/a|live_pv/model/characterv2/body/)".to_string()],
             ..crate::core::config::Haruki3dExportConfig::default()
         };
-        let config = AppConfig::default();
+        let mut config = AppConfig::default();
+        config.regions.insert("jp".to_string(), region.clone());
         let request = AssetUpdateRequest {
             region: "jp".to_string(),
             asset_version: Some("1".to_string()),
@@ -419,7 +433,12 @@ mod tests {
             dry_run: false,
             mode: AssetUpdateMode::Update,
         };
-        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         let detail = |bundle_name: &str, category| AssetBundleDetail {
             bundle_name: bundle_name.to_string(),
             cache_file_name: String::new(),

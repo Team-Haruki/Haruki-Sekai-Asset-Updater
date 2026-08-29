@@ -5,9 +5,10 @@ use reqwest::header::{COOKIE, SET_COOKIE};
 
 use super::crypto::decrypt_asset_bundle_info;
 use super::model::{AssetBundleInfo, AssetExecutionContext, DownloadTask};
-use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
+use crate::core::config::{AppConfig, RegionProviderConfig};
 use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::models::AssetUpdateRequest;
+use crate::core::pipeline::prepare_asset_run;
 use crate::core::retry::retry_async;
 
 pub(super) fn time_arg_jst() -> String {
@@ -32,11 +33,10 @@ pub(super) fn is_retryable_http_error(err: &AssetExecutionError) -> bool {
 
 pub async fn fetch_live_asset_bundle_info(
     app_config: &AppConfig,
-    region_name: &str,
-    region: &RegionConfig,
     request: &AssetUpdateRequest,
 ) -> Result<AssetBundleInfo, AssetExecutionError> {
-    let mut context = AssetExecutionContext::new(app_config, region_name, region, request)?;
+    let prepared = prepare_asset_run(app_config, request)?;
+    let mut context = AssetExecutionContext::new(app_config, &prepared, request)?;
     if context.requires_cookies() {
         context.fetch_runtime_cookies().await?;
     }
@@ -275,6 +275,7 @@ impl AssetExecutionContext {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::pipeline::prepare_asset_run;
     use std::collections::{BTreeMap, HashMap};
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -463,7 +464,12 @@ mod tests {
             mode: AssetUpdateMode::PrefetchRawBundles,
         };
 
-        let executor = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         let summary = executor
             .prefetch_asset_bundles(&config, None, None)
             .await
@@ -611,7 +617,12 @@ mod tests {
             mode: AssetUpdateMode::PrefetchRawBundles,
         };
 
-        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         let summary = executor
             .prefetch_asset_bundles(&config, None, None)
             .await

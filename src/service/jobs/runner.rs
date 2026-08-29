@@ -24,7 +24,7 @@ use crate::core::models::{
     JobStatus,
 };
 use crate::core::pipeline::build_execution_plan;
-use crate::core::regions::select_region;
+use crate::core::pipeline::prepare_asset_run;
 
 #[derive(Clone)]
 pub(super) struct PlanningContext {
@@ -140,10 +140,9 @@ pub(super) async fn execute_planned_job(
     request: &AssetUpdateRequest,
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<(), String> {
-    let region = select_region(&context.config, &request.region)
-        .map_err(|err| err.to_string())?
-        .clone();
-    let executor = AssetExecutionContext::new(&context.config, &request.region, &region, request)
+    let prepared = prepare_asset_run(&context.config, request).map_err(|err| err.to_string())?;
+    let region = prepared.region.clone();
+    let executor = AssetExecutionContext::new(&context.config, &prepared, request)
         .map_err(|err| err.to_string())?;
     let execution_result =
         run_asset_execution(context, request, executor, cancel_flag.clone(), id).await;

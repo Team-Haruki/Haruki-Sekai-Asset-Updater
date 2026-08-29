@@ -76,6 +76,9 @@ pub struct AssetExecutionContext {
     pub(super) retry: crate::core::config::RetryConfig,
     pub(super) runtime_cookie: Option<String>,
     pub(super) resolved_asset_version: Option<String>,
+    /// Resolved when the run was prepared, so execution cannot disagree with
+    /// the plan the caller was shown.
+    pub(super) download_record_file: String,
 }
 
 pub(super) struct Haruki3dExportPlan {

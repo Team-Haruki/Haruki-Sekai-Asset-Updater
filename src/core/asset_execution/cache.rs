@@ -206,6 +206,7 @@ impl AssetExecutionContext {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::pipeline::prepare_asset_run;
     use std::collections::BTreeMap;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -315,7 +316,13 @@ mod tests {
             dry_run: false,
             mode: AssetUpdateMode::Update,
         };
-        let context = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        config.regions.insert("cn".to_string(), region.clone());
+        let context = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         let task = DownloadTask {
             download_path: "ond/a".to_string(),
             bundle_path: "ond/a".to_string(),
@@ -380,7 +387,13 @@ mod tests {
             dry_run: false,
             mode: AssetUpdateMode::Update,
         };
-        let context = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        config.regions.insert("cn".to_string(), region.clone());
+        let context = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         let task = DownloadTask {
             download_path: "start/a".to_string(),
             bundle_path: "start/a".to_string(),

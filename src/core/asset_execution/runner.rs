@@ -24,6 +24,7 @@ use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::{post_process_exported_files, NativeSemanticExportPathRegistry};
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
+use crate::core::pipeline::PreparedAssetRun;
 use crate::core::storage::{upload_to_all_storages, StorageUploadOptions};
 
 pub(super) fn post_process_backlog_capacity(
@@ -89,12 +90,17 @@ pub(super) struct BundleMemoryLimiter {
 }
 
 impl AssetExecutionContext {
+    /// Builds an executor from an already-prepared run.
+    ///
+    /// Taking `PreparedAssetRun` rather than a config and a region name is what
+    /// stops this path from deriving the region and the download-record path a
+    /// second time, differently from the plan the caller was shown.
     pub fn new(
         app_config: &AppConfig,
-        region_name: &str,
-        region: &RegionConfig,
+        prepared: &PreparedAssetRun,
         request: &AssetUpdateRequest,
     ) -> Result<Self, AssetExecutionError> {
+        let region = &prepared.region;
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         headers.insert(
@@ -140,12 +146,13 @@ impl AssetExecutionContext {
             client: builder
                 .build()
                 .map_err(|err| AssetExecutionError::HttpClient(err.to_string()))?,
-            region_name: region_name.to_string(),
+            region_name: prepared.region_name.clone(),
             region: region.clone(),
             request: request.clone(),
             retry: app_config.execution.retry.clone(),
             runtime_cookie: None,
             resolved_asset_version: request.asset_version.clone(),
+            download_record_file: prepared.download_record_file.clone(),
         })
     }
 
@@ -156,14 +163,8 @@ impl AssetExecutionContext {
         cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<ExecutionSummary, AssetExecutionError> {
         self.ensure_not_cancelled(&cancel_flag)?;
-        let record_path = self
-            .region
-            .paths
-            .downloaded_asset_record_file
-            .clone()
-            .ok_or_else(|| AssetExecutionError::MissingAssetSaveDir {
-                region: self.region_name.clone(),
-            })?;
+        // Resolved once, when the run was prepared.
+        let record_path = self.download_record_file.clone();
         let mut downloaded_assets = load_download_record(&record_path)?;
         let haruki_3d_downloaded_assets = self
             .haruki_3d_download_record_path()

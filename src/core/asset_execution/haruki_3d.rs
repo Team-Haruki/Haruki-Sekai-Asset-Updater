@@ -726,6 +726,7 @@ impl AssetExecutionContext {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::pipeline::prepare_asset_run;
     use std::collections::{BTreeMap, HashMap};
     use std::path::Path;
 
@@ -767,7 +768,12 @@ mod tests {
             dry_run: false,
             mode: AssetUpdateMode::Update,
         };
-        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
 
         assert!(executor.haruki_3d_work_asset_root().is_none());
     }
@@ -811,7 +817,12 @@ mod tests {
             dry_run: false,
             mode: AssetUpdateMode::Update,
         };
-        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         let matched = "live_pv/model/characterv2/body/01_0001.bundle".to_string();
         let missing_from_record = "live_pv/model/characterv2/body/02_0001.bundle".to_string();
         let dependency = "common/materials/character.bundle".to_string();

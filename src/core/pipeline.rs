@@ -1,5 +1,5 @@
 use crate::core::codec::CODEC_BACKEND;
-use crate::core::config::AppConfig;
+use crate::core::config::{AppConfig, RegionConfig};
 use crate::core::errors::PlanningError;
 use crate::core::models::{AssetUpdateRequest, ExecutionPlan};
 use crate::core::regions::{build_url_preview, select_region};
@@ -15,12 +15,26 @@ use crate::core::storage::plan_storage_targets;
 /// `planned_upload_targets_match_what_the_upload_would_resolve`; the gap that
 /// remains is that planning describes providers without opening them, so a plan
 /// can name a target a live run cannot build.
-pub fn build_execution_plan(
+/// Everything a run needs that comes from resolving the request against the
+/// config, derived once.
+///
+/// The preview and the execution used to work this out separately, which is how
+/// the same missing `downloaded_asset_record_file` produced
+/// `PlanningError::MissingDownloadRecordPath` in one place and
+/// `AssetExecutionError::MissingAssetSaveDir` -- naming the wrong setting -- in
+/// the other.
+#[derive(Debug, Clone)]
+pub struct PreparedAssetRun {
+    pub region_name: String,
+    pub region: RegionConfig,
+    pub download_record_file: String,
+}
+
+pub fn prepare_asset_run(
     config: &AppConfig,
     request: &AssetUpdateRequest,
-) -> Result<ExecutionPlan, PlanningError> {
+) -> Result<PreparedAssetRun, PlanningError> {
     let region = select_region(config, &request.region)?;
-    let url_preview = build_url_preview(region, request);
     let download_record_file = region
         .paths
         .downloaded_asset_record_file
@@ -28,6 +42,21 @@ pub fn build_execution_plan(
         .ok_or_else(|| PlanningError::MissingDownloadRecordPath {
             region: request.region.clone(),
         })?;
+    Ok(PreparedAssetRun {
+        region_name: request.region.clone(),
+        region: region.clone(),
+        download_record_file,
+    })
+}
+
+pub fn build_execution_plan(
+    config: &AppConfig,
+    request: &AssetUpdateRequest,
+) -> Result<ExecutionPlan, PlanningError> {
+    let prepared = prepare_asset_run(config, request)?;
+    let region = &prepared.region;
+    let url_preview = build_url_preview(region, request);
+    let download_record_file = prepared.download_record_file.clone();
 
     let upload_targets = if region.upload.enabled {
         plan_storage_targets(&config.storage, &request.region, &region.upload.providers)?
@@ -88,7 +117,9 @@ mod tests {
     };
     use crate::core::models::AssetUpdateRequest;
 
-    use super::build_execution_plan;
+    use crate::core::errors::PlanningError;
+
+    use super::{build_execution_plan, prepare_asset_run};
 
     fn planning_fixture() -> (AppConfig, AssetUpdateRequest) {
         let mut profile_hashes = BTreeMap::new();
@@ -227,5 +258,41 @@ mod tests {
             &region.upload.providers,
         );
         assert!(opened.is_err(), "the upload path rejects the same provider");
+    }
+
+    /// One derivation, two consumers. The plan the caller is shown and the
+    /// executor that runs the job now come from the same `prepare_asset_run`,
+    /// so the region and the record path cannot differ between what was
+    /// promised and what runs.
+    #[test]
+    fn the_plan_and_the_prepared_run_agree() {
+        let (config, request) = planning_fixture();
+
+        let prepared = prepare_asset_run(&config, &request).unwrap();
+        let plan = build_execution_plan(&config, &request).unwrap();
+
+        assert_eq!(plan.region, prepared.region_name);
+        assert_eq!(plan.download_record_file, prepared.download_record_file);
+    }
+
+    /// A region with no `downloaded_asset_record_file` is rejected once, by
+    /// name. Execution used to re-derive this and report it as
+    /// `MissingAssetSaveDir`, naming a setting that was not the problem.
+    #[test]
+    fn a_missing_record_path_is_rejected_when_the_run_is_prepared() {
+        let (mut config, request) = planning_fixture();
+        config
+            .regions
+            .get_mut("jp")
+            .unwrap()
+            .paths
+            .downloaded_asset_record_file = None;
+
+        let error = prepare_asset_run(&config, &request).unwrap_err();
+
+        assert!(
+            matches!(error, PlanningError::MissingDownloadRecordPath { .. }),
+            "{error}"
+        );
     }
 }

@@ -14,6 +14,7 @@ use crate::core::asset_execution::AssetExecutionContext;
 use crate::core::config::AppConfig;
 use crate::core::errors::AssetExecutionError;
 use crate::core::models::{AssetUpdateRequest, JobPhase, JobSnapshot, JobStatus};
+use crate::core::pipeline::prepare_asset_run;
 use crate::core::regions::select_region;
 
 pub(super) async fn spawn_haruki_3d_child_job(
@@ -92,8 +93,9 @@ pub(super) async fn spawn_haruki_3d_child_job(
         let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         let progress_task = tokio::spawn(progress_consumer(jobs.clone(), child_id, progress_rx));
         let result = async {
-            let region = select_region(&config, &request.region)?.clone();
-            let executor = AssetExecutionContext::new(&config, &request.region, &region, &request)?;
+            let prepared = prepare_asset_run(&config, &request)?;
+            let _region = prepared.region.clone();
+            let executor = AssetExecutionContext::new(&config, &prepared, &request)?;
             executor
                 .run_haruki_3d_background_export(&config, Some(progress_tx), cancel_flag.clone())
                 .await

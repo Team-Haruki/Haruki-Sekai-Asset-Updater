@@ -291,6 +291,11 @@ pub enum AssetExecutionError {
     // storage failure rather than wearing the export pipeline's error.
     #[error(transparent)]
     Storage(#[from] StorageError),
+    // Preparing a run resolves the region and its record path. Execution used
+    // to re-derive both, reporting a missing record path as
+    // `MissingAssetSaveDir` -- a different setting than the one at fault.
+    #[error(transparent)]
+    Planning(#[from] PlanningError),
     #[error(transparent)]
     GitSync(#[from] GitSyncError),
     #[error("http request failed: {}", format_reqwest_error_chain(.0))]

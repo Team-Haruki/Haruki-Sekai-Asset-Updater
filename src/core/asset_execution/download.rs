@@ -463,6 +463,7 @@ impl AssetExecutionContext {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::pipeline::prepare_asset_run;
     use std::collections::{BTreeMap, HashMap};
 
     use axum::body::Body;
@@ -616,7 +617,12 @@ mod tests {
             mode: AssetUpdateMode::PrefetchRawBundles,
         };
 
-        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
         let summary = executor
             .prefetch_asset_bundles(&config, None, None)
             .await
