@@ -103,15 +103,15 @@ pub(super) struct BundleWritePlan {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DownloadTask {
-    pub(super) download_path: String,
-    pub(super) bundle_path: String,
-    pub(super) bundle_hash: String,
-    pub(super) category: AssetCategory,
-    pub(super) file_size: i64,
-    pub(super) priority: usize,
-    pub(super) export_payloads: bool,
-    pub(super) stage_haruki_3d: bool,
+pub(crate) struct DownloadTask {
+    pub(crate) download_path: String,
+    pub(crate) bundle_path: String,
+    pub(crate) bundle_hash: String,
+    pub(crate) category: AssetCategory,
+    pub(crate) file_size: i64,
+    pub(crate) priority: usize,
+    pub(crate) export_payloads: bool,
+    pub(crate) stage_haruki_3d: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
