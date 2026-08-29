@@ -71,7 +71,6 @@ pub struct UnityAssetBundlePayloadExport {
     pub unity_rs_export_phase_ms: HashMap<String, u64>,
     pub unity_rs_skipped_object_reads: Vec<NativeSkippedObjectRead>,
     pub unity_rs_object_read_plan: NativeObjectReadPlanStats,
-    pub(crate) pending_image_writes: Vec<PendingNativeImageWrite>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -118,7 +117,6 @@ pub struct NativeObjectTypeReadStats {
 pub(super) struct NativeObjectExportSummary {
     pub(super) written_files: Vec<PathBuf>,
     pub(super) acb_sources: Vec<NativeInMemoryMediaSource>,
-    pub(super) pending_image_writes: Vec<PendingNativeImageWrite>,
     pub(super) phase_ms: HashMap<String, u64>,
     pub(super) skipped_object_reads: Vec<NativeSkippedObjectRead>,
     pub(super) object_read_plan: NativeObjectReadPlanStats,
@@ -129,7 +127,44 @@ pub(super) struct NativeSemanticExportPathState {
     pub(super) registry: NativeSemanticExportPathRegistry,
     pub(super) written_files: Vec<PathBuf>,
     pub(super) acb_sources: Vec<NativeInMemoryMediaSource>,
-    pub(super) pending_image_writes: Vec<PendingNativeImageWrite>,
+    pub(super) image_encode: NativeImageEncodeTelemetry,
+}
+
+/// Image encode timings, accumulated as the images are written.
+///
+/// These used to be produced by a separate flush stage that no longer exists.
+/// The encode is now spread across the object reads, so `wall_ms` is the summed
+/// time of the individual encodes rather than one bracketing measurement, and
+/// there is no separate concurrency to report -- it is the bundle concurrency.
+#[derive(Debug, Default)]
+pub(super) struct NativeImageEncodeTelemetry {
+    pub(super) count: u64,
+    pub(super) wall_ms: u64,
+    pub(super) by_format: BTreeMap<String, u64>,
+}
+
+impl NativeImageEncodeTelemetry {
+    pub(super) fn record(&mut self, formats: &[ImageOutputFormat], elapsed: Instant) {
+        self.count += 1;
+        self.wall_ms += elapsed.elapsed().as_millis() as u64;
+        for format in formats {
+            *self
+                .by_format
+                .entry(image_format_extension(*format).to_string())
+                .or_default() += 1;
+        }
+    }
+
+    pub(super) fn merge_into(self, phase_ms: &mut HashMap<String, u64>) {
+        if self.count == 0 {
+            return;
+        }
+        phase_ms.insert("image_encode.wall".to_string(), self.wall_ms);
+        phase_ms.insert("image_encode.count".to_string(), self.count);
+        for (extension, count) in self.by_format {
+            phase_ms.insert(format!("image_encode.format.{extension}"), count);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -155,16 +190,6 @@ pub(super) enum NativeSemanticPathClaim {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PendingNativeImageWrite {
-    pub(super) target: PathBuf,
-    /// Shared slice of the read-batch payload bundle (see
-    /// `parse_payload_bundle_shared`); cloning is a refcount bump.
-    pub(super) payload: bytes::Bytes,
-    pub(super) region: RegionConfig,
-    pub(super) path_registry: NativeSemanticExportPathRegistry,
-}
-
-#[derive(Debug, Clone)]
 pub struct NativeInMemoryMediaSource {
     pub target: PathBuf,
     pub payload: Vec<u8>,
@@ -179,6 +204,24 @@ pub(super) struct NativeObjectExportOptions<'a> {
     pub(super) read_kinds: &'a BTreeMap<String, String>,
     pub(super) image_format: &'a str,
     pub(super) read_batch_size: usize,
+    pub(super) image_encode: &'a NativeImageEncodeSettings,
+}
+
+/// What the image encoder needs, resolved once per bundle export.
+///
+/// Images are encoded where they are decoded rather than queued as RGBA. A
+/// decoded surface is 2.5-4x its encoded form, and the queue it used to sit in
+/// is up to `download + post_process * 2` bundles deep, so deferring the encode
+/// made peak RSS a multiple of the corpus rather than of the machine's width.
+/// Encoding here also drops two full copies of every image: `write_rgba_ir`'s
+/// serialisation into the interchange payload, and the `into_owned` that
+/// rebuilt an `RgbaImage` from it at flush time.
+#[derive(Debug, Clone, Default)]
+pub(super) struct NativeImageEncodeSettings {
+    pub(super) backend: ImageBackendConfig,
+    /// `None` skips the CPU-budget permit, matching the old flat-pipeline mode.
+    pub(super) cpu_budget: Option<usize>,
+    pub(super) memory_limit_bytes: usize,
 }
 
 #[derive(Debug, Serialize)]

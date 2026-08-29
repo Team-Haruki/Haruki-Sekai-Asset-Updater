@@ -19,24 +19,24 @@ use crate::core::config::{
 use crate::core::errors::ExportPipelineError;
 
 use super::{
-    acquire_cpu_budget_permit_blocking, acquire_media_encode_permit,
-    assetstudio_export_type_selector, assetstudio_fix_file_name,
+    acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking,
+    acquire_media_encode_permit, assetstudio_export_type_selector, assetstudio_fix_file_name,
     assetstudio_object_mode_supported_type, assetstudio_type_selector_matches,
-    convert_native_surrogate_images_to_png, extract_unity_asset_bundle,
-    flush_pending_native_image_writes, get_export_group, handle_png_conversion,
-    native_object_output_extension, native_object_output_path, native_read_batch_size_for_assets,
-    native_read_kind_for_asset, native_skipped_unsupported_asset, parse_payload_bundle,
-    parse_payload_bundle_borrowed, playable_container_output_path, post_process_exported_files,
-    prepare_usm_processing_inputs, process_usm_file, process_usm_input_with_metrics,
-    run_path_tasks, safe_payload_bundle_path, scan_all_files, select_native_object_readable_assets,
-    should_keep_music_long_hca_track, sort_native_object_reads_for_failure_isolation,
-    text_asset_public_bytes_target, usm_segment_key, write_assetstudio_export_manifest_entry,
-    write_assetstudio_playable_payloads, write_native_image_payload_final_files,
-    write_native_image_payload_final_files_with_backend, write_native_object_payload,
-    write_native_payload_file, MediaEncodeKind, NativeObjectExportOptions,
-    NativeObjectExportSummary, NativeSemanticExportPathRegistry, NativeSemanticExportPathState,
-    NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse,
-    UsmProcessingInput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
+    convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
+    handle_png_conversion, native_object_output_extension, native_object_output_path,
+    native_read_batch_size_for_assets, native_read_kind_for_asset,
+    native_skipped_unsupported_asset, parse_payload_bundle, parse_payload_bundle_borrowed,
+    playable_container_output_path, post_process_exported_files, prepare_usm_processing_inputs,
+    process_usm_file, process_usm_input_with_metrics, run_path_tasks, safe_payload_bundle_path,
+    scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
+    sort_native_object_reads_for_failure_isolation, text_asset_public_bytes_target,
+    usm_segment_key, write_assetstudio_export_manifest_entry, write_assetstudio_playable_payloads,
+    write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
+    write_native_object_payload, write_native_payload_file, MediaEncodeKind,
+    NativeImageEncodeSettings, NativeObjectExportOptions, NativeObjectExportSummary,
+    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
+    UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse, UsmProcessingInput,
+    ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
     UNITY_ENGINE_FAST_IMAGE_FORMAT, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
 };
 
@@ -794,9 +794,9 @@ fn native_raw_rgba_payload_writes_configured_image_formats_directly() {
 }
 
 #[test]
-fn native_image_object_payload_is_flushed_after_export_queue() {
+fn native_image_object_payload_is_encoded_and_written_during_export() {
     let dir = tempdir().unwrap();
-    let (config, region) = processing_config();
+    let (_config, region) = processing_config();
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
@@ -806,6 +806,7 @@ fn native_image_object_payload_is_flushed_after_export_queue() {
         read_kinds: &read_kinds,
         image_format: "raw_rgba",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -844,15 +845,20 @@ fn native_image_object_payload_is_flushed_after_export_queue() {
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
+    // The encode happens where the image was decoded, so the PNG is on disk
+    // before the export returns and no RGBA is left queued for a later stage.
     let expected = dir.path().join("character/member/test/normal.png");
     assert_eq!(path_state.written_files, vec![expected.clone()]);
-    assert_eq!(path_state.pending_image_writes.len(), 1);
-    assert!(!expected.exists());
-
-    let phase_ms =
-        flush_pending_native_image_writes(&config, path_state.pending_image_writes).unwrap();
-
     assert!(expected.exists());
+
+    let decoded = image::open(&expected).unwrap().to_rgba8();
+    assert_eq!(decoded.dimensions(), (2, 2));
+    assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 255]);
+
+    // The encode telemetry the removed flush stage used to publish is now
+    // accumulated as the images are written.
+    let mut phase_ms = HashMap::new();
+    path_state.image_encode.merge_into(&mut phase_ms);
     assert_eq!(phase_ms.get("image_encode.count"), Some(&1));
     assert_eq!(phase_ms.get("image_encode.format.png"), Some(&1));
 }
@@ -871,6 +877,7 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
         read_kinds: &read_kinds,
         image_format: "bmp",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -930,6 +937,7 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
         read_kinds: &read_kinds,
         image_format: "raw_rgba",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -998,6 +1006,7 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
         read_kinds: &read_kinds,
         image_format: "raw_rgba",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -1055,6 +1064,7 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
         read_kinds: &read_kinds,
         image_format: "bmp",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -1121,6 +1131,7 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
         read_kinds: &read_kinds,
         image_format: "bmp",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -1192,6 +1203,7 @@ fn monoscript_typetree_routes_to_container_subasset_path() {
         read_kinds: &read_kinds,
         image_format: "bmp",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -1296,6 +1308,22 @@ fn cpu_budget_permit_limits_blocking_work() {
 
     assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
     drop(permits);
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn image_memory_permit_is_weighted_and_process_wide() {
+    let limit = 1_234_567;
+    let first = acquire_image_memory_permit_blocking(limit, 800_000);
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let _second = acquire_image_memory_permit_blocking(limit, 800_000);
+        tx.send(()).unwrap();
+    });
+
+    assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+    drop(first);
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
     handle.join().unwrap();
 }
@@ -2187,6 +2215,7 @@ fn playable_export_dedupes_identical_payloads_across_bundle_states() {
         read_kinds: &read_kinds,
         image_format: "raw_rgba",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let asset = UnityAssetInfo {
         index: 0,
@@ -2258,6 +2287,7 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
         read_kinds: &read_kinds,
         image_format: "raw_rgba",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {
@@ -2320,6 +2350,7 @@ fn native_object_export_keeps_distinct_semantic_duplicates() {
         read_kinds: &read_kinds,
         image_format: "raw_rgba",
         read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
     };
     let mut path_state = NativeSemanticExportPathState::default();
     let asset = UnityAssetInfo {

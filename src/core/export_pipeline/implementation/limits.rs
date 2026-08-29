@@ -93,6 +93,73 @@ pub(super) fn cpu_budget_limiter(cpu_budget: usize) -> Arc<CpuBudgetLimiter> {
         .clone()
 }
 
+pub(super) struct ImageMemoryLimiter {
+    max_bytes: usize,
+    active_bytes: Mutex<usize>,
+    available: Condvar,
+}
+
+pub(super) struct ImageMemoryPermit {
+    limiter: Option<Arc<ImageMemoryLimiter>>,
+    bytes: usize,
+}
+
+impl Drop for ImageMemoryPermit {
+    fn drop(&mut self) {
+        let Some(limiter) = &self.limiter else {
+            return;
+        };
+        let mut active_bytes = limiter.active_bytes.lock().unwrap();
+        *active_bytes = active_bytes.saturating_sub(self.bytes);
+        limiter.available.notify_all();
+    }
+}
+
+/// Applies the configured bundle-memory ceiling to image scratch allocations as
+/// well. Limiters are process-wide, so concurrent regions and jobs cannot each
+/// consume the full allowance independently. An image larger than the ceiling
+/// receives the whole allowance and therefore runs alone instead of deadlocking.
+pub(super) fn acquire_image_memory_permit_blocking(
+    max_bytes: usize,
+    estimated_bytes: usize,
+) -> ImageMemoryPermit {
+    if max_bytes == 0 {
+        return ImageMemoryPermit {
+            limiter: None,
+            bytes: 0,
+        };
+    }
+
+    static LIMITERS: OnceLock<Mutex<HashMap<usize, Arc<ImageMemoryLimiter>>>> = OnceLock::new();
+    let limiter = {
+        let mut limiters = LIMITERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        limiters
+            .entry(max_bytes)
+            .or_insert_with(|| {
+                Arc::new(ImageMemoryLimiter {
+                    max_bytes,
+                    active_bytes: Mutex::new(0),
+                    available: Condvar::new(),
+                })
+            })
+            .clone()
+    };
+    let bytes = estimated_bytes.max(1).min(limiter.max_bytes);
+    let mut active_bytes = limiter.active_bytes.lock().unwrap();
+    while active_bytes.saturating_add(bytes) > limiter.max_bytes {
+        active_bytes = limiter.available.wait(active_bytes).unwrap();
+    }
+    *active_bytes += bytes;
+    drop(active_bytes);
+    ImageMemoryPermit {
+        limiter: Some(limiter),
+        bytes,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct CpuThrottleSettings {
     enabled: bool,

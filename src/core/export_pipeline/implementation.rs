@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::hash::{BuildHasher, Hasher};
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
@@ -63,9 +64,12 @@ mod types;
 use self::assetstudio::*;
 use self::images::*;
 use self::limits::*;
+// Nothing in this module names these directly any more -- the image flush that
+// did was removed -- but the submodules and tests reach them through `super::`,
+// which resolves against the bindings this glob creates here.
+#[allow(unused_imports)]
 use self::media_postprocess::*;
 use self::paths::*;
-pub(crate) use self::payload::flush_pending_native_image_writes;
 use self::payload::*;
 use self::tasks::*;
 pub(crate) use self::types::NativeSemanticExportPathRegistry;
@@ -111,7 +115,7 @@ pub async fn extract_unity_asset_bundle(
     output_dir: &Path,
     category: &str,
 ) -> Result<PostProcessSummary, ExportPipelineError> {
-    let mut payload_export = export_unity_asset_bundle_payloads(
+    let payload_export = export_unity_asset_bundle_payloads(
         app_config,
         region,
         asset_bundle_file,
@@ -120,10 +124,6 @@ pub async fn extract_unity_asset_bundle(
         category,
     )
     .await?;
-    let image_phase_ms = flush_pending_native_image_writes(
-        app_config,
-        std::mem::take(&mut payload_export.pending_image_writes),
-    )?;
     let mut summary = post_process_exported_files(
         app_config,
         region_name,
@@ -136,7 +136,6 @@ pub async fn extract_unity_asset_bundle(
     )
     .await?;
     summary.unity_rs_export_phase_ms = payload_export.unity_rs_export_phase_ms;
-    summary.post_process_phase_ms.extend(image_phase_ms);
     summary.unity_rs_skipped_object_reads = payload_export.unity_rs_skipped_object_reads;
     summary.unity_rs_object_read_plan = payload_export.unity_rs_object_read_plan;
     Ok(summary)
@@ -211,7 +210,6 @@ pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
         native_scoped_post_process: true,
         native_written_files: native_object_summary.written_files,
         native_acb_sources: native_object_summary.acb_sources,
-        pending_image_writes: native_object_summary.pending_image_writes,
         unity_rs_export_phase_ms: native_object_summary.phase_ms,
         unity_rs_skipped_object_reads: native_object_summary.skipped_object_reads,
         unity_rs_object_read_plan: native_object_summary.object_read_plan,

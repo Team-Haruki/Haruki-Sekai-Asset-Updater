@@ -11,12 +11,13 @@ resolver = "2"
 
 [dependencies]
 aes = "0.9"
+ahash = { version = "0.8", default-features = false, features = ["std"] }
 axum = { version = "0.8", features = ["macros", "json"] }
 bytes = "1"
 cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 cridecoder = "0.3.4"
-unity-rs-core = "0.2.0"
+unity-rs-core = "0.5.1"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "webp"] }
 libc = "0.2"

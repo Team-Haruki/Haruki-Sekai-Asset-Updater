@@ -64,31 +64,35 @@ pub(super) fn write_native_object_payload(
     }
 
     let written_files = if payload_kind == "image_array_bundle_raw_rgba" {
-        queue_native_image_payload_bundle_final_files(
+        write_native_image_payload_bundle_final_files_now(
             path_state,
             &target,
             &read_output.payload,
             options.region,
+            options.image_encode,
         )?
     } else if payload_kind.starts_with("image_array_bundle_")
         || payload_kind == "animator_bundle_fbx"
     {
         write_payload_bundle(&target, &read_output.payload)?
     } else if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
-        queue_native_image_payload_final_files(
+        write_native_image_payload_final_files_now(
             path_state,
             &target,
-            read_output.payload.clone(),
+            &read_output.payload,
             options.region,
-        )
+            options.image_encode,
+        )?
     } else {
         write_native_payload_file(&target, &read_output.payload)?;
         vec![target.clone()]
     };
-    let writes_are_pending = payload_kind == "image_bmp"
+    // Image payloads deduplicate inside their own encode-and-write; everything
+    // else is written raw here and still needs the pass.
+    let deduplicated_during_write = payload_kind == "image_bmp"
         || payload_kind == "image_raw_rgba"
         || payload_kind == "image_array_bundle_raw_rgba";
-    if !writes_are_pending {
+    if !deduplicated_during_write {
         for written_file in &written_files {
             remove_byte_identical_semantic_duplicates(written_file, &path_state.registry)?;
         }
@@ -320,17 +324,43 @@ pub(super) fn native_payload_signature(payload: &[u8]) -> NativePayloadSignature
     }
 }
 
+/// 128-bit content fingerprint used to tell a byte-identical duplicate apart
+/// from a different payload that lands on the same semantic path.
+///
+/// This runs over every exported payload, including the full RGBA image
+/// intermediate, so it is squarely on the hot path: an image rule pushes tens
+/// of gigabytes through it. Two independently seeded aHash passes are used
+/// instead of a hand-rolled byte-at-a-time chain, which measured 39 CPU-seconds
+/// (32% of the whole `^character/member_cutout` rule) on 34.9 GB of payload.
+///
+/// The seeds are fixed so a run is reproducible. The values never leave the
+/// process — the claim map lives for exactly one job — so they do not need to
+/// stay stable across releases.
 pub(super) fn native_payload_fingerprint(payload: &[u8]) -> [u64; 2] {
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut left = 0xcbf2_9ce4_8422_2325u64;
-    let mut right = 0x8422_2325_cbf2_9ce4u64;
-    for (index, byte) in payload.iter().copied().enumerate() {
-        left ^= byte as u64;
-        left = left.wrapping_mul(FNV_PRIME);
-        right ^= ((byte as u64) << ((index & 7) * 8)) ^ index as u64;
-        right = right.rotate_left(5).wrapping_mul(FNV_PRIME);
+    const SEEDS_LEFT: [u64; 4] = [
+        0xcbf2_9ce4_8422_2325,
+        0x0000_0100_0000_01b3,
+        0x9e37_79b9_7f4a_7c15,
+        0xff51_afd7_ed55_8ccd,
+    ];
+    const SEEDS_RIGHT: [u64; 4] = [
+        0x8422_2325_cbf2_9ce4,
+        0xc4ce_b9fe_1a85_ec53,
+        0x1656_67b1_9e37_79f9,
+        0x2545_f491_4f6c_dd1d,
+    ];
+
+    fn hash_with(seeds: [u64; 4], payload: &[u8]) -> u64 {
+        let state = ahash::RandomState::with_seeds(seeds[0], seeds[1], seeds[2], seeds[3]);
+        let mut hasher = state.build_hasher();
+        hasher.write(payload);
+        hasher.finish()
     }
-    [left, right]
+
+    [
+        hash_with(SEEDS_LEFT, payload),
+        hash_with(SEEDS_RIGHT, payload),
+    ]
 }
 
 pub(super) fn semantic_duplicate_path(path: &Path, ordinal: usize) -> PathBuf {
@@ -530,22 +560,36 @@ pub(super) fn write_native_payload_file(
     }
 }
 
-pub(super) fn queue_native_image_payload_final_files(
+/// Encodes and writes one image where it was decoded.
+///
+/// This used to push the decoded RGBA onto `pending_image_writes` and encode it
+/// later, in a stage the bundle reached only after waiting for a post-process
+/// slot. Measured on 48 cores over 16 844 JP bundles, that queue held the
+/// dominant share of a 23 GB peak RSS: an RGBA surface is 2.5-4x its encoded
+/// form and up to `download + post_process * 2` bundles' worth were resident at
+/// once. Encoding here bounds live pixel data by the number of bundles actually
+/// being read instead of by the depth of a queue.
+pub(super) fn write_native_image_payload_final_files_now(
     path_state: &mut NativeSemanticExportPathState,
     target: &Path,
-    payload: bytes::Bytes,
+    payload: &[u8],
     region: &RegionConfig,
-) -> Vec<PathBuf> {
-    let written_files = planned_image_output_files(target, region);
+    image_encode: &NativeImageEncodeSettings,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let started = Instant::now();
+    let written = write_native_image_payload_final_files_with_limits(
+        target,
+        payload,
+        region,
+        &image_encode.backend,
+        &path_state.registry,
+        image_encode.cpu_budget,
+        image_encode.memory_limit_bytes,
+    )?;
     path_state
-        .pending_image_writes
-        .push(PendingNativeImageWrite {
-            target: target.to_path_buf(),
-            payload,
-            region: region.clone(),
-            path_registry: path_state.registry.clone(),
-        });
-    written_files
+        .image_encode
+        .record(&region.export.images.output_formats(), started);
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -581,35 +625,77 @@ pub(super) fn write_native_image_payload_final_files_with_backend(
     )
 }
 
-pub(super) fn write_native_image_payload_final_files_with_registry(
+fn image_payload_scratch_bytes(
+    target: &Path,
+    payload: &[u8],
+) -> Result<usize, ExportPipelineError> {
+    let rgba_bytes = if payload.starts_with(UNITY_ENGINE_RGBA_IR_MAGIC) {
+        let raw_rgba = parse_native_rgba_ir_payload(payload, target)?;
+        raw_rgba.row_bytes.saturating_mul(raw_rgba.height_usize)
+    } else {
+        let (width, height) = ImageReader::new(Cursor::new(payload))
+            .with_guessed_format()
+            .map_err(|source| ExportPipelineError::Io {
+                path: target.to_path_buf(),
+                source,
+            })?
+            .into_dimensions()
+            .map_err(|source| ExportPipelineError::Image {
+                path: target.to_path_buf(),
+                source,
+            })?;
+        usize::try_from(width)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(usize::try_from(height).unwrap_or(usize::MAX))
+            .saturating_mul(4)
+    };
+
+    // One decoded/borrowed RGBA surface plus one conversion or encoded output.
+    // The compressed input is included because it remains live for the job.
+    Ok(payload.len().saturating_add(rgba_bytes.saturating_mul(2)))
+}
+
+fn write_native_image_payload_final_files_with_limits(
     target: &Path,
     payload: &[u8],
     region: &RegionConfig,
     image_backend: &ImageBackendConfig,
     path_registry: &NativeSemanticExportPathRegistry,
+    cpu_budget: Option<usize>,
+    image_memory_limit_bytes: usize,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let scratch_bytes = image_payload_scratch_bytes(target, payload)?;
+    let _memory_permit =
+        acquire_image_memory_permit_blocking(image_memory_limit_bytes, scratch_bytes);
     let formats = region.export.images.output_formats();
     let raw_rgba = payload
         .starts_with(UNITY_ENGINE_RGBA_IR_MAGIC)
         .then(|| parse_native_rgba_ir_payload(payload, target))
         .transpose()?;
     let mut image: Option<image::DynamicImage> = None;
-    let mut written_files = Vec::new();
+    let mut written_files = Vec::with_capacity(formats.len());
 
     for format in formats {
         let output = image_output_file_for_format(target, format);
-        if let Some(raw_rgba) = raw_rgba.as_ref() {
-            write_native_rgba_ir_to_image_file(raw_rgba, &output, format, image_backend)?;
-        } else {
-            let dynamic_image = match image.as_ref() {
-                Some(image) => Cow::Borrowed(image),
-                None => {
-                    image = Some(decode_image_payload_bytes(payload, target)?);
-                    Cow::Borrowed(image.as_ref().unwrap())
-                }
-            };
-            write_dynamic_image_to_image_file(&dynamic_image, &output, format, image_backend)?;
-        }
+        let bytes = {
+            let _cpu_permit = cpu_budget
+                .map(acquire_cpu_budget_permit_blocking)
+                .transpose()?
+                .map(|guard| guard.permit);
+            if let Some(raw_rgba) = raw_rgba.as_ref() {
+                encode_native_rgba_ir(raw_rgba, &output, format, image_backend)?
+            } else {
+                let dynamic_image = match image.as_ref() {
+                    Some(image) => Cow::Borrowed(image),
+                    None => {
+                        image = Some(decode_image_payload_bytes(payload, target)?);
+                        Cow::Borrowed(image.as_ref().unwrap())
+                    }
+                };
+                encode_dynamic_image(&dynamic_image, &output, format, image_backend)?
+            }
+        };
+        write_encoded_image(&output, &bytes)?;
         remove_byte_identical_semantic_duplicates(&output, path_registry)?;
         written_files.push(output);
     }
@@ -617,49 +703,23 @@ pub(super) fn write_native_image_payload_final_files_with_registry(
     Ok(written_files)
 }
 
-pub(crate) fn flush_pending_native_image_writes(
-    app_config: &AppConfig,
-    pending: Vec<PendingNativeImageWrite>,
-) -> Result<HashMap<String, u64>, ExportPipelineError> {
-    let mut phase_ms = HashMap::new();
-    let image_count = pending.len();
-    if image_count == 0 {
-        return Ok(phase_ms);
-    }
-
-    let image_concurrency = app_config.effective_concurrency().images;
-    let cpu_budget = app_config.effective_cpu_budget();
-    let image_backend = app_config.backends.image.clone();
-    let mut format_counts: HashMap<ImageOutputFormat, u64> = HashMap::new();
-    for job in &pending {
-        for format in job.region.export.images.output_formats() {
-            *format_counts.entry(format).or_default() += 1;
-        }
-    }
-    let started = Instant::now();
-    run_tasks(pending, image_concurrency, move |job| {
-        let _cpu_permit = acquire_cpu_budget_permit_blocking(cpu_budget)?.permit;
-        write_native_image_payload_final_files_with_registry(
-            &job.target,
-            &job.payload,
-            &job.region,
-            &image_backend,
-            &job.path_registry,
-        )
-    })?;
-    record_phase_ms(&mut phase_ms, "image_encode.wall", started);
-    phase_ms.insert("image_encode.count".to_string(), image_count as u64);
-    phase_ms.insert(
-        "image_encode.concurrency".to_string(),
-        image_concurrency as u64,
-    );
-    for (format, count) in format_counts {
-        phase_ms.insert(
-            format!("image_encode.format.{}", image_format_extension(format)),
-            count,
-        );
-    }
-    Ok(phase_ms)
+#[cfg(test)]
+pub(super) fn write_native_image_payload_final_files_with_registry(
+    target: &Path,
+    payload: &[u8],
+    region: &RegionConfig,
+    image_backend: &ImageBackendConfig,
+    path_registry: &NativeSemanticExportPathRegistry,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    write_native_image_payload_final_files_with_limits(
+        target,
+        payload,
+        region,
+        image_backend,
+        path_registry,
+        None,
+        0,
+    )
 }
 
 pub(super) fn native_image_surrogate_public_target(
@@ -683,16 +743,6 @@ pub(super) fn native_image_surrogate_public_target(
         .next()
         .unwrap_or(ImageOutputFormat::Png);
     target.with_extension(image_format_extension(format))
-}
-
-pub(super) fn planned_image_output_files(target: &Path, region: &RegionConfig) -> Vec<PathBuf> {
-    region
-        .export
-        .images
-        .output_formats()
-        .into_iter()
-        .map(|format| image_output_file_for_format(target, format))
-        .collect()
 }
 
 pub(super) fn image_output_file_for_format(target: &Path, format: ImageOutputFormat) -> PathBuf {
@@ -998,11 +1048,12 @@ pub(super) fn files_are_byte_identical(
     }
 }
 
-pub(super) fn queue_native_image_payload_bundle_final_files(
+pub(super) fn write_native_image_payload_bundle_final_files_now(
     path_state: &mut NativeSemanticExportPathState,
     target: &Path,
     payload: &bytes::Bytes,
     region: &RegionConfig,
+    image_encode: &NativeImageEncodeSettings,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
     let entries = parse_payload_bundle_shared(payload)?;
     let mut written_files = Vec::with_capacity(entries.len());
@@ -1014,12 +1065,13 @@ pub(super) fn queue_native_image_payload_bundle_final_files(
                 source,
             })?;
         }
-        written_files.extend(queue_native_image_payload_final_files(
+        written_files.extend(write_native_image_payload_final_files_now(
             path_state,
             &entry_target,
-            bytes,
+            &bytes,
             region,
-        ));
+            image_encode,
+        )?);
     }
     Ok(written_files)
 }

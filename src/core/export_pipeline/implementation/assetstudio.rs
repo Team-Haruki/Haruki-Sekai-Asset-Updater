@@ -25,6 +25,13 @@ pub(super) async fn run_unity_rs_object_export(
         .unwrap_or_else(|| UNITY_ENGINE_DEFAULT_IMAGE_FORMAT.to_string());
     let read_batch_size = app_config.backends.asset_studio.read_batch_size;
     let path_registry = path_registry.clone();
+    // This whole closure already runs under one CPU-budget permit, so taking a
+    // second one per image would deadlock against itself.
+    let image_encode = NativeImageEncodeSettings {
+        backend: app_config.backends.image.clone(),
+        cpu_budget: None,
+        memory_limit_bytes: app_config.resources.memory.max_in_flight_bundle_bytes,
+    };
 
     tokio::task::spawn_blocking(move || {
         let _cpu_permit = cpu_slot.permit;
@@ -36,6 +43,7 @@ pub(super) async fn run_unity_rs_object_export(
             read_kinds: &read_kinds,
             image_format: &image_format,
             read_batch_size,
+            image_encode: &image_encode,
         };
         let mut summary = call_unity_rs_object_export(&input_path, &options, &path_registry)?;
         summary
@@ -90,7 +98,6 @@ fn call_unity_rs_object_export(
     let mut summary = NativeObjectExportSummary {
         written_files: Vec::new(),
         acb_sources: Vec::new(),
-        pending_image_writes: Vec::new(),
         phase_ms: HashMap::from([("unity_rs.open".to_string(), elapsed_millis(open_started))]),
         skipped_object_reads: Vec::new(),
         object_read_plan,
@@ -161,7 +168,7 @@ fn call_unity_rs_object_export(
     write_assetstudio_playable_payloads(options, &mut path_state, playable_outputs)?;
     summary.written_files = path_state.written_files;
     summary.acb_sources = path_state.acb_sources;
-    summary.pending_image_writes = path_state.pending_image_writes;
+    path_state.image_encode.merge_into(&mut summary.phase_ms);
     Ok(summary)
 }
 

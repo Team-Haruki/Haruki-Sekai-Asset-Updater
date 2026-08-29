@@ -22,9 +22,8 @@ use crate::core::config::{AppConfig, AssetHttpVersion, RegionConfig, RegionProvi
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::export_pipeline::{
-    export_unity_asset_bundle_payloads_with_registry, flush_pending_native_image_writes,
-    post_process_exported_files, NativeObjectReadPlanStats, NativeSemanticExportPathRegistry,
-    UnityAssetBundlePayloadExport,
+    export_unity_asset_bundle_payloads_with_registry, post_process_exported_files,
+    NativeObjectReadPlanStats, NativeSemanticExportPathRegistry, UnityAssetBundlePayloadExport,
 };
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
@@ -1043,21 +1042,9 @@ impl AssetExecutionContext {
         region_name: &str,
         region: &RegionConfig,
         progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
-        mut job: NativeBundlePostProcessJob,
+        job: NativeBundlePostProcessJob,
         queue_wait_ms: u128,
     ) -> Result<(), AssetExecutionError> {
-        let image_app_config = app_config.clone();
-        let pending_image_writes = std::mem::take(&mut job.payload_export.pending_image_writes);
-        let image_phase_ms = tokio::task::spawn_blocking(move || {
-            flush_pending_native_image_writes(&image_app_config, pending_image_writes)
-        })
-        .await
-        .map_err(
-            |source| crate::core::errors::ExportPipelineError::WorkerPanic {
-                worker: "native image flush".to_string(),
-                message: source.to_string(),
-            },
-        )??;
         let post_process_summary = post_process_exported_files(
             app_config,
             region_name,
@@ -1071,7 +1058,6 @@ impl AssetExecutionContext {
         .await?;
 
         let mut phase_ms = job.payload_export.unity_rs_export_phase_ms;
-        phase_ms.extend(image_phase_ms);
         phase_ms.extend(post_process_summary.post_process_phase_ms);
         phase_ms.insert(
             "post_process.queue_wait".to_string(),

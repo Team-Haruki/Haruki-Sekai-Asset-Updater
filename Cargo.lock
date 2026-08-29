@@ -966,6 +966,7 @@ name = "haruki-sekai-asset-updater"
 version = "6.0.5"
 dependencies = [
  "aes",
+ "ahash",
  "axum",
  "bytes",
  "cbc",
@@ -1897,6 +1898,15 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qoi"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "quick-error"
@@ -3073,17 +3083,20 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "unity-rs-core"
-version = "0.2.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dbd581b19e1099157c8ab2df79a2379b96012683bf9e13eea4dda0033238b18"
+checksum = "ff714b06b733bbc085c77c60165ab482500c81d2b2ff0b69e9e3292cba012b33"
 dependencies = [
  "brotli",
+ "crc32fast",
+ "fdeflate",
  "flate2",
  "image-webp",
  "jpeg-encoder",
  "lewton",
  "lz4_flex",
  "lzma-rust2",
+ "qoi",
  "ruopus",
  "serde",
  "serde_json",
