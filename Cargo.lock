@@ -2472,10 +2472,13 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "cbc",
+ "cridecoder",
  "hex",
  "rmp-serde",
  "serde",
  "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
