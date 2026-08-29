@@ -14,7 +14,6 @@ use super::model::{
     AssetExecutionContext, BundleFetch, BundleFetchSource, BundleWritePlan, DownloadTask,
     NativeBundlePostProcessJob,
 };
-use super::planning::{raw_bundle_output_path, validate_relative_bundle_path};
 use super::progress::ExecutionProgressUpdate;
 use super::runner::BundleMemoryLimiter;
 use crate::core::config::{pipeline_options, AppConfig};
@@ -23,7 +22,8 @@ use crate::core::errors::AssetExecutionError;
 use crate::core::models::{ExecutionSummary, JobPhase};
 use sekai_asset_pipeline::{
     asset_category_name, deobfuscate_owned, export_unity_asset_bundle_payloads_with_registry,
-    remove_file_if_exists, NativeSemanticExportPathRegistry,
+    raw_bundle_output_path, remove_file_if_exists, validate_relative_bundle_path,
+    NativeSemanticExportPathRegistry,
 };
 
 impl AssetExecutionContext {

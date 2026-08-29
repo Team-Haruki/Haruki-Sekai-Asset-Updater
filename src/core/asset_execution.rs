@@ -1,6 +1,6 @@
 //! Running an asset update: planning, downloading, exporting, recording.
 //!
-//! This file is the facade; the submodules below hold the implementation.
+//! This file is the application module entry point; the submodules below hold the implementation.
 //! Every external path -- `crate::core::asset_execution::Thing` -- is
 //! unchanged.
 

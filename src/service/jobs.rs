@@ -1,6 +1,6 @@
 //! Async job management: submission, planning, execution, progress.
 //!
-//! This file is the facade; the submodules below hold the implementation.
+//! This file is the jobs module entry point; the submodules below hold the implementation.
 
 mod failure;
 mod haruki_3d;

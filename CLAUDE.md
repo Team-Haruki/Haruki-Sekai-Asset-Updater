@@ -69,10 +69,10 @@ where the container pins FFmpeg 7 already.
 
 - `src/core.rs` / `src/core/` -- business logic:
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
+    and projection into `sekai_asset_pipeline::PipelineOptions`
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
-  - `asset_execution.rs` -- application batch runner (download, records, progress, upload)
-  - `export_pipeline` -- compatibility adapter from application config to the shared crate
-  - `codec.rs`, `media.rs`, `retry.rs`, `cleanup.rs` -- compatibility re-exports
+  - `asset_execution.rs` -- application batch runner; calls the shared crate directly
+    for crypto, safe paths, Unity export, and media post-processing
   - `storage.rs` -- S3-compatible upload via OpenDAL
   - `git_sync.rs` -- chart hash sync via Git CLI
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection

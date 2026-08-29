@@ -8,10 +8,10 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::super::model::AssetExecutionContext;
-use super::super::planning::raw_bundle_output_path;
 use super::super::progress::ExecutionProgressUpdate;
 use crate::core::errors::AssetExecutionError;
 use crate::core::models::JobPhase;
+use sekai_asset_pipeline::raw_bundle_output_path;
 
 pub(super) fn missing_haruki_3d_bundle_paths(stderr: &str) -> Vec<String> {
     const PREFIX: &str = "HARUKI_3D_MISSING_BUNDLE=";

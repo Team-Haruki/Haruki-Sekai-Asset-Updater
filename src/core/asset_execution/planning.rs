@@ -41,24 +41,6 @@ pub fn should_download_bundle(
     matches_any(&compiled, bundle_name)
 }
 
-pub(super) fn raw_bundle_output_path(
-    root: &Path,
-    bundle_path: &str,
-) -> Result<PathBuf, AssetExecutionError> {
-    sekai_asset_pipeline::raw_bundle_output_path(root, bundle_path)
-        .map_err(AssetExecutionError::from)
-}
-
-/// Validate an untrusted, server-provided bundle path: it must be a relative path made only of
-/// normal components (no empty / `.` / `..` / absolute / root / prefix). Returns it as a relative
-/// `Path` so callers can safely `join` it onto a trusted root without escaping it.
-pub(super) fn validate_relative_bundle_path(
-    bundle_path: &str,
-) -> Result<&Path, AssetExecutionError> {
-    sekai_asset_pipeline::validate_relative_bundle_path(bundle_path)
-        .map_err(AssetExecutionError::from)
-}
-
 impl AssetExecutionContext {
     pub(super) fn build_download_tasks(
         &self,
@@ -161,7 +143,10 @@ impl AssetExecutionContext {
             .and_then(|raw_bundles| raw_bundles.output_dir.as_deref())
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(asset_save_dir).join("AssetBundles"));
-        raw_bundle_output_path(&root, bundle_path)
+        Ok(sekai_asset_pipeline::raw_bundle_output_path(
+            &root,
+            bundle_path,
+        )?)
     }
 
     pub(super) fn build_raw_bundle_filter_tasks(
@@ -212,10 +197,12 @@ mod tests {
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
     use super::super::model::AssetExecutionContext;
-    use super::super::planning::{raw_bundle_output_path, should_download_bundle};
+    use super::super::planning::should_download_bundle;
 
     use super::super::test_support::test_region;
-    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
+    use sekai_asset_pipeline::{
+        raw_bundle_output_path, AssetBundleDetail, AssetBundleInfo, AssetCategory,
+    };
 
     #[test]
     fn raw_bundle_filters_are_independent_of_haruki_3d() {

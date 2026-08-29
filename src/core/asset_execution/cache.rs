@@ -9,11 +9,12 @@ use sha2::{Digest, Sha256};
 use super::model::{
     AssetExecutionContext, BundleCacheEntryStatus, BundleFetch, BundleFetchSource, DownloadTask,
 };
-use super::planning::{raw_bundle_output_path, validate_relative_bundle_path};
 use crate::core::config::AppConfig;
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
-use sekai_asset_pipeline::deobfuscate_owned;
+use sekai_asset_pipeline::{
+    deobfuscate_owned, raw_bundle_output_path, validate_relative_bundle_path,
+};
 
 pub(super) fn bundle_hash_index_key(bundle_path: &str) -> Result<String, AssetExecutionError> {
     Ok(raw_bundle_output_path(Path::new(""), bundle_path)?

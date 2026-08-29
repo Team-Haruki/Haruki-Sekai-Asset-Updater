@@ -10,12 +10,12 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::super::model::{AssetExecutionContext, DownloadTask, Haruki3dExportPlan};
-use super::super::planning::raw_bundle_output_path;
 use super::super::progress::ExecutionProgressUpdate;
 use super::exporter::missing_haruki_3d_bundle_paths;
 use super::tasks::bundle_dependency_closure;
 use crate::core::download_records::{save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
+use sekai_asset_pipeline::raw_bundle_output_path;
 
 impl AssetExecutionContext {
     pub(crate) fn write_haruki_3d_work_bundle(
