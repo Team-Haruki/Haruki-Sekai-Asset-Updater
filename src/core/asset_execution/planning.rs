@@ -16,14 +16,13 @@ pub(super) fn download_path_for_region(
     bundle_name: &str,
     detail: &AssetBundleDetail,
 ) -> String {
-    match provider {
-        RegionProviderConfig::ColorfulPalette { .. } => bundle_name.to_string(),
-        RegionProviderConfig::Nuverse { .. } => detail
-            .download_path
-            .as_ref()
-            .map(|prefix| format!("{prefix}/{bundle_name}"))
-            .unwrap_or_else(|| bundle_name.to_string()),
-    }
+    let kind = match provider {
+        RegionProviderConfig::ColorfulPalette { .. } => {
+            sekai_asset_pipeline::ProviderKind::ColorfulPalette
+        }
+        RegionProviderConfig::Nuverse { .. } => sekai_asset_pipeline::ProviderKind::Nuverse,
+    };
+    kind.download_path(bundle_name, detail.download_path.as_deref())
 }
 
 pub fn should_download_bundle(

@@ -10,6 +10,7 @@ use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::models::AssetUpdateRequest;
 use crate::core::pipeline::prepare_asset_run;
 use crate::core::retry::retry_async;
+use sekai_asset_pipeline::{ProviderEndpoint, ResolvedRelease};
 
 pub(super) fn time_arg_jst() -> String {
     let tz = FixedOffset::east_opt(9 * 3600).unwrap();
@@ -143,12 +144,19 @@ impl AssetExecutionContext {
                         profile: profile.clone(),
                     }
                 })?;
-                Ok(asset_info_url_template
-                    .replace("{env}", profile)
-                    .replace("{hash}", profile_hash)
-                    .replace("{asset_version}", asset_version)
-                    .replace("{asset_hash}", asset_hash)
-                    + &time_arg_jst())
+                let endpoint = ProviderEndpoint::ColorfulPalette {
+                    asset_info_url_template: asset_info_url_template.clone(),
+                    asset_bundle_url_template: String::new(),
+                    profile: profile.clone(),
+                    profile_hash: profile_hash.clone(),
+                };
+                Ok(endpoint.render_asset_info_url(
+                    &ResolvedRelease {
+                        asset_version: asset_version.to_string(),
+                        asset_hash: asset_hash.to_string(),
+                    },
+                    &time_arg_jst(),
+                ))
             }
             RegionProviderConfig::Nuverse {
                 asset_version_url,
@@ -165,10 +173,18 @@ impl AssetExecutionContext {
                         .trim()
                         .to_string();
                 self.resolved_asset_version = Some(resolved_version.clone());
-                Ok(asset_info_url_template
-                    .replace("{app_version}", app_version)
-                    .replace("{asset_version}", &resolved_version)
-                    + &time_arg_jst())
+                let endpoint = ProviderEndpoint::Nuverse {
+                    asset_info_url_template: asset_info_url_template.clone(),
+                    asset_bundle_url_template: String::new(),
+                    app_version: app_version.clone(),
+                };
+                Ok(endpoint.render_asset_info_url(
+                    &ResolvedRelease {
+                        asset_version: resolved_version,
+                        asset_hash: String::new(),
+                    },
+                    &time_arg_jst(),
+                ))
             }
         }
     }
@@ -201,13 +217,20 @@ impl AssetExecutionContext {
                     }
                 })?;
 
-                Ok(asset_bundle_url_template
-                    .replace("{bundle_path}", &task.download_path)
-                    .replace("{asset_version}", asset_version)
-                    .replace("{asset_hash}", asset_hash)
-                    .replace("{env}", profile)
-                    .replace("{hash}", profile_hash)
-                    + &time_arg_jst())
+                let endpoint = ProviderEndpoint::ColorfulPalette {
+                    asset_info_url_template: String::new(),
+                    asset_bundle_url_template: asset_bundle_url_template.clone(),
+                    profile: profile.clone(),
+                    profile_hash: profile_hash.clone(),
+                };
+                Ok(endpoint.render_bundle_url(
+                    &ResolvedRelease {
+                        asset_version: asset_version.to_string(),
+                        asset_hash: asset_hash.to_string(),
+                    },
+                    &task.download_path,
+                    &time_arg_jst(),
+                ))
             }
             RegionProviderConfig::Nuverse {
                 asset_bundle_url_template,
@@ -218,11 +241,19 @@ impl AssetExecutionContext {
                     .resolved_asset_version
                     .as_deref()
                     .unwrap_or("<resolved-asset-version>");
-                Ok(asset_bundle_url_template
-                    .replace("{bundle_path}", &task.download_path)
-                    .replace("{app_version}", app_version)
-                    .replace("{asset_version}", asset_version)
-                    + &time_arg_jst())
+                let endpoint = ProviderEndpoint::Nuverse {
+                    asset_info_url_template: String::new(),
+                    asset_bundle_url_template: asset_bundle_url_template.clone(),
+                    app_version: app_version.clone(),
+                };
+                Ok(endpoint.render_bundle_url(
+                    &ResolvedRelease {
+                        asset_version: asset_version.to_string(),
+                        asset_hash: String::new(),
+                    },
+                    &task.download_path,
+                    &time_arg_jst(),
+                ))
             }
         }
     }
