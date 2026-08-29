@@ -1,6 +1,6 @@
 //! Turning a region's filters and an asset-info document into download tasks.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use super::model::{
     AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext, DownloadTask,
@@ -47,19 +47,8 @@ pub(super) fn raw_bundle_output_path(
     root: &Path,
     bundle_path: &str,
 ) -> Result<PathBuf, AssetExecutionError> {
-    let relative = validate_relative_bundle_path(bundle_path)?;
-
-    let mut path = root.to_path_buf();
-    for component in relative.components() {
-        if let Component::Normal(value) = component {
-            path.push(value);
-        }
-    }
-
-    if path.extension().and_then(|ext| ext.to_str()) != Some("bundle") {
-        path.set_extension("bundle");
-    }
-    Ok(path)
+    sekai_asset_pipeline::raw_bundle_output_path(root, bundle_path)
+        .map_err(AssetExecutionError::from)
 }
 
 /// Validate an untrusted, server-provided bundle path: it must be a relative path made only of
@@ -68,43 +57,8 @@ pub(super) fn raw_bundle_output_path(
 pub(super) fn validate_relative_bundle_path(
     bundle_path: &str,
 ) -> Result<&Path, AssetExecutionError> {
-    let invalid = |reason: &str| AssetExecutionError::InvalidRawBundlePath {
-        bundle: bundle_path.to_string(),
-        reason: reason.to_string(),
-    };
-    if bundle_path.is_empty() {
-        return Err(invalid("path is empty"));
-    }
-    if bundle_path
-        .split('/')
-        .any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        return Err(invalid(
-            "empty, current-directory, or parent-directory components are not allowed",
-        ));
-    }
-
-    let relative = Path::new(bundle_path);
-    if relative.is_absolute() {
-        return Err(invalid("absolute paths are not allowed"));
-    }
-
-    for component in relative.components() {
-        match component {
-            Component::Normal(_) => {}
-            Component::CurDir => {
-                return Err(invalid("current-directory components are not allowed"))
-            }
-            Component::ParentDir => {
-                return Err(invalid("parent-directory components are not allowed"))
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(invalid("root or prefix components are not allowed"))
-            }
-        }
-    }
-
-    Ok(relative)
+    sekai_asset_pipeline::validate_relative_bundle_path(bundle_path)
+        .map_err(AssetExecutionError::from)
 }
 
 impl AssetExecutionContext {

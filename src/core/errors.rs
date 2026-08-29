@@ -393,3 +393,21 @@ pub enum AssetExecutionError {
     #[error("job execution cancelled")]
     Cancelled,
 }
+
+impl From<sekai_asset_pipeline::PipelineError> for AssetExecutionError {
+    fn from(error: sekai_asset_pipeline::PipelineError) -> Self {
+        use sekai_asset_pipeline::PipelineError;
+
+        match error {
+            PipelineError::InvalidAesKeyHex(message) => Self::InvalidAesKeyHex(message),
+            PipelineError::InvalidAesIvHex(message) => Self::InvalidAesIvHex(message),
+            PipelineError::InvalidAesIvLength { got } => Self::InvalidAesIvLength { got },
+            PipelineError::EmptyEncryptedContent => Self::EmptyEncryptedContent,
+            PipelineError::InvalidEncryptedBlockSize => Self::InvalidEncryptedBlockSize,
+            PipelineError::AssetInfoDecode(message) => Self::AssetInfoDecode(message),
+            PipelineError::InvalidBundlePath { bundle, reason } => {
+                Self::InvalidRawBundlePath { bundle, reason }
+            }
+        }
+    }
+}
