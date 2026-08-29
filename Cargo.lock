@@ -545,9 +545,9 @@ dependencies = [
 
 [[package]]
 name = "cridecoder"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "791e2f16c14800658903e329013a208a7dfe9bf9f9481140a4ac91df06cbc5fc"
+checksum = "b256f033cdb0c54363d4cc240199e7ef2ef94c9af36b0e7f71b7dc8b55f877f2"
 dependencies = [
  "byteorder",
  "encoding_rs",

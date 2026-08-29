@@ -1,5 +1,6 @@
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::Cursor;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr;
 
@@ -257,12 +258,12 @@ unsafe fn transcode_memory_to_file(
     output_codec: OutputCodec,
     frame_rate: Option<FrameRate>,
 ) -> Result<(), ExportPipelineError> {
-    let mut input_ctx = InputContext::open_memory(input.to_vec(), input_format)?;
+    let mut input_ctx = InputContext::open_memory(input, input_format)?;
     transcode_open_input_to_file(&mut input_ctx, output, output_codec, frame_rate)
 }
 
 unsafe fn transcode_open_input_to_file(
-    input_ctx: &mut InputContext,
+    input_ctx: &mut InputContext<'_>,
     output: &Path,
     output_codec: OutputCodec,
     frame_rate: Option<FrameRate>,
@@ -1132,12 +1133,12 @@ fn media_error(message: &str) -> ExportPipelineError {
     }
 }
 
-struct InputContext {
+struct InputContext<'a> {
     ptr: *mut ffi::AVFormatContext,
-    avio: Option<CustomAvio>,
+    avio: Option<CustomAvio<'a>>,
 }
 
-impl InputContext {
+impl<'a> InputContext<'a> {
     unsafe fn open_file(
         url: &CStr,
         input_format: Option<&str>,
@@ -1152,7 +1153,7 @@ impl InputContext {
     }
 
     unsafe fn open_memory(
-        data: Vec<u8>,
+        data: &'a [u8],
         input_format: Option<&str>,
     ) -> Result<Self, ExportPipelineError> {
         let mut ctx = unsafe { ffi::avformat_alloc_context() };
@@ -1181,7 +1182,7 @@ impl InputContext {
     }
 }
 
-impl Drop for InputContext {
+impl Drop for InputContext<'_> {
     fn drop(&mut self) {
         unsafe {
             ffi::avformat_close_input(&mut self.ptr);
@@ -1551,19 +1552,24 @@ impl Drop for Frame {
     }
 }
 
-struct CustomAvio {
+struct CustomAvio<'a> {
     ctx: *mut ffi::AVIOContext,
     opaque: *mut MemoryInput,
+    _data: PhantomData<&'a [u8]>,
 }
 
-impl CustomAvio {
-    fn new(data: Vec<u8>) -> Result<Self, ExportPipelineError> {
+impl<'a> CustomAvio<'a> {
+    fn new(data: &'a [u8]) -> Result<Self, ExportPipelineError> {
         let buffer_size = 32 * 1024;
         let buffer = unsafe { ffi::av_malloc(buffer_size) as *mut u8 };
         if buffer.is_null() {
             return Err(media_error("av_malloc failed for AVIO buffer"));
         }
-        let opaque = Box::into_raw(Box::new(MemoryInput { data, position: 0 }));
+        let opaque = Box::into_raw(Box::new(MemoryInput {
+            data: data.as_ptr(),
+            len: data.len(),
+            position: 0,
+        }));
         let ctx = unsafe {
             ffi::avio_alloc_context(
                 buffer,
@@ -1582,11 +1588,15 @@ impl CustomAvio {
             }
             return Err(media_error("avio_alloc_context failed"));
         }
-        Ok(Self { ctx, opaque })
+        Ok(Self {
+            ctx,
+            opaque,
+            _data: PhantomData,
+        })
     }
 }
 
-impl Drop for CustomAvio {
+impl Drop for CustomAvio<'_> {
     fn drop(&mut self) {
         unsafe {
             if !self.ctx.is_null() {
@@ -1601,19 +1611,20 @@ impl Drop for CustomAvio {
 }
 
 struct MemoryInput {
-    data: Vec<u8>,
+    data: *const u8,
+    len: usize,
     position: usize,
 }
 
 unsafe extern "C" fn read_memory_packet(opaque: *mut c_void, buf: *mut u8, buf_size: i32) -> i32 {
     let input = unsafe { &mut *(opaque as *mut MemoryInput) };
-    if input.position >= input.data.len() {
+    if input.position >= input.len {
         return AVERROR_EOF;
     }
-    let remaining = input.data.len() - input.position;
+    let remaining = input.len - input.position;
     let len = remaining.min(buf_size as usize);
     unsafe {
-        ptr::copy_nonoverlapping(input.data.as_ptr().add(input.position), buf, len);
+        ptr::copy_nonoverlapping(input.data.add(input.position), buf, len);
     }
     input.position += len;
     len as i32
@@ -1622,18 +1633,18 @@ unsafe extern "C" fn read_memory_packet(opaque: *mut c_void, buf: *mut u8, buf_s
 unsafe extern "C" fn seek_memory(opaque: *mut c_void, offset: i64, whence: i32) -> i64 {
     let input = unsafe { &mut *(opaque as *mut MemoryInput) };
     if whence == ffi::AVSEEK_SIZE as i32 {
-        return input.data.len() as i64;
+        return input.len as i64;
     }
     let base = match whence {
         libc::SEEK_SET => 0_i64,
         libc::SEEK_CUR => input.position as i64,
-        libc::SEEK_END => input.data.len() as i64,
+        libc::SEEK_END => input.len as i64,
         _ => return -1,
     };
     let Some(position) = base.checked_add(offset) else {
         return -1;
     };
-    if position < 0 || position as usize > input.data.len() {
+    if position < 0 || position as usize > input.len {
         return -1;
     }
     input.position = position as usize;

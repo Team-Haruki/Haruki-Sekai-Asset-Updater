@@ -165,7 +165,11 @@ pub async fn post_process_exported_files(
 
     if region.upload.enabled {
         let phase_started = Instant::now();
-        let files = scan_all_files(export_path)?;
+        let files = if scoped_post_process {
+            scoped_upload_files(scoped_files, &summary.generated_files)
+        } else {
+            scan_all_files(export_path)?
+        };
         upload_to_all_storages(
             &app_config.storage,
             region_name,
@@ -190,6 +194,23 @@ pub async fn post_process_exported_files(
     }
 
     Ok(summary)
+}
+
+pub(super) fn scoped_upload_files(
+    scoped_files: &[PathBuf],
+    generated_files: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut files = scoped_files
+        .iter()
+        .chain(generated_files)
+        // Transcoding can remove source USM/ACB/PNG files. Do not schedule stale paths, and do not
+        // discover unrelated files produced by another concurrently running bundle.
+        .filter(|path| path.is_file())
+        .cloned()
+        .collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+    files
 }
 
 pub(super) fn record_phase_ms(target: &mut HashMap<String, u64>, phase: &str, started: Instant) {
@@ -569,7 +590,7 @@ pub(super) async fn process_usm_input_with_metrics(
             phase_started,
         );
         if let Some(video) = streams
-            .iter()
+            .into_iter()
             .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
         {
             let mp4 = export_path.join(format!("{output_name}.mp4"));
@@ -605,7 +626,7 @@ pub(super) async fn process_usm_input_with_metrics(
 
     if matches!(usm_input, UsmProcessingInput::Bytes { .. }) {
         let phase_started = Instant::now();
-        let streams = export_usm_input_to_memory(usm_input, true)?;
+        let mut streams = export_usm_input_to_memory(usm_input, true)?;
         let mut generated = write_usm_streams(export_path, &streams)?;
         add_elapsed_phase_ms(
             &mut output.phase_ms,
@@ -613,51 +634,56 @@ pub(super) async fn process_usm_input_with_metrics(
             phase_started,
         );
 
-        if writes_mp4 {
-            if let Some(video) = streams
+        let video = if writes_mp4 {
+            streams
                 .iter()
-                .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
-            {
-                let mp4 = export_path.join(format!("{output_name}.mp4"));
-                let encode_slot = acquire_media_encode_permit_async(
-                    MediaEncodeKind::Video,
-                    video_encode_concurrency,
-                    cpu_budget,
-                )
-                .await?;
-                record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
-                let phase_started = Instant::now();
-                convert_m2v_bytes_to_mp4_with_backend(
-                    &video.data,
-                    &mp4,
-                    ffmpeg_path,
-                    media_backend,
-                    frame_rate,
-                    retry,
-                )
-                .await?;
-                drop(encode_slot.cpu_permit);
-                drop(encode_slot.permit);
-                add_elapsed_phase_ms(
-                    &mut output.phase_ms,
-                    "post_process.usm.convert_mp4",
-                    phase_started,
-                );
-                generated.push(mp4);
-                if !writes_m2v {
-                    generated.retain(|path| {
-                        !path
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            .map(|ext| ext.eq_ignore_ascii_case("m2v"))
-                            .unwrap_or(false)
-                    });
-                    remove_file_if_exists(&export_path.join(format!("{}.m2v", video.name)))
-                        .map_err(|source| ExportPipelineError::Io {
-                            path: export_path.join(format!("{}.m2v", video.name)),
-                            source,
-                        })?;
-                }
+                .position(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
+                .map(|position| streams.swap_remove(position))
+        } else {
+            None
+        };
+        drop(streams);
+        if let Some(video) = video {
+            let mp4 = export_path.join(format!("{output_name}.mp4"));
+            let encode_slot = acquire_media_encode_permit_async(
+                MediaEncodeKind::Video,
+                video_encode_concurrency,
+                cpu_budget,
+            )
+            .await?;
+            record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
+            let phase_started = Instant::now();
+            convert_m2v_bytes_to_mp4_with_backend(
+                &video.data,
+                &mp4,
+                ffmpeg_path,
+                media_backend,
+                frame_rate,
+                retry,
+            )
+            .await?;
+            drop(encode_slot.cpu_permit);
+            drop(encode_slot.permit);
+            add_elapsed_phase_ms(
+                &mut output.phase_ms,
+                "post_process.usm.convert_mp4",
+                phase_started,
+            );
+            generated.push(mp4);
+            if !writes_m2v {
+                generated.retain(|path| {
+                    !path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.eq_ignore_ascii_case("m2v"))
+                        .unwrap_or(false)
+                });
+                remove_file_if_exists(&export_path.join(format!("{}.m2v", video.name))).map_err(
+                    |source| ExportPipelineError::Io {
+                        path: export_path.join(format!("{}.m2v", video.name)),
+                        source,
+                    },
+                )?;
             }
         }
 
@@ -743,15 +769,16 @@ pub(super) fn export_usm_input_to_memory(
 ) -> Result<Vec<cridecoder::ExtractedUsmStream>, ExportPipelineError> {
     match usm_input {
         UsmProcessingInput::Path(usm_file) => {
-            let usm_bytes = std::fs::read(usm_file).map_err(|source| ExportPipelineError::Io {
-                path: usm_file.to_path_buf(),
-                source,
-            })?;
+            let usm_reader =
+                std::fs::File::open(usm_file).map_err(|source| ExportPipelineError::Io {
+                    path: usm_file.to_path_buf(),
+                    source,
+                })?;
             let fallback_name = usm_file
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("input.usm");
-            codec::export_usm_to_memory(&usm_bytes, fallback_name.as_bytes(), export_audio)
+            codec::export_usm_reader_to_memory(usm_reader, fallback_name.as_bytes(), export_audio)
                 .map_err(ExportPipelineError::from)
         }
         UsmProcessingInput::Bytes {
@@ -1157,8 +1184,15 @@ pub(super) struct AcbPostProcessOutput {
 }
 
 pub(super) struct HcaTrackProcessJob {
-    pub(super) track: cridecoder::ExtractedAcbTrack,
+    pub(super) track: SharedAcbTrack,
     pub(super) output_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct SharedAcbTrack {
+    pub(super) name: String,
+    pub(super) extension: String,
+    pub(super) data: Arc<[u8]>,
 }
 
 #[derive(Debug, Clone)]
@@ -1193,11 +1227,26 @@ pub(super) struct AcbPostProcessOptions<'a> {
 
 #[derive(Debug, Default)]
 pub(super) struct AcbTrackExtractionOutput {
-    pub(super) hca_tracks: Vec<cridecoder::ExtractedAcbTrack>,
+    pub(super) hca_tracks: Vec<SharedAcbTrack>,
     pub(super) generated_files: Vec<PathBuf>,
     pub(super) source_file: Option<PathBuf>,
     pub(super) output_dir: PathBuf,
     pub(super) phase_ms: HashMap<String, u64>,
+}
+
+pub(super) fn share_acb_waveforms(
+    waveforms: Vec<cridecoder::UniqueWaveform>,
+) -> Vec<SharedAcbTrack> {
+    let mut tracks = Vec::new();
+    for waveform in waveforms {
+        let data = Arc::<[u8]>::from(waveform.data);
+        tracks.extend(waveform.cues.into_iter().map(|cue| SharedAcbTrack {
+            name: cue.name,
+            extension: waveform.extension.clone(),
+            data: data.clone(),
+        }));
+    }
+    tracks
 }
 
 pub(super) fn acb_extraction_inputs(
@@ -1277,7 +1326,10 @@ where
     };
 
     let phase_started = Instant::now();
-    let mut hca_tracks = codec::export_acb_to_memory(acb_reader, Some(source_hint))?;
+    let mut hca_tracks = share_acb_waveforms(codec::export_acb_unique_to_memory(
+        acb_reader,
+        Some(source_hint),
+    )?);
     add_elapsed_phase_ms(
         &mut output.phase_ms,
         "post_process.acb.extract_tracks",
@@ -1538,7 +1590,7 @@ pub(super) fn record_usm_video_encode_acquire(
 }
 
 pub(super) fn process_hca_track(
-    track: cridecoder::ExtractedAcbTrack,
+    track: SharedAcbTrack,
     options: &HcaTrackProcessOptions<'_>,
 ) -> Result<HcaTrackProcessOutput, ExportPipelineError> {
     let mut output = HcaTrackProcessOutput::default();

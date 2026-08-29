@@ -33,11 +33,11 @@ pub fn export_acb(input: &Path, output_dir: &Path) -> Result<Option<Vec<String>>
     extract_acb_from_file(input, output_dir).map_err(|err| CodecError::Acb(err.to_string()))
 }
 
-pub fn export_acb_to_memory<R: Read + Seek>(
+pub fn export_acb_unique_to_memory<R: Read + Seek>(
     input: R,
     input_path: Option<&Path>,
-) -> Result<Vec<cridecoder::ExtractedAcbTrack>, CodecError> {
-    cridecoder::extract_acb_to_memory(input, input_path)
+) -> Result<Vec<cridecoder::UniqueWaveform>, CodecError> {
+    cridecoder::extract_acb_unique_to_memory(input, input_path)
         .map_err(|err| CodecError::Acb(err.to_string()))
 }
 
@@ -52,7 +52,15 @@ pub fn export_usm_to_memory(
     fallback_name: &[u8],
     export_audio: bool,
 ) -> Result<Vec<cridecoder::ExtractedUsmStream>, CodecError> {
-    cridecoder::extract_usm_to_memory(Cursor::new(input), fallback_name, None, export_audio)
+    export_usm_reader_to_memory(Cursor::new(input), fallback_name, export_audio)
+}
+
+pub fn export_usm_reader_to_memory<R: Read + Seek>(
+    input: R,
+    fallback_name: &[u8],
+    export_audio: bool,
+) -> Result<Vec<cridecoder::ExtractedUsmStream>, CodecError> {
+    cridecoder::extract_usm_to_memory(input, fallback_name, None, export_audio)
         .map_err(|err| CodecError::Usm(err.to_string()))
 }
 

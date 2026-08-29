@@ -28,16 +28,17 @@ use super::{
     native_skipped_unsupported_asset, parse_payload_bundle, parse_payload_bundle_borrowed,
     playable_container_output_path, post_process_exported_files, prepare_usm_processing_inputs,
     process_usm_file, process_usm_input_with_metrics, run_path_tasks, safe_payload_bundle_path,
-    scan_all_files, select_native_object_readable_assets, should_keep_music_long_hca_track,
-    sort_native_object_reads_for_failure_isolation, text_asset_public_bytes_target,
-    usm_segment_key, write_assetstudio_export_manifest_entry, write_assetstudio_playable_payloads,
-    write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
-    write_native_object_payload, write_native_payload_file, MediaEncodeKind,
-    NativeImageEncodeSettings, NativeObjectExportOptions, NativeObjectExportSummary,
-    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
-    UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse, UsmProcessingInput,
-    ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
-    UNITY_ENGINE_FAST_IMAGE_FORMAT, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+    scan_all_files, scoped_upload_files, select_native_object_readable_assets, share_acb_waveforms,
+    should_keep_music_long_hca_track, sort_native_object_reads_for_failure_isolation,
+    text_asset_public_bytes_target, usm_segment_key, write_assetstudio_export_manifest_entry,
+    write_assetstudio_playable_payloads, write_native_image_payload_final_files,
+    write_native_image_payload_final_files_with_backend, write_native_object_payload,
+    write_native_payload_file, MediaEncodeKind, NativeImageEncodeSettings,
+    NativeObjectExportOptions, NativeObjectExportSummary, NativeSemanticExportPathRegistry,
+    NativeSemanticExportPathState, NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
+    UnityObjectReadResponse, UsmProcessingInput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT, UNITY_ENGINE_FAST_IMAGE_FORMAT,
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
 };
 
 fn sample_path(name: &str) -> Option<PathBuf> {
@@ -327,6 +328,26 @@ fn scan_all_files_finds_nested_files() {
     let mut files = scan_all_files(dir.path()).unwrap();
     files.sort();
     assert_eq!(files, vec![a, b]);
+}
+
+#[test]
+fn scoped_upload_inventory_excludes_unrelated_and_removed_files() {
+    let dir = tempdir().unwrap();
+    let scoped = dir.path().join("scoped.json");
+    let generated = dir.path().join("generated.png");
+    let removed_source = dir.path().join("source.usm");
+    let unrelated = dir.path().join("other-bundle.json");
+    fs::write(&scoped, b"{}").unwrap();
+    fs::write(&generated, b"png").unwrap();
+    fs::write(&unrelated, b"{}").unwrap();
+
+    let files = scoped_upload_files(
+        &[scoped.clone(), removed_source, generated.clone()],
+        std::slice::from_ref(&generated),
+    );
+
+    assert_eq!(files, vec![generated, scoped]);
+    assert!(!files.contains(&unrelated));
 }
 
 #[test]
@@ -1260,6 +1281,28 @@ fn music_long_hca_filter_drops_duplicate_vr_and_screen_tracks() {
     assert!(should_keep_music_long_hca_track("0001", "hca"));
     assert!(!should_keep_music_long_hca_track("0001_VR", "hca"));
     assert!(!should_keep_music_long_hca_track("0001_SCREEN", "HCA"));
+}
+
+#[test]
+fn acb_cues_share_one_waveform_allocation() {
+    let tracks = share_acb_waveforms(vec![cridecoder::UniqueWaveform {
+        extension: "hca".to_string(),
+        subkey: 0,
+        data: vec![1, 2, 3, 4],
+        cues: vec![
+            cridecoder::AcbCueRef {
+                name: "first".to_string(),
+                cue_id: 1,
+            },
+            cridecoder::AcbCueRef {
+                name: "second".to_string(),
+                cue_id: 2,
+            },
+        ],
+    }]);
+
+    assert_eq!(tracks.len(), 2);
+    assert!(Arc::ptr_eq(&tracks[0].data, &tracks[1].data));
 }
 
 #[test]

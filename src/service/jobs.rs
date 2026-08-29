@@ -715,8 +715,6 @@ async fn progress_consumer(
                         format!("downloaded bundle `{bundle}` ({bytes} bytes) in {elapsed_ms} ms"),
                     );
                 }
-                ExecutionProgressUpdate::BundleFetchDetails { .. }
-                | ExecutionProgressUpdate::BundleDeobfuscated { .. } => {}
                 ExecutionProgressUpdate::BundleTempWritten { bundle, elapsed_ms } => {
                     tracing::debug!(
                         job_id = %id,
