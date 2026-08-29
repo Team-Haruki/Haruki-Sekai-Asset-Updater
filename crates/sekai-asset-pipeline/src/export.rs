@@ -5,7 +5,6 @@ use std::path::Path;
 
 use crate::{ExportPipelineError, PipelineOptions};
 
-mod assetstudio;
 mod images;
 mod limits;
 mod media_postprocess;
@@ -14,9 +13,10 @@ mod payload;
 mod selectors;
 mod tasks;
 mod types;
+mod unity;
 
-use self::assetstudio::run_unity_rs_object_export;
 use self::limits::configure_cpu_budget_throttle;
+use self::unity::run_unity_rs_object_export;
 
 pub use self::media_postprocess::{post_process_exported_files, scoped_upload_files};
 pub use self::tasks::scan_all_files;

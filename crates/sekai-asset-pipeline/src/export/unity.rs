@@ -1,3 +1,5 @@
+//! Direct object loading and export through `unity-rs-core`.
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;

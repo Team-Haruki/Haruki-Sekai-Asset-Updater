@@ -15,11 +15,6 @@ use tempfile::tempdir;
 use crate::test_support::empty_unity_fs_bundle;
 use crate::{ExportPipelineError, MediaBackend, RetryOptions as RetryConfig};
 
-use super::super::assetstudio::{
-    assetstudio_object_mode_supported_type, native_read_batch_size_for_assets,
-    native_read_kind_for_asset, native_skipped_unsupported_asset,
-    select_native_object_readable_assets, sort_native_object_reads_for_failure_isolation,
-};
 use super::super::extract_unity_asset_bundle;
 use super::super::limits::{
     acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking,
@@ -30,6 +25,11 @@ use super::super::tasks::{
     UsmProcessingInput,
 };
 use super::super::types::{NativeObjectExportSummary, UnityAssetInfo};
+use super::super::unity::{
+    assetstudio_object_mode_supported_type, native_read_batch_size_for_assets,
+    native_read_kind_for_asset, native_skipped_unsupported_asset,
+    select_native_object_readable_assets, sort_native_object_reads_for_failure_isolation,
+};
 use super::support::*;
 
 #[test]
@@ -267,15 +267,15 @@ fn native_image_format_always_uses_raw_rgba() {
     };
 
     assert_eq!(
-        super::super::assetstudio::native_image_format_for_asset(&asset, "raw_rgba"),
+        super::super::unity::native_image_format_for_asset(&asset, "raw_rgba"),
         "raw_rgba"
     );
     assert_eq!(
-        super::super::assetstudio::native_image_format_for_asset(&asset, ""),
+        super::super::unity::native_image_format_for_asset(&asset, ""),
         "raw_rgba"
     );
     assert_eq!(
-        super::super::assetstudio::native_image_format_for_asset(&asset, "png"),
+        super::super::unity::native_image_format_for_asset(&asset, "png"),
         "raw_rgba"
     );
 }
@@ -317,14 +317,13 @@ fn native_object_read_subchunks_split_non_bmp_images() {
     };
     let assets = vec![&texture, &sprite, &mono];
 
-    let source_chunks =
-        super::super::assetstudio::native_object_read_subchunks(&assets, "raw_rgba");
+    let source_chunks = super::super::unity::native_object_read_subchunks(&assets, "raw_rgba");
     assert_eq!(source_chunks.len(), 3);
     assert_eq!(source_chunks[0][0].path_id, 10);
     assert_eq!(source_chunks[1][0].path_id, 11);
     assert_eq!(source_chunks[2][0].path_id, 12);
 
-    let configured_chunks = super::super::assetstudio::native_object_read_subchunks(&assets, "bmp");
+    let configured_chunks = super::super::unity::native_object_read_subchunks(&assets, "bmp");
     assert_eq!(configured_chunks.len(), 3);
     assert_eq!(configured_chunks[0][0].path_id, 10);
     assert_eq!(configured_chunks[1][0].path_id, 11);
@@ -346,11 +345,11 @@ fn native_image_format_ignores_container_extension() {
     };
 
     assert_eq!(
-        super::super::assetstudio::native_image_format_for_asset(&asset, "raw_rgba"),
+        super::super::unity::native_image_format_for_asset(&asset, "raw_rgba"),
         "raw_rgba"
     );
     assert_eq!(
-        super::super::assetstudio::native_image_format_for_asset(&asset, "jpg"),
+        super::super::unity::native_image_format_for_asset(&asset, "jpg"),
         "raw_rgba"
     );
 }
