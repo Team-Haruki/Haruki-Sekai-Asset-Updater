@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use super::sum_process_tree_cpu_percent;
+use super::limits::sum_process_tree_cpu_percent;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -18,28 +18,41 @@ use crate::core::config::{
 };
 use crate::core::errors::ExportPipelineError;
 
-use super::{
-    acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking,
-    acquire_media_encode_permit, assetstudio_export_type_selector, assetstudio_fix_file_name,
-    assetstudio_object_mode_supported_type, assetstudio_type_selector_matches,
-    convert_native_surrogate_images_to_png, extract_unity_asset_bundle, get_export_group,
-    handle_png_conversion, native_object_output_extension, native_object_output_path,
-    native_read_batch_size_for_assets, native_read_kind_for_asset,
-    native_skipped_unsupported_asset, parse_payload_bundle, parse_payload_bundle_borrowed,
-    playable_container_output_path, post_process_exported_files, prepare_usm_processing_inputs,
-    process_usm_file, process_usm_input_with_metrics, run_path_tasks, safe_payload_bundle_path,
-    scan_all_files, scoped_upload_files, select_native_object_readable_assets, share_acb_waveforms,
-    should_keep_music_long_hca_track, sort_native_object_reads_for_failure_isolation,
-    text_asset_public_bytes_target, usm_segment_key, write_assetstudio_export_manifest_entry,
-    write_assetstudio_playable_payloads, write_native_image_payload_final_files,
-    write_native_image_payload_final_files_with_backend, write_native_object_payload,
-    write_native_payload_file, MediaEncodeKind, NativeImageEncodeSettings,
-    NativeObjectExportOptions, NativeObjectExportSummary, NativeSemanticExportPathRegistry,
-    NativeSemanticExportPathState, NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
-    UnityObjectReadResponse, UsmProcessingInput, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
-    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT, UNITY_ENGINE_FAST_IMAGE_FORMAT,
-    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+use super::assetstudio::{
+    assetstudio_export_type_selector, assetstudio_object_mode_supported_type,
+    assetstudio_type_selector_matches, native_read_batch_size_for_assets,
+    native_read_kind_for_asset, native_skipped_unsupported_asset,
+    select_native_object_readable_assets, sort_native_object_reads_for_failure_isolation,
 };
+use super::images::{convert_native_surrogate_images_to_png, handle_png_conversion};
+use super::limits::{acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking};
+use super::media_postprocess::{
+    acquire_media_encode_permit, post_process_exported_files, process_usm_file,
+    process_usm_input_with_metrics, scoped_upload_files, share_acb_waveforms,
+    should_keep_music_long_hca_track, MediaEncodeKind,
+};
+use super::paths::{
+    assetstudio_fix_file_name, native_object_output_extension, native_object_output_path,
+};
+use super::payload::{
+    parse_payload_bundle, parse_payload_bundle_borrowed, playable_container_output_path,
+    safe_payload_bundle_path, text_asset_public_bytes_target,
+    write_assetstudio_export_manifest_entry, write_assetstudio_playable_payloads,
+    write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
+    write_native_object_payload, write_native_payload_file,
+};
+use super::tasks::{
+    prepare_usm_processing_inputs, run_path_tasks, scan_all_files, usm_segment_key,
+    UsmProcessingInput,
+};
+use super::types::{
+    NativeImageEncodeSettings, NativeObjectExportOptions, NativeObjectExportSummary,
+    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
+    UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse,
+    ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
+    UNITY_ENGINE_FAST_IMAGE_FORMAT, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+};
+use super::{extract_unity_asset_bundle, get_export_group};
 
 fn sample_path(name: &str) -> Option<PathBuf> {
     std::env::var_os("HARUKI_CODEC_SAMPLE_DIR")
@@ -113,7 +126,7 @@ fn processing_config() -> (AppConfig, RegionConfig) {
 fn make_native_rgba_ir_payload(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let stride = width * 4;
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_RGBA_IR_MAGIC);
+    payload.extend_from_slice(super::types::UNITY_ENGINE_RGBA_IR_MAGIC);
     payload.extend_from_slice(&width.to_le_bytes());
     payload.extend_from_slice(&height.to_le_bytes());
     payload.extend_from_slice(&stride.to_le_bytes());
@@ -560,12 +573,15 @@ fn native_image_format_always_uses_raw_rgba() {
     };
 
     assert_eq!(
-        super::native_image_format_for_asset(&asset, "raw_rgba"),
+        super::assetstudio::native_image_format_for_asset(&asset, "raw_rgba"),
         "raw_rgba"
     );
-    assert_eq!(super::native_image_format_for_asset(&asset, ""), "raw_rgba");
     assert_eq!(
-        super::native_image_format_for_asset(&asset, "png"),
+        super::assetstudio::native_image_format_for_asset(&asset, ""),
+        "raw_rgba"
+    );
+    assert_eq!(
+        super::assetstudio::native_image_format_for_asset(&asset, "png"),
         "raw_rgba"
     );
 }
@@ -607,13 +623,13 @@ fn native_object_read_subchunks_split_non_bmp_images() {
     };
     let assets = vec![&texture, &sprite, &mono];
 
-    let source_chunks = super::native_object_read_subchunks(&assets, "raw_rgba");
+    let source_chunks = super::assetstudio::native_object_read_subchunks(&assets, "raw_rgba");
     assert_eq!(source_chunks.len(), 3);
     assert_eq!(source_chunks[0][0].path_id, 10);
     assert_eq!(source_chunks[1][0].path_id, 11);
     assert_eq!(source_chunks[2][0].path_id, 12);
 
-    let configured_chunks = super::native_object_read_subchunks(&assets, "bmp");
+    let configured_chunks = super::assetstudio::native_object_read_subchunks(&assets, "bmp");
     assert_eq!(configured_chunks.len(), 3);
     assert_eq!(configured_chunks[0][0].path_id, 10);
     assert_eq!(configured_chunks[1][0].path_id, 11);
@@ -635,11 +651,11 @@ fn native_image_format_ignores_container_extension() {
     };
 
     assert_eq!(
-        super::native_image_format_for_asset(&asset, "raw_rgba"),
+        super::assetstudio::native_image_format_for_asset(&asset, "raw_rgba"),
         "raw_rgba"
     );
     assert_eq!(
-        super::native_image_format_for_asset(&asset, "jpg"),
+        super::assetstudio::native_image_format_for_asset(&asset, "jpg"),
         "raw_rgba"
     );
 }
@@ -649,7 +665,7 @@ fn native_raw_rgba_payload_is_encoded_to_png() {
     let dir = tempdir().unwrap();
     let target = dir.path().join("normal.png");
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_RGBA_IR_MAGIC);
+    payload.extend_from_slice(super::types::UNITY_ENGINE_RGBA_IR_MAGIC);
     payload.extend_from_slice(&2u32.to_le_bytes());
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&8u32.to_le_bytes());
@@ -1892,7 +1908,7 @@ fn manifest_records_animator_bundle_public_fbx_path() {
         source_file: None,
     };
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&1u32.to_le_bytes());
     let entry_name = "FBX_Animator/model/model.fbx";
     payload.extend_from_slice(&(entry_name.len() as u32).to_le_bytes());
@@ -2102,7 +2118,7 @@ fn native_payload_write_removes_only_byte_identical_legacy_duplicates() {
 
     let registry = NativeSemanticExportPathRegistry::default();
     write_native_payload_file(&base, b"new").unwrap();
-    super::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
+    super::payload::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
 
     assert_eq!(fs::read(&base).unwrap(), b"new");
     assert!(!duplicate.exists());
@@ -2138,7 +2154,8 @@ fn legacy_duplicate_cleanup_preserves_current_job_claims() {
         NativeSemanticPathClaim::Claimed(duplicate.clone())
     );
 
-    let removed = super::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
+    let removed =
+        super::payload::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
 
     assert_eq!(removed, 0);
     assert!(duplicate.exists());
@@ -2550,7 +2567,7 @@ fn assetstudio_type_names_accept_short_and_class_aliases() {
 #[test]
 fn native_payload_bundle_parser_reads_multiple_entries() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&2u32.to_le_bytes());
     payload.extend_from_slice(&("layer_0000.bmp".len() as u32).to_le_bytes());
     payload.extend_from_slice(&3u64.to_le_bytes());
@@ -2572,10 +2589,10 @@ fn native_payload_bundle_parser_reads_multiple_entries() {
 #[test]
 fn native_payload_bundle_parser_reads_v2_header() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
-    payload.extend_from_slice(&super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
+    payload.extend_from_slice(&super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
+    payload.extend_from_slice(&super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION.to_le_bytes());
     payload.extend_from_slice(
-        &(super::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes(),
+        &(super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16).to_le_bytes(),
     );
     payload.extend_from_slice(&2u32.to_le_bytes());
     payload.extend_from_slice(&6u64.to_le_bytes());
@@ -2598,7 +2615,7 @@ fn native_payload_bundle_parser_reads_v2_header() {
 #[test]
 fn native_payload_bundle_parser_reads_legacy_grouped_entries() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&2u32.to_le_bytes());
     payload.extend_from_slice(&("layer_0000.bmp".len() as u32).to_le_bytes());
     payload.extend_from_slice(&3u64.to_le_bytes());
@@ -2621,7 +2638,7 @@ fn native_payload_bundle_parser_reads_legacy_grouped_entries() {
 #[test]
 fn native_payload_bundle_borrowed_parser_reuses_payload_slices() {
     let mut payload = Vec::new();
-    payload.extend_from_slice(super::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
     payload.extend_from_slice(&1u32.to_le_bytes());
     payload.extend_from_slice(&("asset.bin".len() as u32).to_le_bytes());
     payload.extend_from_slice(&4u64.to_le_bytes());

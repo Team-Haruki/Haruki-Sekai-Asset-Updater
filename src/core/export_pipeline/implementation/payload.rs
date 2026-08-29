@@ -1,18 +1,33 @@
-use super::{
-    acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking,
-    assetbundle_typetree_output_path, assetstudio_type_selector_matches, debug,
-    encode_dynamic_image, encode_native_rgba_ir, native_object_output_path, strip_container_prefix,
-    write_encoded_image, BTreeMap, BuildHasher, Cow, Cursor, ExportPipelineError, Hasher,
-    ImageBackendConfig, ImageOutputFormat, ImageReader, Instant, Mutex,
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::hash::{BuildHasher, Hasher};
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Instant;
+
+use image::ImageReader;
+use tracing::debug;
+
+use crate::core::config::{ImageBackendConfig, ImageOutputFormat, RegionConfig};
+use crate::core::errors::ExportPipelineError;
+
+use super::assetstudio::assetstudio_type_selector_matches;
+use super::images::{encode_dynamic_image, encode_native_rgba_ir, write_encoded_image};
+use super::limits::{acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking};
+use super::paths::{
+    assetbundle_typetree_output_path, native_object_output_path, strip_container_prefix,
+};
+use super::types::{
     NativeAssetStudioExportManifestEntry, NativeImageEncodeSettings, NativeInMemoryMediaSource,
     NativeObjectExportOptions, NativePayloadSignature, NativePlayableExport,
     NativePlayableExportObject, NativeSemanticExportClaim, NativeSemanticExportPathRegistry,
-    NativeSemanticExportPathState, NativeSemanticPathClaim, Path, PathBuf, Read, RegionConfig,
-    UnityAssetInfo, UnityObjectReadOutput, Write, ASSETSTUDIO_MANIFEST_APPEND_LOCKS,
-    ASSETSTUDIO_MANIFEST_LOCKS, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
-    UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN,
-    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
-    UNITY_ENGINE_RGBA_IR_HEADER_LEN, UNITY_ENGINE_RGBA_IR_MAGIC,
+    NativeSemanticExportPathState, NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
+    ASSETSTUDIO_MANIFEST_APPEND_LOCKS, ASSETSTUDIO_MANIFEST_LOCKS,
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT, UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION, UNITY_ENGINE_RGBA_IR_HEADER_LEN,
+    UNITY_ENGINE_RGBA_IR_MAGIC,
 };
 
 pub(super) fn write_native_object_payload(

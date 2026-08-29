@@ -1,12 +1,14 @@
+use std::collections::HashMap;
 // Only the `/proc` readers below need this, and they are Linux-only; a macOS
 // build sees an unused import without the gate.
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
+use std::process::Command as StdCommand;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use super::{
-    Arc, Condvar, Duration, ExportPipelineError, HashMap, Instant, Mutex, OnceLock,
-    ResourcesConfig, StdCommand,
-};
+use crate::core::config::ResourcesConfig;
+use crate::core::errors::ExportPipelineError;
 
 pub(super) struct CpuBudgetAcquire {
     pub(super) permit: CpuBudgetPermit,

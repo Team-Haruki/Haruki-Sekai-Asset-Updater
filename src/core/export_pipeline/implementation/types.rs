@@ -1,7 +1,13 @@
-use super::{
-    image_format_extension, Arc, BTreeMap, HashMap, ImageBackendConfig, ImageOutputFormat, Instant,
-    Mutex, OnceLock, Path, PathBuf, RegionConfig, Serialize,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
+
+use serde::Serialize;
+
+use crate::core::config::{ImageBackendConfig, ImageOutputFormat, RegionConfig};
+
+use super::payload::image_format_extension;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub(super) struct UnityAssetInfo {
