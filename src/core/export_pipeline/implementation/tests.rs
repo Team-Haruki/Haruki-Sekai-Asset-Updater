@@ -33,14 +33,16 @@ use super::paths::{
     assetstudio_fix_file_name, native_object_output_extension, native_object_output_path,
     safe_payload_bundle_path,
 };
-use super::payload::{
-    parse_payload_bundle, parse_payload_bundle_borrowed, payload_signature,
-    playable_container_output_path, text_asset_public_bytes_target,
-    write_assetstudio_export_manifest_entry, write_assetstudio_playable_payloads,
+use super::payload::bundle::{parse_payload_bundle, parse_payload_bundle_borrowed};
+use super::payload::dedup::payload_signature;
+use super::payload::image_files::{
     write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
-    write_native_image_surface_final_files_now, write_native_object_payload,
-    write_native_payload_file,
+    write_native_image_surface_final_files_now,
 };
+use super::payload::manifest::write_assetstudio_export_manifest_entry;
+use super::payload::naming::{playable_container_output_path, text_asset_public_bytes_target};
+use super::payload::playable::write_assetstudio_playable_payloads;
+use super::payload::{write_native_object_payload, write_native_payload_file};
 use super::selectors::{assetstudio_export_type_selector, assetstudio_type_selector_matches};
 use super::tasks::{
     prepare_usm_processing_inputs, run_path_tasks, scan_all_files, usm_segment_key,
@@ -2273,7 +2275,7 @@ fn native_payload_write_removes_only_byte_identical_legacy_duplicates() {
 
     let registry = NativeSemanticExportPathRegistry::default();
     write_native_payload_file(&base, b"new").unwrap();
-    super::payload::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
+    super::payload::dedup::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
 
     assert_eq!(fs::read(&base).unwrap(), b"new");
     assert!(!duplicate.exists());
@@ -2310,7 +2312,7 @@ fn legacy_duplicate_cleanup_preserves_current_job_claims() {
     );
 
     let removed =
-        super::payload::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
+        super::payload::dedup::remove_byte_identical_semantic_duplicates(&base, &registry).unwrap();
 
     assert_eq!(removed, 0);
     assert!(duplicate.exists());
