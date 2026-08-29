@@ -14,7 +14,7 @@ use crate::core::errors::ExportPipelineError;
 
 use super::images::{
     decode_image_payload_bytes, encode_dynamic_image, encode_native_rgba_ir,
-    parse_native_rgba_ir_payload, write_encoded_image,
+    parse_native_rgba_ir_payload, write_encoded_image, NativeRgbaIr,
 };
 use super::limits::{acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking};
 use super::paths::{
@@ -23,15 +23,15 @@ use super::paths::{
 };
 use super::selectors::assetstudio_type_selector_matches;
 use super::types::{
-    image_format_extension, NativeAssetStudioExportManifestEntry, NativeImageEncodeSettings,
-    NativeInMemoryMediaSource, NativeObjectExportOptions, NativePayloadSignature,
-    NativePlayableExport, NativePlayableExportObject, NativeSemanticExportClaim,
-    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
-    UnityAssetInfo, UnityObjectReadOutput, ASSETSTUDIO_MANIFEST_APPEND_LOCKS,
-    ASSETSTUDIO_MANIFEST_LOCKS, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
-    UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN,
-    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
-    UNITY_ENGINE_RGBA_IR_MAGIC,
+    image_format_extension, DecodedRgbaSurface, NativeAssetStudioExportManifestEntry,
+    NativeImageEncodeSettings, NativeInMemoryMediaSource, NativeObjectExportOptions,
+    NativePayloadSignature, NativePlayableExport, NativePlayableExportObject,
+    NativeSemanticExportClaim, NativeSemanticExportPathRegistry, NativeSemanticExportPathState,
+    NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
+    ASSETSTUDIO_MANIFEST_APPEND_LOCKS, ASSETSTUDIO_MANIFEST_LOCKS,
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT, UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION, UNITY_ENGINE_RGBA_IR_MAGIC,
 };
 
 pub(super) fn write_native_object_payload(
@@ -62,7 +62,7 @@ pub(super) fn write_native_object_payload(
             target: target.clone(),
             // Deliberate copy: ACB sources outlive the whole export into the media
             // post-process stage, so they must not pin the read-batch bundle.
-            payload: read_output.payload.to_vec(),
+            payload: read_output.payload.bytes().to_vec(),
         });
         return Ok(());
     }
@@ -117,7 +117,7 @@ fn claim_native_payload_target(
         options.region.export.by_category,
         asset,
         read_output.response.payload_kind.as_deref(),
-        &read_output.payload,
+        read_output.payload.bytes(),
     )?
     .unwrap_or(target);
     match path_state.claim_payload(target, asset, read_output) {
@@ -147,24 +147,33 @@ fn write_native_payload_by_kind(
         write_native_image_payload_bundle_final_files_now(
             path_state,
             target,
-            &read_output.payload,
+            read_output.payload.shared_bytes(),
             region,
             image_encode,
         )?
     } else if payload_kind.starts_with("image_array_bundle_")
         || payload_kind == "animator_bundle_fbx"
     {
-        write_payload_bundle(target, &read_output.payload)?
+        write_payload_bundle(target, read_output.payload.bytes())?
     } else if matches!(payload_kind, "image_bmp" | "image_raw_rgba") {
-        write_native_image_payload_final_files_now(
-            path_state,
-            target,
-            &read_output.payload,
-            region,
-            image_encode,
-        )?
+        match read_output.payload.surface() {
+            Some(surface) => write_native_image_surface_final_files_now(
+                path_state,
+                target,
+                surface,
+                region,
+                image_encode,
+            )?,
+            None => write_native_image_payload_final_files_now(
+                path_state,
+                target,
+                read_output.payload.bytes(),
+                region,
+                image_encode,
+            )?,
+        }
     } else {
-        write_native_payload_file(target, &read_output.payload)?;
+        write_native_payload_file(target, read_output.payload.bytes())?;
         vec![target.to_path_buf()]
     };
     if !matches!(
@@ -245,7 +254,7 @@ pub(super) fn write_assetstudio_playable_payloads(
         });
         let mut objects = Vec::with_capacity(entries.len());
         for (asset, read_output) in &entries {
-            let data: sonic_rs::Value = sonic_rs::from_slice(&read_output.payload)
+            let data: sonic_rs::Value = sonic_rs::from_slice(read_output.payload.bytes())
                 .map_err(|source| ExportPipelineError::JsonParse { source })?;
             objects.push(NativePlayableExportObject {
                 name: asset.name.clone(),
@@ -338,7 +347,11 @@ impl NativeSemanticExportPathState {
         asset: &UnityAssetInfo,
         read_output: &UnityObjectReadOutput,
     ) -> NativeSemanticPathClaim {
-        self.claim_with_signature(path, asset, native_payload_signature(&read_output.payload))
+        self.claim_with_signature(
+            path,
+            asset,
+            native_payload_signature(read_output.payload.bytes()),
+        )
     }
 
     pub(super) fn claim_generated_payload(
@@ -521,7 +534,7 @@ pub(super) fn assetstudio_manifest_public_target(
             }
         }
         Some("animator_bundle_fbx") => {
-            let entries = parse_payload_bundle_borrowed(&read_output.payload)?;
+            let entries = parse_payload_bundle_borrowed(read_output.payload.bytes())?;
             let entry_name = entries
                 .iter()
                 .map(|(name, _)| name.as_str())
@@ -735,11 +748,35 @@ fn write_native_image_payload_final_files_with_limits(
     let scratch_bytes = image_payload_scratch_bytes(target, payload)?;
     let _memory_permit =
         acquire_image_memory_permit_blocking(image_memory_limit_bytes, scratch_bytes);
-    let formats = region.export.images.output_formats();
     let raw_rgba = payload
         .starts_with(UNITY_ENGINE_RGBA_IR_MAGIC)
         .then(|| parse_native_rgba_ir_payload(payload, target))
         .transpose()?;
+    encode_image_outputs(
+        target,
+        region,
+        image_backend,
+        path_registry,
+        cpu_budget,
+        raw_rgba.as_ref(),
+        payload,
+    )
+}
+
+/// Encodes one decoded image into every configured output format.
+///
+/// Takes either an RGBA view or the original bytes: a texture arrives already
+/// decoded, while other image kinds still need `image` to parse them.
+fn encode_image_outputs(
+    target: &Path,
+    region: &RegionConfig,
+    image_backend: &ImageBackendConfig,
+    path_registry: &NativeSemanticExportPathRegistry,
+    cpu_budget: Option<usize>,
+    raw_rgba: Option<&NativeRgbaIr<'_>>,
+    payload: &[u8],
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let formats = region.export.images.output_formats();
     let mut image: Option<image::DynamicImage> = None;
     let mut written_files = Vec::with_capacity(formats.len());
 
@@ -750,7 +787,7 @@ fn write_native_image_payload_final_files_with_limits(
                 .map(acquire_cpu_budget_permit_blocking)
                 .transpose()?
                 .map(|guard| guard.permit);
-            if let Some(raw_rgba) = raw_rgba.as_ref() {
+            if let Some(raw_rgba) = raw_rgba {
                 encode_native_rgba_ir(raw_rgba, &output, format, image_backend)?
             } else {
                 let dynamic_image = match image.as_ref() {
@@ -769,6 +806,45 @@ fn write_native_image_payload_final_files_with_limits(
     }
 
     Ok(written_files)
+}
+
+/// Encodes a texture that is already decoded.
+///
+/// The byte path exists for image kinds that arrive encoded; a `Texture2D` or
+/// `Sprite` no longer serialises itself into `HARUKI_RGBAIR_V1` just to be
+/// parsed back here, so its pixels are read where they were decoded.
+pub(super) fn write_native_image_surface_final_files_now(
+    path_state: &mut NativeSemanticExportPathState,
+    target: &Path,
+    surface: &DecodedRgbaSurface,
+    region: &RegionConfig,
+    image_encode: &NativeImageEncodeSettings,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    let started = Instant::now();
+    let _memory_permit =
+        acquire_image_memory_permit_blocking(image_encode.memory_limit_bytes, surface.pixels.len());
+    let row_bytes = surface.width as usize * 4;
+    let raw_rgba = NativeRgbaIr {
+        width: surface.width,
+        height: surface.height,
+        stride: row_bytes,
+        row_bytes,
+        height_usize: surface.height as usize,
+        pixels: &surface.pixels,
+    };
+    let written = encode_image_outputs(
+        target,
+        region,
+        &image_encode.backend,
+        &path_state.registry,
+        image_encode.cpu_budget,
+        Some(&raw_rgba),
+        &[],
+    )?;
+    path_state
+        .image_encode
+        .record(&region.export.images.output_formats(), started);
+    Ok(written)
 }
 
 #[cfg(test)]

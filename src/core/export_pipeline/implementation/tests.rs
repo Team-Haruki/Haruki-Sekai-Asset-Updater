@@ -38,7 +38,8 @@ use super::payload::{
     parse_payload_bundle, parse_payload_bundle_borrowed, playable_container_output_path,
     text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
     write_assetstudio_playable_payloads, write_native_image_payload_final_files,
-    write_native_image_payload_final_files_with_backend, write_native_object_payload,
+    write_native_image_payload_final_files_with_backend,
+    write_native_image_surface_final_files_now, write_native_object_payload,
     write_native_payload_file,
 };
 use super::selectors::{assetstudio_export_type_selector, assetstudio_type_selector_matches};
@@ -47,11 +48,12 @@ use super::tasks::{
     UsmProcessingInput,
 };
 use super::types::{
-    NativeImageEncodeSettings, NativeObjectExportOptions, NativeObjectExportSummary,
-    NativeSemanticExportPathRegistry, NativeSemanticExportPathState, NativeSemanticPathClaim,
-    UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse,
-    ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
-    UNITY_ENGINE_FAST_IMAGE_FORMAT, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+    DecodedRgbaSurface, NativeImageEncodeSettings, NativeObjectExportOptions,
+    NativeObjectExportSummary, NativeObjectPayload, NativeSemanticExportPathRegistry,
+    NativeSemanticExportPathState, NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
+    UnityObjectReadResponse, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS,
+    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT, UNITY_ENGINE_FAST_IMAGE_FORMAT,
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
 };
 use super::{extract_unity_asset_bundle, get_export_group};
 
@@ -685,6 +687,84 @@ fn native_raw_rgba_payload_is_encoded_to_png() {
     assert_eq!(rgba.get_pixel(1, 0).0, [0, 255, 0, 128]);
 }
 
+/// The decoded surface must encode to the same bytes the serialise-and-parse
+/// round trip produced. This is the whole claim of removing that round trip:
+/// the `HARUKI_RGBAIR_V1` form existed to cross a process boundary, not to
+/// change the image.
+#[test]
+fn decoded_surface_encodes_identically_to_the_serialised_round_trip() {
+    let pixels: Vec<u8> = (0..4 * 3 * 4).map(|index| (index % 251) as u8).collect();
+    let (_config, region) = processing_config();
+
+    let via_bytes = tempdir().unwrap();
+    let bytes_target = via_bytes.path().join("image.png");
+    let payload = make_native_rgba_ir_payload(4, 3, &pixels);
+    let written_bytes =
+        write_native_image_payload_final_files(&bytes_target, &payload, &region).unwrap();
+
+    let via_surface = tempdir().unwrap();
+    let surface_target = via_surface.path().join("image.png");
+    let surface = DecodedRgbaSurface {
+        width: 4,
+        height: 3,
+        pixels: pixels.clone(),
+    };
+    let mut path_state =
+        NativeSemanticExportPathState::with_registry(NativeSemanticExportPathRegistry::default());
+    let written_surface = write_native_image_surface_final_files_now(
+        &mut path_state,
+        &surface_target,
+        &surface,
+        &region,
+        &NativeImageEncodeSettings::default(),
+    )
+    .unwrap();
+
+    assert_eq!(written_bytes.len(), 1);
+    assert_eq!(written_surface.len(), 1);
+    assert_eq!(
+        fs::read(&bytes_target).unwrap(),
+        fs::read(&surface_target).unwrap(),
+        "the decoded surface must encode byte-for-byte like the round trip"
+    );
+    assert_eq!(path_state.image_encode.count, 1);
+}
+
+/// `write_rgba_ir` flipped rows while serialising a `Texture2D`; that flip now
+/// happens on the surface instead. Pinning it against the library's own output
+/// keeps the two from drifting.
+#[test]
+fn surface_flip_matches_the_serialised_row_order() {
+    let width = 3u32;
+    let height = 4u32;
+    let pixels: Vec<u8> = (0..(width * height * 4) as usize)
+        .map(|index| (index % 253) as u8)
+        .collect();
+
+    let mut serialised = Vec::new();
+    unity_rs_core::texture::write_rgba_ir(
+        &unity_rs_core::texture::RgbaImage {
+            width,
+            height,
+            pixels: pixels.clone(),
+        },
+        &mut serialised,
+    )
+    .unwrap();
+
+    let mut surface = DecodedRgbaSurface {
+        width,
+        height,
+        pixels,
+    };
+    surface.flip_vertically();
+
+    assert_eq!(
+        &serialised[super::types::UNITY_ENGINE_RGBA_IR_HEADER_LEN..],
+        surface.pixels.as_slice()
+    );
+}
+
 #[test]
 fn native_surrogate_bmp_is_converted_to_png() {
     let dir = tempdir().unwrap();
@@ -943,7 +1023,7 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
             error: None,
             duration_ms: None,
         },
-        payload: bytes::Bytes::from_static(b"acb!"),
+        payload: NativeObjectPayload::Bytes(bytes::Bytes::from_static(b"acb!")),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1004,7 +1084,7 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
             error: None,
             duration_ms: None,
         },
-        payload: bytes::Bytes::from_static(b"score"),
+        payload: NativeObjectPayload::Bytes(bytes::Bytes::from_static(b"score")),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1073,7 +1153,7 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
             error: None,
             duration_ms: None,
         },
-        payload: bytes::Bytes::from_static(b"usm!"),
+        payload: NativeObjectPayload::Bytes(bytes::Bytes::from_static(b"usm!")),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -1871,7 +1951,7 @@ fn manifest_records_native_surrogate_image_public_png_path() {
             error: None,
             duration_ms: None,
         },
-        payload: bytes::Bytes::new(),
+        payload: NativeObjectPayload::Bytes(bytes::Bytes::new()),
     };
 
     write_assetstudio_export_manifest_entry(dir.path(), &target, &asset, &read_output).unwrap();
@@ -2377,7 +2457,9 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
             error: None,
             duration_ms: None,
         },
-        payload: bytes::Bytes::from_static(br#"{"m_Name":"004026_shiho01"}"#),
+        payload: NativeObjectPayload::Bytes(bytes::Bytes::from_static(
+            br#"{"m_Name":"004026_shiho01"}"#,
+        )),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
@@ -2440,11 +2522,12 @@ fn native_object_export_keeps_distinct_semantic_duplicates() {
             error: None,
             duration_ms: None,
         },
-        payload: bytes::Bytes::from_static(br#"{"m_GameObject":1}"#),
+        payload: NativeObjectPayload::Bytes(bytes::Bytes::from_static(br#"{"m_GameObject":1}"#)),
     };
 
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
-    read_output.payload = bytes::Bytes::from_static(br#"{"m_GameObject":2}"#);
+    read_output.payload =
+        NativeObjectPayload::Bytes(bytes::Bytes::from_static(br#"{"m_GameObject":2}"#));
     write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
 
     let first = dir

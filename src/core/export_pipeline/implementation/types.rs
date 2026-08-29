@@ -40,7 +40,96 @@ pub(super) struct UnityObjectReadResponse {
 #[derive(Debug, Clone)]
 pub(super) struct UnityObjectReadOutput {
     pub(super) response: UnityObjectReadResponse,
-    pub(super) payload: bytes::Bytes,
+    pub(super) payload: NativeObjectPayload,
+}
+
+/// What reading one object produced.
+///
+/// Decoded textures used to be serialised into the `HARUKI_RGBAIR_V1` byte form
+/// right here and parsed back a few calls later. That byte form exists because
+/// the decoder once ran in a separate process; both ends now sit in the same
+/// call tree, so a decoded surface travels as itself and the encoder reads its
+/// pixels in place.
+#[derive(Debug, Clone)]
+pub(super) enum NativeObjectPayload {
+    Bytes(bytes::Bytes),
+    Rgba(Box<DecodedRgbaSurface>),
+}
+
+/// Tightly packed RGBA8 rows, already in display order.
+///
+/// The row flip that `write_rgba_ir` performed while serialising is applied
+/// when the surface is built, so everything downstream sees one row order.
+#[derive(Debug, Clone)]
+pub(super) struct DecodedRgbaSurface {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) pixels: Vec<u8>,
+}
+
+impl NativeObjectPayload {
+    /// The payload as bytes. A decoded surface has none -- callers that reach
+    /// for bytes are handling a kind that never produces one.
+    pub(super) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Bytes(bytes) => bytes,
+            Self::Rgba(_) => &[],
+        }
+    }
+
+    /// The refcounted handle, for parsers whose entries borrow from it.
+    pub(super) fn shared_bytes(&self) -> &bytes::Bytes {
+        static EMPTY: bytes::Bytes = bytes::Bytes::from_static(&[]);
+        match self {
+            Self::Bytes(bytes) => bytes,
+            Self::Rgba(_) => &EMPTY,
+        }
+    }
+
+    pub(super) fn surface(&self) -> Option<&DecodedRgbaSurface> {
+        match self {
+            Self::Bytes(_) => None,
+            Self::Rgba(surface) => Some(surface),
+        }
+    }
+
+    /// Size for telemetry: the encoded bytes, or the decoded pixel buffer.
+    pub(super) fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Rgba(surface) => surface.pixels.len(),
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl From<Vec<u8>> for NativeObjectPayload {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Bytes(bytes.into())
+    }
+}
+
+impl DecodedRgbaSurface {
+    /// Flips rows in place, which is what serialising used to do on the way
+    /// out. Done with a scratch row rather than a second full buffer.
+    pub(super) fn flip_vertically(&mut self) {
+        let row_bytes = self.width as usize * 4;
+        if row_bytes == 0 || self.height < 2 {
+            return;
+        }
+        let mut scratch = vec![0u8; row_bytes];
+        let height = self.height as usize;
+        for row in 0..height / 2 {
+            let top = row * row_bytes;
+            let bottom = (height - 1 - row) * row_bytes;
+            scratch.copy_from_slice(&self.pixels[top..top + row_bytes]);
+            self.pixels.copy_within(bottom..bottom + row_bytes, top);
+            self.pixels[bottom..bottom + row_bytes].copy_from_slice(&scratch);
+        }
+    }
 }
 
 pub(super) const UNITY_ENGINE_DEFAULT_IMAGE_FORMAT: &str = "raw_rgba";

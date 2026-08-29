@@ -16,10 +16,7 @@ use unity_rs_core::simple_assets::{
 };
 use unity_rs_core::sprite::{SpriteReadLimits, SPRITE_CLASS_ID};
 use unity_rs_core::studio::{Studio, StudioObject};
-use unity_rs_core::texture::{
-    read_texture2d, write_rgba_ir, write_rgba_ir_display_order, TextureReadLimits,
-    TEXTURE_2D_CLASS_ID,
-};
+use unity_rs_core::texture::{read_texture2d, TextureReadLimits, TEXTURE_2D_CLASS_ID};
 use unity_rs_core::texture_array::{
     read_texture2d_array, write_texture2d_array_rgba_bundle, TextureArrayReadLimits,
     TEXTURE_2D_ARRAY_CLASS_ID,
@@ -37,10 +34,11 @@ use super::selectors::{
     normalize_assetstudio_type_name,
 };
 use super::types::{
-    NativeImageEncodeSettings, NativeObjectExportOptions, NativeObjectExportSummary,
-    NativeObjectReadPlanStats, NativeObjectTypeReadStats, NativeSemanticExportPathRegistry,
-    NativeSemanticExportPathState, NativeSkippedObjectRead, UnityAssetInfo, UnityObjectReadOutput,
-    UnityObjectReadResponse, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
+    DecodedRgbaSurface, NativeImageEncodeSettings, NativeObjectExportOptions,
+    NativeObjectExportSummary, NativeObjectPayload, NativeObjectReadPlanStats,
+    NativeObjectTypeReadStats, NativeSemanticExportPathRegistry, NativeSemanticExportPathState,
+    NativeSkippedObjectRead, UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse,
+    UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
 };
 
 pub(super) async fn run_unity_rs_object_export(
@@ -251,161 +249,201 @@ fn read_unity_rs_object(
     } else {
         kind.trim()
     };
-    let (payload, payload_kind, suggested_extension) = match (object.class_id(), normalized) {
-        (49, "auto" | "text_bytes") => (
-            object
-                .read_text_bytes(MAX_PAYLOAD_BYTES as usize)
-                .map_err(unity_rs_error)?,
-            "text_bytes",
-            ".bytes".to_string(),
-        ),
-        (TEXTURE_2D_CLASS_ID, "auto" | "image") => {
-            require_raw_rgba(image_format, "Texture2D")?;
-            let limits = TextureReadLimits {
-                maximum_payload_bytes: MAX_PAYLOAD_BYTES,
-                maximum_output_bytes: MAX_PAYLOAD_BYTES.saturating_sub(36),
-                ..TextureReadLimits::default()
-            };
-            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
-            let texture =
-                read_texture2d(studio.collection(), loaded, object.object_index(), limits)
-                    .map_err(unity_rs_error)?;
-            if texture.data.is_empty() {
-                // Unity legitimately serializes empty dynamic-font atlases and fills them at
-                // runtime. There is no image to encode, but retaining the complete object keeps
-                // an `all` export lossless and avoids misclassifying the placeholder as a decoder
-                // failure.
-                (
-                    object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
-                    "raw",
-                    ".dat".to_string(),
-                )
-            } else {
-                let image = texture
-                    .decode_mip_rgba8(0, limits)
-                    .map_err(unity_rs_error)?;
-                let mut payload = Vec::new();
-                write_rgba_ir(&image, &mut payload).map_err(unity_rs_error)?;
-                (payload, "image_raw_rgba", ".rgba".to_string())
+    let (payload, payload_kind, suggested_extension): (NativeObjectPayload, &str, String) =
+        match (object.class_id(), normalized) {
+            (49, "auto" | "text_bytes") => (
+                object
+                    .read_text_bytes(MAX_PAYLOAD_BYTES as usize)
+                    .map_err(unity_rs_error)?
+                    .into(),
+                "text_bytes",
+                ".bytes".to_string(),
+            ),
+            (TEXTURE_2D_CLASS_ID, "auto" | "image") => {
+                require_raw_rgba(image_format, "Texture2D")?;
+                let limits = TextureReadLimits {
+                    maximum_payload_bytes: MAX_PAYLOAD_BYTES,
+                    maximum_output_bytes: MAX_PAYLOAD_BYTES.saturating_sub(36),
+                    ..TextureReadLimits::default()
+                };
+                let loaded = &studio.collection().serialized_files()[object.file_index()].file;
+                let texture =
+                    read_texture2d(studio.collection(), loaded, object.object_index(), limits)
+                        .map_err(unity_rs_error)?;
+                if texture.data.is_empty() {
+                    // Unity legitimately serializes empty dynamic-font atlases and fills them at
+                    // runtime. There is no image to encode, but retaining the complete object keeps
+                    // an `all` export lossless and avoids misclassifying the placeholder as a decoder
+                    // failure.
+                    (
+                        object
+                            .read_raw(MAX_PAYLOAD_BYTES)
+                            .map_err(unity_rs_error)?
+                            .into(),
+                        "raw",
+                        ".dat".to_string(),
+                    )
+                } else {
+                    let image = texture
+                        .decode_mip_rgba8(0, limits)
+                        .map_err(unity_rs_error)?;
+                    let mut surface = DecodedRgbaSurface {
+                        width: image.width,
+                        height: image.height,
+                        pixels: image.pixels,
+                    };
+                    surface.flip_vertically();
+                    (
+                        NativeObjectPayload::Rgba(Box::new(surface)),
+                        "image_raw_rgba",
+                        ".rgba".to_string(),
+                    )
+                }
             }
-        }
-        (TEXTURE_2D_ARRAY_CLASS_ID, "auto" | "image" | "image_archive") => {
-            require_raw_rgba(image_format, "Texture2DArray")?;
-            let limits = TextureArrayReadLimits {
-                maximum_payload_bytes: MAX_PAYLOAD_BYTES,
-                maximum_output_bytes: MAX_PAYLOAD_BYTES,
-                maximum_bundle_bytes: MAX_PAYLOAD_BYTES,
-                ..TextureArrayReadLimits::default()
-            };
-            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
-            let texture =
-                read_texture2d_array(studio.collection(), loaded, object.object_index(), limits)
-                    .map_err(unity_rs_error)?;
-            let mut payload = Vec::new();
-            write_texture2d_array_rgba_bundle(&texture, limits, &mut payload)
-                .map_err(unity_rs_error)?;
-            (payload, "image_array_bundle_raw_rgba", String::new())
-        }
-        (SPRITE_CLASS_ID, "auto" | "image") => {
-            require_raw_rgba(image_format, "Sprite")?;
-            let image_bytes = MAX_PAYLOAD_BYTES.saturating_sub(36);
-            let sprite_limits = SpriteReadLimits {
-                maximum_output_pixels: image_bytes / 4,
-                maximum_output_bytes: image_bytes,
-                ..SpriteReadLimits::default()
-            };
-            let texture_limits = TextureReadLimits {
-                maximum_payload_bytes: MAX_PAYLOAD_BYTES,
-                maximum_output_bytes: image_bytes,
-                ..TextureReadLimits::default()
-            };
-            let image = object
-                .decode_sprite(sprite_limits, texture_limits)
-                .map_err(unity_rs_error)?;
-            let mut payload = Vec::new();
-            write_rgba_ir_display_order(&image, &mut payload).map_err(unity_rs_error)?;
-            (payload, "image_raw_rgba", ".rgba".to_string())
-        }
-        (SHADER_CLASS_ID, "auto" | "shader" | "text") => (
-            object
-                .read_shader_text(MAX_PAYLOAD_BYTES)
-                .map_err(unity_rs_error)?,
-            "shader_text",
-            ".shader".to_string(),
-        ),
-        (unity_rs_core::mesh::MESH_CLASS_ID, "auto" | "mesh" | "obj") => (
-            object
-                .read_mesh_obj(MeshReadLimits {
+            (TEXTURE_2D_ARRAY_CLASS_ID, "auto" | "image" | "image_archive") => {
+                require_raw_rgba(image_format, "Texture2DArray")?;
+                let limits = TextureArrayReadLimits {
+                    maximum_payload_bytes: MAX_PAYLOAD_BYTES,
                     maximum_output_bytes: MAX_PAYLOAD_BYTES,
-                    ..MeshReadLimits::default()
-                })
-                .map_err(unity_rs_error)?,
-            "mesh_obj",
-            ".obj".to_string(),
-        ),
-        (MONO_BEHAVIOUR_CLASS_ID, "auto" | "typetree_json") => {
-            let loaded = &studio.collection().serialized_files()[object.file_index()].file;
-            let limits = MonoBehaviourReadLimits {
-                maximum_json_bytes: MAX_PAYLOAD_BYTES as usize,
-                ..MonoBehaviourReadLimits::default()
-            };
-            match read_mono_behaviour_json(loaded, object.object_index(), false, limits) {
-                Ok(json) => (json.into_bytes(), "typetree_json", ".json".to_string()),
-                Err(unity_rs_core::Error::Unsupported(_)) => (
-                    object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
-                    "raw",
-                    ".dat".to_string(),
-                ),
-                Err(error) => return Err(unity_rs_error(error)),
-            }
-        }
-        (AUDIO_CLIP_CLASS_ID, "auto" | "audio" | "raw") => {
-            let simple = object
-                .read_audio_clip(SimpleAssetReadLimits::default())
+                    maximum_bundle_bytes: MAX_PAYLOAD_BYTES,
+                    ..TextureArrayReadLimits::default()
+                };
+                let loaded = &studio.collection().serialized_files()[object.file_index()].file;
+                let texture = read_texture2d_array(
+                    studio.collection(),
+                    loaded,
+                    object.object_index(),
+                    limits,
+                )
                 .map_err(unity_rs_error)?;
-            let extension = simple.raw_extension;
-            let payload = simple
-                .payload
-                .read_to_vec(MAX_PAYLOAD_BYTES)
-                .map_err(unity_rs_error)?;
-            (payload, "audio_raw", extension)
-        }
-        (VIDEO_CLIP_CLASS_ID, "auto" | "video" | "raw") => read_simple_asset(
-            object.read_video_clip(SimpleAssetReadLimits::default()),
-            MAX_PAYLOAD_BYTES,
-        )?,
-        (MOVIE_TEXTURE_CLASS_ID, "auto" | "video" | "raw") => read_simple_asset(
-            object.read_movie_texture(SimpleAssetReadLimits::default()),
-            MAX_PAYLOAD_BYTES,
-        )?,
-        (FONT_CLASS_ID, "auto" | "font" | "raw") => read_simple_asset(
-            object.read_font(SimpleAssetReadLimits::default()),
-            MAX_PAYLOAD_BYTES,
-        )?,
-        (_, "raw") => (
-            object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
-            "raw",
-            ".dat".to_string(),
-        ),
-        (_, "auto" | "typetree_json") => {
-            match object.read_type_tree_json(false, MAX_PAYLOAD_BYTES as usize) {
-                Ok(payload) => (payload, "typetree_json", ".json".to_string()),
-                Err(_) => (
-                    object.read_raw(MAX_PAYLOAD_BYTES).map_err(unity_rs_error)?,
-                    "raw",
-                    ".dat".to_string(),
-                ),
+                let mut payload = Vec::new();
+                write_texture2d_array_rgba_bundle(&texture, limits, &mut payload)
+                    .map_err(unity_rs_error)?;
+                (payload.into(), "image_array_bundle_raw_rgba", String::new())
             }
-        }
-        _ => {
-            return Err(ExportPipelineError::UnityRs {
-                message: format!(
-                    "requested kind `{normalized}` is unsupported for {}",
-                    asset.asset_type.as_deref().unwrap_or("unknown object")
-                ),
-            });
-        }
-    };
+            (SPRITE_CLASS_ID, "auto" | "image") => {
+                require_raw_rgba(image_format, "Sprite")?;
+                let image_bytes = MAX_PAYLOAD_BYTES.saturating_sub(36);
+                let sprite_limits = SpriteReadLimits {
+                    maximum_output_pixels: image_bytes / 4,
+                    maximum_output_bytes: image_bytes,
+                    ..SpriteReadLimits::default()
+                };
+                let texture_limits = TextureReadLimits {
+                    maximum_payload_bytes: MAX_PAYLOAD_BYTES,
+                    maximum_output_bytes: image_bytes,
+                    ..TextureReadLimits::default()
+                };
+                let image = object
+                    .decode_sprite(sprite_limits, texture_limits)
+                    .map_err(unity_rs_error)?;
+                // Sprite cropping already flipped these rows, which is why this
+                // path used `write_rgba_ir_display_order`; no second flip.
+                (
+                    NativeObjectPayload::Rgba(Box::new(DecodedRgbaSurface {
+                        width: image.width,
+                        height: image.height,
+                        pixels: image.pixels,
+                    })),
+                    "image_raw_rgba",
+                    ".rgba".to_string(),
+                )
+            }
+            (SHADER_CLASS_ID, "auto" | "shader" | "text") => (
+                object
+                    .read_shader_text(MAX_PAYLOAD_BYTES)
+                    .map_err(unity_rs_error)?
+                    .into(),
+                "shader_text",
+                ".shader".to_string(),
+            ),
+            (unity_rs_core::mesh::MESH_CLASS_ID, "auto" | "mesh" | "obj") => (
+                object
+                    .read_mesh_obj(MeshReadLimits {
+                        maximum_output_bytes: MAX_PAYLOAD_BYTES,
+                        ..MeshReadLimits::default()
+                    })
+                    .map_err(unity_rs_error)?
+                    .into(),
+                "mesh_obj",
+                ".obj".to_string(),
+            ),
+            (MONO_BEHAVIOUR_CLASS_ID, "auto" | "typetree_json") => {
+                let loaded = &studio.collection().serialized_files()[object.file_index()].file;
+                let limits = MonoBehaviourReadLimits {
+                    maximum_json_bytes: MAX_PAYLOAD_BYTES as usize,
+                    ..MonoBehaviourReadLimits::default()
+                };
+                match read_mono_behaviour_json(loaded, object.object_index(), false, limits) {
+                    Ok(json) => (
+                        json.into_bytes().into(),
+                        "typetree_json",
+                        ".json".to_string(),
+                    ),
+                    Err(unity_rs_core::Error::Unsupported(_)) => (
+                        object
+                            .read_raw(MAX_PAYLOAD_BYTES)
+                            .map_err(unity_rs_error)?
+                            .into(),
+                        "raw",
+                        ".dat".to_string(),
+                    ),
+                    Err(error) => return Err(unity_rs_error(error)),
+                }
+            }
+            (AUDIO_CLIP_CLASS_ID, "auto" | "audio" | "raw") => {
+                let simple = object
+                    .read_audio_clip(SimpleAssetReadLimits::default())
+                    .map_err(unity_rs_error)?;
+                let extension = simple.raw_extension;
+                let payload = simple
+                    .payload
+                    .read_to_vec(MAX_PAYLOAD_BYTES)
+                    .map_err(unity_rs_error)?;
+                (payload.into(), "audio_raw", extension)
+            }
+            (VIDEO_CLIP_CLASS_ID, "auto" | "video" | "raw") => read_simple_asset(
+                object.read_video_clip(SimpleAssetReadLimits::default()),
+                MAX_PAYLOAD_BYTES,
+            )?,
+            (MOVIE_TEXTURE_CLASS_ID, "auto" | "video" | "raw") => read_simple_asset(
+                object.read_movie_texture(SimpleAssetReadLimits::default()),
+                MAX_PAYLOAD_BYTES,
+            )?,
+            (FONT_CLASS_ID, "auto" | "font" | "raw") => read_simple_asset(
+                object.read_font(SimpleAssetReadLimits::default()),
+                MAX_PAYLOAD_BYTES,
+            )?,
+            (_, "raw") => (
+                object
+                    .read_raw(MAX_PAYLOAD_BYTES)
+                    .map_err(unity_rs_error)?
+                    .into(),
+                "raw",
+                ".dat".to_string(),
+            ),
+            (_, "auto" | "typetree_json") => {
+                match object.read_type_tree_json(false, MAX_PAYLOAD_BYTES as usize) {
+                    Ok(payload) => (payload.into(), "typetree_json", ".json".to_string()),
+                    Err(_) => (
+                        object
+                            .read_raw(MAX_PAYLOAD_BYTES)
+                            .map_err(unity_rs_error)?
+                            .into(),
+                        "raw",
+                        ".dat".to_string(),
+                    ),
+                }
+            }
+            _ => {
+                return Err(ExportPipelineError::UnityRs {
+                    message: format!(
+                        "requested kind `{normalized}` is unsupported for {}",
+                        asset.asset_type.as_deref().unwrap_or("unknown object")
+                    ),
+                });
+            }
+        };
     let duration_ms = elapsed_millis(started);
     Ok(UnityObjectReadOutput {
         response: UnityObjectReadResponse {
@@ -419,20 +457,24 @@ fn read_unity_rs_object(
             error: None,
             duration_ms: Some(duration_ms),
         },
-        payload: payload.into(),
+        payload,
     })
 }
 
 fn read_simple_asset(
     result: unity_rs_core::Result<unity_rs_core::simple_assets::SimpleBinaryAsset>,
     maximum_bytes: u64,
-) -> Result<(Vec<u8>, &'static str, String), ExportPipelineError> {
+) -> Result<(NativeObjectPayload, &'static str, String), ExportPipelineError> {
     let simple = result.map_err(unity_rs_error)?;
     let payload = simple
         .payload
         .read_to_vec(maximum_bytes)
         .map_err(unity_rs_error)?;
-    Ok((payload, simple.payload_kind, simple.suggested_extension))
+    Ok((
+        payload.into(),
+        simple.payload_kind,
+        simple.suggested_extension,
+    ))
 }
 
 fn require_raw_rgba(image_format: &str, asset_type: &str) -> Result<(), ExportPipelineError> {
