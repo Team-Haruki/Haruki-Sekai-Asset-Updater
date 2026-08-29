@@ -14,9 +14,7 @@ pub async fn fetch_live_asset_bundle_info(
 ) -> Result<AssetBundleInfo, AssetExecutionError> {
     let prepared = prepare_asset_run(app_config, request)?;
     let mut context = AssetExecutionContext::new(app_config, &prepared, request)?;
-    if context.requires_cookies() {
-        context.fetch_runtime_cookies().await?;
-    }
+    context.fetch_runtime_cookies_if_required().await?;
     context.fetch_asset_bundle_info().await
 }
 
@@ -44,6 +42,15 @@ impl AssetExecutionContext {
             } => cookie_bootstrap_url.as_deref(),
         };
         self.client.bootstrap_cookie(url).await?;
+        Ok(())
+    }
+
+    pub(super) async fn fetch_runtime_cookies_if_required(
+        &mut self,
+    ) -> Result<(), AssetExecutionError> {
+        if self.requires_cookies() {
+            self.fetch_runtime_cookies().await?;
+        }
         Ok(())
     }
 

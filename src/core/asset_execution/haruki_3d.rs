@@ -59,9 +59,7 @@ impl AssetExecutionContext {
     pub(super) async fn prepare_haruki_3d_export_plan(
         &mut self,
     ) -> Result<Option<Haruki3dExportPlan>, AssetExecutionError> {
-        if self.requires_cookies() {
-            self.fetch_runtime_cookies().await?;
-        }
+        self.fetch_runtime_cookies_if_required().await?;
         let info = self.fetch_asset_bundle_info().await?;
         let tasks = self.build_haruki_3d_tasks(&info);
         let dependency_index_path = self.required_haruki_3d_dependency_index_path()?;

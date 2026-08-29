@@ -19,9 +19,17 @@ use super::encode_slots::{
 };
 use super::model::{
     AcbPostProcessOptions, AcbPostProcessOutput, HcaTrackProcessJob, HcaTrackProcessOptions,
-    HcaTrackProcessOutput, SharedAcbTrack,
+    HcaTrackProcessOutput, OwnedAcbPostProcessOptions, SharedAcbTrack,
 };
 use super::timing::{add_elapsed_phase_ms, add_phase_ms, merge_raw_phase_ms};
+
+#[derive(Clone)]
+struct HcaWorkerState {
+    queue: Arc<Mutex<VecDeque<HcaTrackProcessJob>>>,
+    results: Arc<Mutex<Vec<PathBuf>>>,
+    phase_ms: Arc<Mutex<HashMap<String, u64>>>,
+    first_error: Arc<Mutex<Option<ExportPipelineError>>>,
+}
 
 pub(super) fn process_hca_tracks(
     mut hca_tracks: Vec<HcaTrackProcessJob>,
@@ -52,57 +60,23 @@ pub(super) fn process_hca_tracks(
         "media_scheduler.hca_worker_count".to_string(),
         worker_count as u64,
     );
-    let queue = Arc::new(Mutex::new(VecDeque::from(hca_tracks)));
-    let results = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
-    let phase_ms = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
-    let first_error = Arc::new(Mutex::new(None::<ExportPipelineError>));
+    let state = HcaWorkerState {
+        queue: Arc::new(Mutex::new(VecDeque::from(hca_tracks))),
+        results: Arc::new(Mutex::new(Vec::new())),
+        phase_ms: Arc::new(Mutex::new(HashMap::new())),
+        first_error: Arc::new(Mutex::new(None)),
+    };
+    let worker_options = OwnedAcbPostProcessOptions::from(options);
     let mut handles = Vec::with_capacity(worker_count);
 
     for _ in 0..worker_count {
-        let queue = queue.clone();
-        let results = results.clone();
-        let phase_ms = phase_ms.clone();
-        let first_error = first_error.clone();
+        let state = state.clone();
+        let worker_options = worker_options.clone();
         let output_dir_for_error = options.output_dir.to_path_buf();
-        let region = options.region.clone();
-        let ffmpeg_path = options.ffmpeg_path.to_string();
-        let media_backend = options.media_backend;
-        let retry = options.retry.clone();
-        let audio_encode_concurrency = options.audio_encode_concurrency;
-        let cpu_budget = options.cpu_budget;
         let handle = std::thread::Builder::new()
             .name("hca-memory-export".to_string())
             .stack_size(32 * 1024 * 1024)
-            .spawn(move || loop {
-                if first_error.lock().unwrap().is_some() {
-                    break;
-                }
-
-                let next_track = queue.lock().unwrap().pop_front();
-                let Some(track_job) = next_track else {
-                    break;
-                };
-
-                let track_options = HcaTrackProcessOptions {
-                    output_dir: &track_job.output_dir,
-                    region: &region,
-                    ffmpeg_path: &ffmpeg_path,
-                    media_backend,
-                    retry: &retry,
-                    audio_encode_concurrency,
-                    cpu_budget,
-                };
-                match process_hca_track(track_job.track, &track_options) {
-                    Ok(track_output) => {
-                        results.lock().unwrap().extend(track_output.generated_files);
-                        merge_raw_phase_ms(&mut phase_ms.lock().unwrap(), &track_output.phase_ms);
-                    }
-                    Err(err) => {
-                        *first_error.lock().unwrap() = Some(err);
-                        break;
-                    }
-                }
-            })
+            .spawn(move || run_hca_worker(state, worker_options))
             .map_err(|source| ExportPipelineError::Io {
                 path: output_dir_for_error,
                 source,
@@ -119,13 +93,48 @@ pub(super) fn process_hca_tracks(
         }
     }
 
-    if let Some(err) = first_error.lock().unwrap().take() {
+    if let Some(err) = state.first_error.lock().unwrap().take() {
         return Err(err);
     }
     // Workers have joined, so this holds the only reference; move the vec out instead of cloning.
-    output.generated_files = std::mem::take(&mut *results.lock().unwrap());
-    merge_raw_phase_ms(&mut output.phase_ms, &phase_ms.lock().unwrap());
+    output.generated_files = std::mem::take(&mut *state.results.lock().unwrap());
+    merge_raw_phase_ms(&mut output.phase_ms, &state.phase_ms.lock().unwrap());
     Ok(output)
+}
+
+fn run_hca_worker(state: HcaWorkerState, options: OwnedAcbPostProcessOptions) {
+    loop {
+        if state.first_error.lock().unwrap().is_some() {
+            break;
+        }
+
+        let Some(track_job) = state.queue.lock().unwrap().pop_front() else {
+            break;
+        };
+        let track_options = HcaTrackProcessOptions {
+            output_dir: &track_job.output_dir,
+            region: &options.region,
+            ffmpeg_path: &options.ffmpeg_path,
+            media_backend: options.media_backend,
+            retry: &options.retry,
+            audio_encode_concurrency: options.audio_encode_concurrency,
+            cpu_budget: options.cpu_budget,
+        };
+        match process_hca_track(track_job.track, &track_options) {
+            Ok(track_output) => {
+                state
+                    .results
+                    .lock()
+                    .unwrap()
+                    .extend(track_output.generated_files);
+                merge_raw_phase_ms(&mut state.phase_ms.lock().unwrap(), &track_output.phase_ms);
+            }
+            Err(err) => {
+                *state.first_error.lock().unwrap() = Some(err);
+                break;
+            }
+        }
+    }
 }
 
 pub(super) fn process_hca_track_job_on_large_stack(

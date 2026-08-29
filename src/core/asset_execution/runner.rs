@@ -203,9 +203,7 @@ impl AssetExecutionContext {
             },
         );
 
-        if self.requires_cookies() {
-            self.fetch_runtime_cookies().await?;
-        }
+        self.fetch_runtime_cookies_if_required().await?;
 
         self.ensure_not_cancelled(&cancel_flag)?;
         let info = self.fetch_asset_bundle_info().await?;

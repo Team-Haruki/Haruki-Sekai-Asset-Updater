@@ -8,7 +8,11 @@ use std::collections::BTreeMap;
 
 use crate::core::errors::ConfigError;
 
-use super::schema::*;
+use super::schema::{
+    AppConfig, AudioExportConfig, AuthConfig, CryptoConfig, Haruki3dExportConfig, ImageBackend,
+    ImageBackendConfig, ImageExportConfig, MediaBackend, MediaBackendConfig, RegionConfig,
+    VideoExportConfig,
+};
 
 pub(super) fn validate_region_names(config: &AppConfig) -> Result<(), ConfigError> {
     for region_name in config.regions.keys() {

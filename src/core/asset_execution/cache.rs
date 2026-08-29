@@ -155,33 +155,36 @@ impl AssetExecutionContext {
                 }
             }
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                // Compatibility with caches produced before hash sidecars were
-                // introduced. Network payloads carry a four-byte obfuscation
-                // marker that the persistent cache omits.
-                let expected = usize::try_from(task.file_size)
-                    .ok()
-                    .filter(|size| *size > 0);
-                match tokio::fs::metadata(cache_file).await {
-                    Ok(metadata) => {
-                        let body_len = usize::try_from(metadata.len()).ok();
-                        if body_len.is_some_and(|body_len| {
-                            expected.is_none_or(|expected| {
-                                body_len == expected || body_len.checked_add(4) == Some(expected)
-                            })
-                        }) {
-                            BundleCacheEntryStatus::Current
-                        } else {
-                            BundleCacheEntryStatus::Stale
-                        }
-                    }
-                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                        BundleCacheEntryStatus::Missing
-                    }
-                    Err(_) => BundleCacheEntryStatus::Stale,
-                }
+                Self::legacy_bundle_cache_entry_status(cache_file, task.file_size).await
             }
             Err(_) => BundleCacheEntryStatus::Stale,
         }
+    }
+
+    async fn legacy_bundle_cache_entry_status(
+        cache_file: &Path,
+        expected_size: i64,
+    ) -> BundleCacheEntryStatus {
+        // Compatibility with caches produced before hash sidecars were
+        // introduced. Network payloads carry a four-byte obfuscation marker
+        // that the persistent cache omits.
+        match tokio::fs::metadata(cache_file).await {
+            Ok(metadata) if Self::legacy_cache_size_matches(metadata.len(), expected_size) => {
+                BundleCacheEntryStatus::Current
+            }
+            Ok(_) => BundleCacheEntryStatus::Stale,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                BundleCacheEntryStatus::Missing
+            }
+            Err(_) => BundleCacheEntryStatus::Stale,
+        }
+    }
+
+    fn legacy_cache_size_matches(body_len: u64, expected_size: i64) -> bool {
+        let Some(expected) = u64::try_from(expected_size).ok().filter(|size| *size > 0) else {
+            return true;
+        };
+        body_len == expected || body_len.checked_add(4) == Some(expected)
     }
 
     pub(super) async fn atomic_write_bundle_cache_file(

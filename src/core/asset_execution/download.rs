@@ -41,9 +41,7 @@ impl AssetExecutionContext {
             },
         );
 
-        if self.requires_cookies() {
-            self.fetch_runtime_cookies().await?;
-        }
+        self.fetch_runtime_cookies_if_required().await?;
 
         self.ensure_not_cancelled(&cancel_flag)?;
         let info = self.fetch_asset_bundle_info().await?;
@@ -144,52 +142,7 @@ impl AssetExecutionContext {
         let mut completed = 0usize;
         let mut failed = 0usize;
         while let Some(result) = joins.join_next().await {
-            let completed_task = match result {
-                Ok(tuple) => Some(tuple),
-                Err(join_err) => {
-                    // Prefetch sub-task panicked or was aborted: count as failed instead of
-                    // unwinding the run.
-                    failed += 1;
-                    tracing::error!(
-                        region = %self.region_name,
-                        error = %join_err,
-                        "bundle prefetch task panicked or was aborted; counting as failed"
-                    );
-                    None
-                }
-            };
-            if let Some((bundle_path, result)) = completed_task {
-                match result {
-                    Ok(()) => {
-                        completed += 1;
-                        Self::send_progress(
-                            &progress,
-                            ExecutionProgressUpdate::BundleCompleted {
-                                bundle: bundle_path,
-                            },
-                        );
-                    }
-                    Err(AssetExecutionError::Cancelled) => {
-                        return Err(AssetExecutionError::Cancelled);
-                    }
-                    Err(err) => {
-                        failed += 1;
-                        Self::send_progress(
-                            &progress,
-                            ExecutionProgressUpdate::BundleFailed {
-                                bundle: bundle_path.clone(),
-                                error: err.to_string(),
-                            },
-                        );
-                        tracing::warn!(
-                            region = %self.region_name,
-                            bundle = %bundle_path,
-                            error = %err,
-                            "bundle prefetch failed"
-                        );
-                    }
-                }
-            }
+            self.handle_prefetch_result(result, &progress, &mut completed, &mut failed)?;
             if let Some(task) = remaining_tasks.next() {
                 spawn_prefetch_task(&mut joins, task);
             }
@@ -203,6 +156,58 @@ impl AssetExecutionContext {
             updated_record_entries: 0,
             chart_hash_sync_performed: false,
         })
+    }
+
+    fn handle_prefetch_result(
+        &self,
+        joined: Result<(String, Result<(), AssetExecutionError>), tokio::task::JoinError>,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+        completed: &mut usize,
+        failed: &mut usize,
+    ) -> Result<(), AssetExecutionError> {
+        let (bundle_path, result) = match joined {
+            Ok(result) => result,
+            Err(join_err) => {
+                // Prefetch sub-task panicked or was aborted: count as failed instead of
+                // unwinding the run.
+                *failed += 1;
+                tracing::error!(
+                    region = %self.region_name,
+                    error = %join_err,
+                    "bundle prefetch task panicked or was aborted; counting as failed"
+                );
+                return Ok(());
+            }
+        };
+        match result {
+            Ok(()) => {
+                *completed += 1;
+                Self::send_progress(
+                    progress,
+                    ExecutionProgressUpdate::BundleCompleted {
+                        bundle: bundle_path,
+                    },
+                );
+            }
+            Err(AssetExecutionError::Cancelled) => return Err(AssetExecutionError::Cancelled),
+            Err(err) => {
+                *failed += 1;
+                Self::send_progress(
+                    progress,
+                    ExecutionProgressUpdate::BundleFailed {
+                        bundle: bundle_path.clone(),
+                        error: err.to_string(),
+                    },
+                );
+                tracing::warn!(
+                    region = %self.region_name,
+                    bundle = %bundle_path,
+                    error = %err,
+                    "bundle prefetch failed"
+                );
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn download_and_export_bundle_payloads(
