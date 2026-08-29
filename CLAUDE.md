@@ -46,28 +46,36 @@ export PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
 export FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
 ```
 
-Without these the `media-ffi` half of the crate -- `src/core/media/ffi.rs`, the
-largest unsafe surface in the project -- is silently excluded from every local
-check. CI builds Linux, where the container pins FFmpeg 7 already.
+Without these the `media-ffi` half of the shared crate --
+`crates/sekai-asset-pipeline/src/media/ffi.rs`, the largest unsafe surface in
+the project -- is silently excluded from every local check. CI builds Linux,
+where the container pins FFmpeg 7 already.
 
 ## Architecture
 
 **Entry point:** `src/main.rs` -- starts an Axum HTTP server with graceful shutdown.
 
-**Two-layer module structure (flat, no `mod.rs` files):**
+**Cargo workspace with a shared execution kernel and an application package
+(flat modules, no `mod.rs` files):**
+
+- `crates/sekai-asset-pipeline/` -- transport-neutral single-bundle pipeline:
+  - provider/release and manifest contracts
+  - crypto/deobfuscation and path validation
+  - direct `unity-rs-core` export
+  - CRI decoding and FFmpeg media conversion
+  - `process_bundle` and deterministic `ArtifactManifest`
+  - no HTTP, job state, batch scheduler, publishing, download records, Haruki 3D,
+    or Git synchronization
 
 - `src/core.rs` / `src/core/` -- business logic:
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
-  - `asset_execution.rs` -- runs the plan (download, decrypt, export, upload)
-  - `export_pipeline` module -- direct unity-rs export, PNG/WebP encoding, media conversion
-  - `codec.rs` -- wraps the `cridecoder` crate for USM/ACB decoding
-  - `media.rs` -- ffmpeg-based conversions (USM/M2V to MP4, WAV to FLAC/MP3)
+  - `asset_execution.rs` -- application batch runner (download, records, progress, upload)
+  - `export_pipeline` -- compatibility adapter from application config to the shared crate
+  - `codec.rs`, `media.rs`, `retry.rs`, `cleanup.rs` -- compatibility re-exports
   - `storage.rs` -- S3-compatible upload via OpenDAL
   - `git_sync.rs` -- chart hash sync via Git CLI
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection
-  - `retry.rs` -- generic async retry helper
-  - `cleanup.rs` -- workspace/temp directory cleanup
   - `download_records.rs` -- tracks previously downloaded assets
   - `models.rs` / `errors.rs` -- shared types and error enums
 

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Reusable single-bundle primitives for Sekai asset pipelines"
 license = "MIT"
+readme = "README.md"
 publish = false
 
 [dependencies]
