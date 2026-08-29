@@ -25,6 +25,8 @@ pub enum CodecError {
 #[derive(Debug, Error)]
 pub enum ExportPipelineError {
     #[error(transparent)]
+    Contract(#[from] PipelineError),
+    #[error(transparent)]
     Codec(#[from] CodecError),
     #[error("io error at {path}: {source}")]
     Io {
@@ -56,6 +58,8 @@ pub enum ExportPipelineError {
     UnityRs { message: String },
     #[error("input {path} is not a recognized Unity asset or container")]
     UnrecognizedUnityInput { path: PathBuf },
+    #[error("invalid artifact path {path}: {reason}")]
+    InvalidArtifactPath { path: PathBuf, reason: String },
     #[error("failed to serialize Unity export JSON: {source}")]
     JsonSerialize {
         #[source]

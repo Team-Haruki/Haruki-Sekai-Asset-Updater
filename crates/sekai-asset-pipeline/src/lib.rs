@@ -14,8 +14,12 @@ mod manifest;
 mod media;
 mod options;
 mod path;
+mod process;
 mod provider;
 mod retry;
+
+#[cfg(test)]
+mod test_support;
 
 pub use bundle::{Artifact, ArtifactManifest, BundleRequest, BundleResult, ResolvedBundle};
 pub use cleanup::{remove_file_if_exists, remove_file_with_retries};
@@ -51,5 +55,6 @@ pub use options::{
     VideoExportOptions, VideoFormat,
 };
 pub use path::{raw_bundle_output_path, validate_relative_bundle_path};
+pub use process::process_bundle;
 pub use provider::{ProviderEndpoint, ProviderKind, ResolvedRelease};
 pub use retry::{retry_async, retry_sync, RetryPolicy};

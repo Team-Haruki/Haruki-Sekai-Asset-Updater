@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use tempfile::tempdir;
 
+use crate::test_support::empty_unity_fs_bundle;
 use crate::{ExportPipelineError, MediaBackend, RetryOptions as RetryConfig};
 
 use super::super::assetstudio::{
@@ -249,29 +250,6 @@ fn linked_unity_rs_backend_handles_a_valid_empty_container() {
         .unwrap();
 
     assert!(summary.unity_rs_object_read_plan.is_empty());
-}
-
-fn empty_unity_fs_bundle() -> Vec<u8> {
-    const BLOCKS_AND_DIRECTORY_INFO_COMBINED: u32 = 0x40;
-    let mut blocks_info = vec![0_u8; 16];
-    blocks_info.extend_from_slice(&0_i32.to_be_bytes());
-    blocks_info.extend_from_slice(&0_i32.to_be_bytes());
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"UnityFS\0");
-    bytes.extend_from_slice(&6_u32.to_be_bytes());
-    bytes.extend_from_slice(b"5.x.x\0");
-    bytes.extend_from_slice(b"2022.3.21f1\0");
-    let size_position = bytes.len();
-    bytes.extend_from_slice(&0_i64.to_be_bytes());
-    let blocks_info_size = u32::try_from(blocks_info.len()).unwrap();
-    bytes.extend_from_slice(&blocks_info_size.to_be_bytes());
-    bytes.extend_from_slice(&blocks_info_size.to_be_bytes());
-    bytes.extend_from_slice(&BLOCKS_AND_DIRECTORY_INFO_COMBINED.to_be_bytes());
-    bytes.extend_from_slice(&blocks_info);
-    let bundle_size = i64::try_from(bytes.len()).unwrap();
-    bytes[size_position..size_position + 8].copy_from_slice(&bundle_size.to_be_bytes());
-    bytes
 }
 
 #[test]

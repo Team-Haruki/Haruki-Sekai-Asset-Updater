@@ -1,6 +1,11 @@
-use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
-use crate::{AssetCategory, ProviderKind, ResolvedRelease};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{AssetCategory, ExportPipelineError, ProviderKind, ResolvedRelease};
 
 /// One bundle entry resolved from an asset manifest.
 ///
@@ -58,6 +63,104 @@ impl ArtifactManifest {
         });
         self.artifacts.dedup();
     }
+
+    /// Builds a deterministic manifest for files emitted below `output_root`.
+    ///
+    /// Files are resolved before hashing so a symlink cannot make a publisher
+    /// read outside the trusted output tree. Duplicate file paths are hashed
+    /// once, and serialized paths always use `/` separators.
+    pub fn from_files(output_root: &Path, files: &[PathBuf]) -> Result<Self, ExportPipelineError> {
+        if files.is_empty() {
+            return Ok(Self::default());
+        }
+
+        let canonical_root = canonicalize(output_root)?;
+        let mut canonical_files = files
+            .iter()
+            .map(|path| {
+                let candidate = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    output_root.join(path)
+                };
+                let canonical_file = canonicalize(&candidate)?;
+                if !canonical_file.starts_with(&canonical_root) {
+                    return Err(ExportPipelineError::InvalidArtifactPath {
+                        path: candidate,
+                        reason: "path escapes the output root".to_string(),
+                    });
+                }
+                Ok(canonical_file)
+            })
+            .collect::<Result<Vec<_>, ExportPipelineError>>()?;
+        canonical_files.sort();
+        canonical_files.dedup();
+
+        let mut artifacts = Vec::with_capacity(canonical_files.len());
+        for path in canonical_files {
+            let relative = path.strip_prefix(&canonical_root).map_err(|_| {
+                ExportPipelineError::InvalidArtifactPath {
+                    path: path.clone(),
+                    reason: "path escapes the output root".to_string(),
+                }
+            })?;
+            let relative_path = relative
+                .to_str()
+                .ok_or_else(|| ExportPipelineError::InvalidArtifactPath {
+                    path: path.clone(),
+                    reason: "path is not valid UTF-8".to_string(),
+                })?
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            if relative_path.is_empty() {
+                return Err(ExportPipelineError::InvalidArtifactPath {
+                    path,
+                    reason: "artifact must be a file below the output root".to_string(),
+                });
+            }
+
+            let (size, sha256) = hash_file(&path)?;
+            artifacts.push(Artifact {
+                relative_path,
+                size,
+                sha256,
+            });
+        }
+
+        let mut manifest = Self { artifacts };
+        manifest.canonicalize();
+        Ok(manifest)
+    }
+}
+
+fn canonicalize(path: &Path) -> Result<PathBuf, ExportPipelineError> {
+    fs::canonicalize(path).map_err(|source| ExportPipelineError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn hash_file(path: &Path) -> Result<(u64, String), ExportPipelineError> {
+    let mut file = File::open(path).map_err(|source| ExportPipelineError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut digest = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| ExportPipelineError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((size, hex::encode(digest.finalize())))
 }
 
 /// Serializable result of processing one bundle.
@@ -72,6 +175,10 @@ pub struct BundleResult {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::{Artifact, ArtifactManifest, BundleRequest, BundleResult, ResolvedBundle};
     use crate::{AssetCategory, ProviderKind, ResolvedRelease};
 
@@ -148,5 +255,43 @@ mod tests {
             result.artifacts.artifacts[0].relative_path,
             "music/0001.mp3"
         );
+    }
+
+    #[test]
+    fn artifact_manifest_hashes_sorts_and_deduplicates_files() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let first = nested.join("a.txt");
+        let second = dir.path().join("z.txt");
+        fs::write(&first, b"abc").unwrap();
+        fs::write(&second, b"z").unwrap();
+
+        let manifest =
+            ArtifactManifest::from_files(dir.path(), &[second, first.clone(), first]).unwrap();
+
+        assert_eq!(manifest.artifacts.len(), 2);
+        assert_eq!(manifest.artifacts[0].relative_path, "nested/a.txt");
+        assert_eq!(manifest.artifacts[0].size, 3);
+        assert_eq!(
+            manifest.artifacts[0].sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(manifest.artifacts[1].relative_path, "z.txt");
+    }
+
+    #[test]
+    fn artifact_manifest_rejects_files_outside_the_output_root() {
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("outside.txt");
+        fs::write(&file, b"outside").unwrap();
+
+        let error = ArtifactManifest::from_files(root.path(), &[file]).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::ExportPipelineError::InvalidArtifactPath { .. }
+        ));
     }
 }
