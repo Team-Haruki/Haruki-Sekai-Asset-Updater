@@ -1312,4 +1312,77 @@ mod tests {
         assert_eq!(copied.inner.nb_channels, 2);
         assert_eq!(copied.inner.order, stereo.inner.order);
     }
+
+    /// A minimal 16-bit PCM WAV, synthesised so these need no fixture and run
+    /// wherever FFmpeg 7 is -- CI included.
+    fn sine_wav(seconds: f32, sample_rate: u32, channels: u16) -> Vec<u8> {
+        let frames = (seconds * sample_rate as f32) as u32;
+        let data_len = frames * u32::from(channels) * 2;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * u32::from(channels) * 2).to_le_bytes());
+        wav.extend_from_slice(&(channels * 2).to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for frame in 0..frames {
+            let t = frame as f32 / sample_rate as f32;
+            let sample = ((t * 440.0 * std::f32::consts::TAU).sin() * 8000.0) as i16;
+            for _ in 0..channels {
+                wav.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        wav
+    }
+
+    /// The MP3 side of this is covered in `core::media`; FLAC takes a different
+    /// encoder and a different sample format, so it reaches
+    /// `choose_sample_format` and the resampler along a path MP3 never uses.
+    #[test]
+    fn wav_bytes_encode_to_flac() {
+        let dir = tempfile::tempdir().unwrap();
+        let flac = dir.path().join("out.flac");
+
+        convert_wav_bytes_to_flac(&sine_wav(0.25, 44_100, 2), &flac).unwrap();
+
+        let written = std::fs::read(&flac).unwrap();
+        assert!(
+            written.starts_with(b"fLaC"),
+            "not FLAC: {:02x?}",
+            &written[..4]
+        );
+    }
+
+    /// Mono at a rate no MP3 encoder takes natively, so both the resampler and
+    /// the channel-layout conversion have to do real work rather than passing
+    /// the frames through.
+    #[test]
+    fn mono_at_an_unsupported_rate_is_resampled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mp3 = dir.path().join("mono.mp3");
+
+        convert_wav_bytes_to_mp3(&sine_wav(0.25, 11_025, 1), &mp3).unwrap();
+
+        assert!(std::fs::metadata(&mp3).unwrap().len() > 256);
+    }
+
+    /// Input that is not audio must come back as an error, not a panic and not
+    /// a truncated file. This path is all `unsafe`; a wrong turn is a crash in
+    /// production rather than a failed job.
+    #[test]
+    fn garbage_input_is_rejected_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("nope.mp3");
+
+        let error = convert_wav_bytes_to_mp3(b"this is not a wav file at all", &out).unwrap_err();
+
+        assert!(!error.to_string().is_empty());
+        assert!(!out.exists(), "a failed conversion must not leave a file");
+    }
 }
