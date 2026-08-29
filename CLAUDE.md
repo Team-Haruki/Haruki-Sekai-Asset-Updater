@@ -28,11 +28,27 @@ cargo test --test api
 # Pre-commit checks (must all pass)
 cargo fmt
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo test --workspace --all-features
 
 # Docker
 docker compose up --build
 ```
+
+`--all-features` turns on `media-ffi`, which builds `rsmpeg` against the
+installed FFmpeg. It must be FFmpeg 7: rsmpeg's bindings are version-specific,
+and a newer one fails to compile with type errors inside rsmpeg itself rather
+than with anything that names the version. On macOS with Homebrew, the default
+`pkg-config` path resolves to whatever `ffmpeg` points at, so point it at
+`ffmpeg@7` explicitly:
+
+```bash
+export PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
+export FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
+```
+
+Without these the `media-ffi` half of the crate -- `src/core/media/ffi.rs`, the
+largest unsafe surface in the project -- is silently excluded from every local
+check. CI builds Linux, where the container pins FFmpeg 7 already.
 
 ## Architecture
 
