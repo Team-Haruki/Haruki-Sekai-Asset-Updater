@@ -25,11 +25,10 @@ use super::assetstudio::{
 };
 use super::images::{convert_native_surrogate_images_to_png, handle_png_conversion};
 use super::limits::{acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking};
-use super::media_postprocess::{
-    acquire_media_encode_permit, post_process_exported_files, process_usm_file,
-    process_usm_input_with_metrics, scoped_upload_files, share_acb_waveforms,
-    should_keep_music_long_hca_track, MediaEncodeKind,
-};
+use super::media_postprocess::acb::{share_acb_waveforms, should_keep_music_long_hca_track};
+use super::media_postprocess::encode_slots::{acquire_media_encode_permit, MediaEncodeKind};
+use super::media_postprocess::usm::{process_usm_file, process_usm_input_with_metrics};
+use super::media_postprocess::{post_process_exported_files, scoped_upload_files};
 use super::paths::{
     assetstudio_fix_file_name, native_object_output_extension, native_object_output_path,
     safe_payload_bundle_path,
