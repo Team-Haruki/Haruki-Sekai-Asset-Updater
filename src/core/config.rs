@@ -137,89 +137,10 @@ impl AppConfig {
         if self.config_version != CURRENT_CONFIG_VERSION {
             return Err(ConfigError::UnsupportedVersion(self.config_version));
         }
-
-        for region_name in self.regions.keys() {
-            if region_name.to_lowercase() != *region_name {
-                return Err(ConfigError::InvalidRegionName(region_name.clone()));
-            }
-        }
-        if !(0.0..=1.0).contains(&self.resources.cpu.budget_ratio)
-            || self.resources.cpu.budget_ratio == 0.0
-        {
-            return Err(ConfigError::InvalidValue {
-                field: "resources.cpu.budget_ratio".to_string(),
-                value: self.resources.cpu.budget_ratio.to_string(),
-                expected: "a number greater than 0 and less than or equal to 1".to_string(),
-            });
-        }
-        if self.backends.asset_studio.read_batch_size == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "backends.asset_studio.read_batch_size".to_string(),
-                value: "0".to_string(),
-                expected: "a positive integer".to_string(),
-            });
-        }
-        if self.concurrency.media_encode == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "concurrency.media_encode".to_string(),
-                value: "0".to_string(),
-                expected: "a positive integer".to_string(),
-            });
-        }
-        if self.concurrency.audio_encode == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "concurrency.audio_encode".to_string(),
-                value: "0".to_string(),
-                expected: "a positive integer".to_string(),
-            });
-        }
-        if self.concurrency.video_encode == 0 {
-            return Err(ConfigError::InvalidValue {
-                field: "concurrency.video_encode".to_string(),
-                value: "0".to_string(),
-                expected: "a positive integer".to_string(),
-            });
-        }
-        if let Some(image_format) = &self.backends.asset_studio.image_format {
-            validate_asset_studio_image_format(image_format)?;
-        }
-        validate_image_backend(&self.backends.image)?;
-        // Enabling auth without any credential is fail-open (every request authorized). Reject it
-        // so a misconfiguration can't silently disable protection on the mutating endpoints.
-        if self.server.auth.enabled {
-            let has_credential = self
-                .server
-                .auth
-                .bearer_token
-                .as_deref()
-                .is_some_and(|token| !token.is_empty())
-                || self
-                    .server
-                    .auth
-                    .user_agent_prefix
-                    .as_deref()
-                    .is_some_and(|prefix| !prefix.is_empty());
-            if !has_credential {
-                return Err(ConfigError::InvalidValue {
-                    field: "server.auth".to_string(),
-                    value: "enabled=true with no credentials".to_string(),
-                    expected: "a non-empty bearer_token or user_agent_prefix when auth is enabled"
-                        .to_string(),
-                });
-            }
-        }
-        for (region_name, region) in &self.regions {
-            validate_image_export_config(region_name, &region.export.images)?;
-            validate_video_export_config(region_name, &region.export.video)?;
-            validate_audio_export_config(region_name, &region.export.audio)?;
-            validate_haruki_3d_export_config(region_name, &region.export.haruki_3d)?;
-            // Fail fast on bad crypto material / filter regexes for regions that are actually in
-            // use, instead of blowing up mid-job at decrypt or silently dropping a typo'd filter.
-            if region.enabled {
-                validate_region_crypto(region_name, &region.crypto)?;
-                validate_region_filter_regexes(region_name, region)?;
-            }
-        }
+        validate_region_names(self)?;
+        validate_runtime_settings(self)?;
+        validate_auth_config(&self.server.auth)?;
+        validate_regions(self)?;
         validate_asset_studio_read_kinds(&self.backends.asset_studio.read_kinds)?;
         warn_media_fallback_backend_options(&self.backends.media);
 
@@ -249,95 +170,186 @@ impl AppConfig {
     }
 
     fn resolve_env_overrides(&mut self) -> Result<(), ConfigError> {
-        if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
-            self.backends.media.backend = value.parse()?;
-        }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_READ_BATCH_SIZE") {
-            self.backends.asset_studio.read_batch_size =
-                parse_positive_usize("backends.asset_studio.read_batch_size", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_IMAGE_FORMAT") {
-            self.backends.asset_studio.image_format =
-                non_empty_option(normalize_asset_studio_image_format(&value)?);
-        }
-        if let Ok(value) = env::var("HARUKI_ASSET_HTTP_VERSION") {
-            self.server.asset_http_version = value.parse()?;
-        }
-        if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
-            let parsed = parse_positive_usize("concurrency.media_encode", &value)?;
-            self.concurrency.media_encode = parsed;
-            self.concurrency.audio_encode = parsed;
-            self.concurrency.video_encode = parsed;
-        }
-        if let Ok(value) = env::var("HARUKI_AUDIO_ENCODE_CONCURRENCY") {
-            self.concurrency.audio_encode =
-                parse_positive_usize("concurrency.audio_encode", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_VIDEO_ENCODE_CONCURRENCY") {
-            self.concurrency.video_encode =
-                parse_positive_usize("concurrency.video_encode", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_DOWNLOAD_CONCURRENCY") {
-            self.concurrency.download = parse_positive_usize("concurrency.download", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_POST_PROCESS_CONCURRENCY") {
-            self.concurrency.post_process =
-                parse_positive_usize("concurrency.post_process", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_CONCURRENCY_AUTO_TUNE") {
-            self.concurrency.auto_tune = parse_bool_env("concurrency.auto_tune", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_CPU_BUDGET_AUTO") {
-            self.resources.cpu.budget_auto = parse_bool_env("resources.cpu.budget_auto", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_CPU_BUDGET_RATIO") {
-            self.resources.cpu.budget_ratio =
-                parse_cpu_ratio_env("resources.cpu.budget_ratio", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_CPU_RESERVED") {
-            self.resources.cpu.reserved = parse_usize_env("resources.cpu.reserved", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_ENABLED") {
-            self.resources.cpu.throttle.enabled =
-                parse_bool_env("resources.cpu.throttle.enabled", &value)?;
-        }
-        if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS") {
-            self.resources.cpu.throttle.sample_ms =
-                parse_positive_usize("resources.cpu.throttle.sample_ms", &value)? as u64;
-        }
-        if let Ok(value) = env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES") {
-            self.resources.memory.max_in_flight_bundle_bytes =
-                parse_usize_env("resources.memory.max_in_flight_bundle_bytes", &value)?;
-        }
-        resolve_secret_env(
-            "git_sync.chart_hashes.password",
-            &mut self.git_sync.chart_hashes.password,
-        )?;
-
-        for (idx, provider) in self.storage.providers.iter_mut().enumerate() {
-            resolve_secret_env(
-                &format!("storage.providers[{idx}].access_key"),
-                &mut provider.access_key,
-            )?;
-            resolve_secret_env(
-                &format!("storage.providers[{idx}].secret_key"),
-                &mut provider.secret_key,
-            )?;
-        }
-
-        for (region_name, region) in self.regions.iter_mut() {
-            resolve_secret_env(
-                &format!("regions.{region_name}.crypto.aes_key_hex"),
-                &mut region.crypto.aes_key_hex,
-            )?;
-            resolve_secret_env(
-                &format!("regions.{region_name}.crypto.aes_iv_hex"),
-                &mut region.crypto.aes_iv_hex,
-            )?;
-        }
-
-        Ok(())
+        resolve_backend_env_overrides(self)?;
+        resolve_concurrency_env_overrides(self)?;
+        resolve_resource_env_overrides(self)?;
+        resolve_config_secret_env_overrides(self)
     }
+}
+
+fn resolve_backend_env_overrides(config: &mut AppConfig) -> Result<(), ConfigError> {
+    if let Ok(value) = env::var("HARUKI_MEDIA_BACKEND") {
+        config.backends.media.backend = value.parse()?;
+    }
+    if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_READ_BATCH_SIZE") {
+        config.backends.asset_studio.read_batch_size =
+            parse_positive_usize("backends.asset_studio.read_batch_size", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_ASSET_STUDIO_IMAGE_FORMAT") {
+        config.backends.asset_studio.image_format =
+            non_empty_option(normalize_asset_studio_image_format(&value)?);
+    }
+    if let Ok(value) = env::var("HARUKI_ASSET_HTTP_VERSION") {
+        config.server.asset_http_version = value.parse()?;
+    }
+    Ok(())
+}
+
+fn resolve_concurrency_env_overrides(config: &mut AppConfig) -> Result<(), ConfigError> {
+    if let Ok(value) = env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY") {
+        let parsed = parse_positive_usize("concurrency.media_encode", &value)?;
+        config.concurrency.media_encode = parsed;
+        config.concurrency.audio_encode = parsed;
+        config.concurrency.video_encode = parsed;
+    }
+    if let Ok(value) = env::var("HARUKI_AUDIO_ENCODE_CONCURRENCY") {
+        config.concurrency.audio_encode = parse_positive_usize("concurrency.audio_encode", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_VIDEO_ENCODE_CONCURRENCY") {
+        config.concurrency.video_encode = parse_positive_usize("concurrency.video_encode", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_DOWNLOAD_CONCURRENCY") {
+        config.concurrency.download = parse_positive_usize("concurrency.download", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_POST_PROCESS_CONCURRENCY") {
+        config.concurrency.post_process = parse_positive_usize("concurrency.post_process", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_CONCURRENCY_AUTO_TUNE") {
+        config.concurrency.auto_tune = parse_bool_env("concurrency.auto_tune", &value)?;
+    }
+    Ok(())
+}
+
+fn resolve_resource_env_overrides(config: &mut AppConfig) -> Result<(), ConfigError> {
+    if let Ok(value) = env::var("HARUKI_CPU_BUDGET_AUTO") {
+        config.resources.cpu.budget_auto = parse_bool_env("resources.cpu.budget_auto", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_CPU_BUDGET_RATIO") {
+        config.resources.cpu.budget_ratio =
+            parse_cpu_ratio_env("resources.cpu.budget_ratio", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_CPU_RESERVED") {
+        config.resources.cpu.reserved = parse_usize_env("resources.cpu.reserved", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_ENABLED") {
+        config.resources.cpu.throttle.enabled =
+            parse_bool_env("resources.cpu.throttle.enabled", &value)?;
+    }
+    if let Ok(value) = env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS") {
+        config.resources.cpu.throttle.sample_ms =
+            parse_positive_usize("resources.cpu.throttle.sample_ms", &value)? as u64;
+    }
+    if let Ok(value) = env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES") {
+        config.resources.memory.max_in_flight_bundle_bytes =
+            parse_usize_env("resources.memory.max_in_flight_bundle_bytes", &value)?;
+    }
+    Ok(())
+}
+
+fn resolve_config_secret_env_overrides(config: &mut AppConfig) -> Result<(), ConfigError> {
+    resolve_secret_env(
+        "git_sync.chart_hashes.password",
+        &mut config.git_sync.chart_hashes.password,
+    )?;
+    for (idx, provider) in config.storage.providers.iter_mut().enumerate() {
+        resolve_secret_env(
+            &format!("storage.providers[{idx}].access_key"),
+            &mut provider.access_key,
+        )?;
+        resolve_secret_env(
+            &format!("storage.providers[{idx}].secret_key"),
+            &mut provider.secret_key,
+        )?;
+    }
+    for (region_name, region) in &mut config.regions {
+        resolve_secret_env(
+            &format!("regions.{region_name}.crypto.aes_key_hex"),
+            &mut region.crypto.aes_key_hex,
+        )?;
+        resolve_secret_env(
+            &format!("regions.{region_name}.crypto.aes_iv_hex"),
+            &mut region.crypto.aes_iv_hex,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_region_names(config: &AppConfig) -> Result<(), ConfigError> {
+    for region_name in config.regions.keys() {
+        if region_name.to_lowercase() != *region_name {
+            return Err(ConfigError::InvalidRegionName(region_name.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_settings(config: &AppConfig) -> Result<(), ConfigError> {
+    let budget_ratio = config.resources.cpu.budget_ratio;
+    if !(0.0..=1.0).contains(&budget_ratio) || budget_ratio == 0.0 {
+        return Err(ConfigError::InvalidValue {
+            field: "resources.cpu.budget_ratio".to_string(),
+            value: budget_ratio.to_string(),
+            expected: "a number greater than 0 and less than or equal to 1".to_string(),
+        });
+    }
+    validate_positive_setting(
+        "backends.asset_studio.read_batch_size",
+        config.backends.asset_studio.read_batch_size,
+    )?;
+    validate_positive_setting("concurrency.media_encode", config.concurrency.media_encode)?;
+    validate_positive_setting("concurrency.audio_encode", config.concurrency.audio_encode)?;
+    validate_positive_setting("concurrency.video_encode", config.concurrency.video_encode)?;
+    if let Some(image_format) = &config.backends.asset_studio.image_format {
+        validate_asset_studio_image_format(image_format)?;
+    }
+    validate_image_backend(&config.backends.image)
+}
+
+fn validate_positive_setting(field: &str, value: usize) -> Result<(), ConfigError> {
+    if value == 0 {
+        return Err(ConfigError::InvalidValue {
+            field: field.to_string(),
+            value: "0".to_string(),
+            expected: "a positive integer".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_auth_config(auth: &AuthConfig) -> Result<(), ConfigError> {
+    if !auth.enabled {
+        return Ok(());
+    }
+    let has_credential = auth
+        .bearer_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
+        || auth
+            .user_agent_prefix
+            .as_deref()
+            .is_some_and(|prefix| !prefix.is_empty());
+    if has_credential {
+        return Ok(());
+    }
+    Err(ConfigError::InvalidValue {
+        field: "server.auth".to_string(),
+        value: "enabled=true with no credentials".to_string(),
+        expected: "a non-empty bearer_token or user_agent_prefix when auth is enabled".to_string(),
+    })
+}
+
+fn validate_regions(config: &AppConfig) -> Result<(), ConfigError> {
+    for (region_name, region) in &config.regions {
+        validate_image_export_config(region_name, &region.export.images)?;
+        validate_video_export_config(region_name, &region.export.video)?;
+        validate_audio_export_config(region_name, &region.export.audio)?;
+        validate_haruki_3d_export_config(region_name, &region.export.haruki_3d)?;
+        if region.enabled {
+            validate_region_crypto(region_name, &region.crypto)?;
+            validate_region_filter_regexes(region_name, region)?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_secret_env(field: &str, value: &mut Option<String>) -> Result<(), ConfigError> {
@@ -619,32 +631,20 @@ fn descend_env_override_path<'a>(
     segment: &str,
     next_segment: Option<&str>,
 ) -> &'a mut Value {
-    let default_child = || match next_segment.and_then(|next| next.parse::<usize>().ok()) {
-        Some(_) => Value::Sequence(Vec::new()),
-        None => Value::Mapping(Mapping::new()),
-    };
+    let next_is_index = next_segment.is_some_and(|next| next.parse::<usize>().is_ok());
 
     if let Ok(index) = segment.parse::<usize>() {
-        match current {
-            Value::Sequence(items) => {
-                if items.len() <= index {
-                    items.resize_with(index + 1, Value::default);
-                }
-                if matches!(items[index], Value::Null) {
-                    items[index] = default_child();
-                }
-                return &mut items[index];
-            }
-            Value::Null => {
-                let mut items = Vec::new();
+        if matches!(current, Value::Null) {
+            *current = Value::Sequence(Vec::new());
+        }
+        if let Value::Sequence(items) = current {
+            if items.len() <= index {
                 items.resize_with(index + 1, Value::default);
-                items[index] = default_child();
-                *current = Value::Sequence(items);
-                if let Value::Sequence(items) = current {
-                    return &mut items[index];
-                }
             }
-            _ => {}
+            if matches!(items[index], Value::Null) {
+                items[index] = env_override_default_child(next_is_index);
+            }
+            return &mut items[index];
         }
     }
 
@@ -655,10 +655,18 @@ fn descend_env_override_path<'a>(
     if let Value::Mapping(map) = current {
         return map
             .entry(Value::String(segment.to_string()))
-            .or_insert_with(default_child);
+            .or_insert_with(|| env_override_default_child(next_is_index));
     }
 
     unreachable!("current value was normalized into a mapping")
+}
+
+fn env_override_default_child(sequence: bool) -> Value {
+    if sequence {
+        Value::Sequence(Vec::new())
+    } else {
+        Value::Mapping(Mapping::new())
+    }
 }
 
 fn non_empty_option(value: String) -> Option<String> {

@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    assetstudio_export_type_selector, remove_file_if_exists, Arc, BTreeMap, ExportPipelineError,
+    Mutex, Path, PathBuf, RegionConfig, VecDeque, DEFAULT_ASSET_STUDIO_EXPORT_TYPES,
+};
 
 pub(super) fn asset_studio_export_type_list(region: &RegionConfig) -> Vec<String> {
     let mut export_types = Vec::new();
@@ -67,27 +70,7 @@ where
         let handle = std::thread::Builder::new()
             .name(worker_name.clone())
             .stack_size(WORKER_STACK_SIZE)
-            .spawn(move || loop {
-                if first_error.lock().unwrap().is_some() {
-                    break;
-                }
-
-                let next_path = queue.lock().unwrap().pop_front();
-                let Some(path) = next_path else {
-                    break;
-                };
-
-                match task(path) {
-                    Ok(generated) => results.lock().unwrap().push(generated),
-                    Err(err) => {
-                        let mut first = first_error.lock().unwrap();
-                        if first.is_none() {
-                            *first = Some(err);
-                        }
-                        break;
-                    }
-                }
-            })
+            .spawn(move || run_task_worker(queue, results, first_error, task))
             .map_err(|source| ExportPipelineError::WorkerSpawn {
                 worker: worker_name,
                 source,
@@ -110,6 +93,34 @@ where
 
     let mut results = results.lock().unwrap();
     Ok(std::mem::take(&mut *results))
+}
+
+fn run_task_worker<I, T, F>(
+    queue: Arc<Mutex<VecDeque<I>>>,
+    results: Arc<Mutex<Vec<T>>>,
+    first_error: Arc<Mutex<Option<ExportPipelineError>>>,
+    task: Arc<F>,
+) where
+    F: Fn(I) -> Result<T, ExportPipelineError>,
+{
+    loop {
+        if first_error.lock().unwrap().is_some() {
+            return;
+        }
+        let Some(path) = queue.lock().unwrap().pop_front() else {
+            return;
+        };
+        match task(path) {
+            Ok(generated) => results.lock().unwrap().push(generated),
+            Err(err) => {
+                let mut first = first_error.lock().unwrap();
+                if first.is_none() {
+                    *first = Some(err);
+                }
+                return;
+            }
+        }
+    }
 }
 
 pub(super) fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {

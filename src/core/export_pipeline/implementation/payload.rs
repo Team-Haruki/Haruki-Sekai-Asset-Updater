@@ -1,4 +1,19 @@
-use super::*;
+use super::{
+    acquire_cpu_budget_permit_blocking, acquire_image_memory_permit_blocking,
+    assetbundle_typetree_output_path, assetstudio_type_selector_matches, debug,
+    encode_dynamic_image, encode_native_rgba_ir, native_object_output_path, strip_container_prefix,
+    write_encoded_image, BTreeMap, BuildHasher, Cow, Cursor, ExportPipelineError, Hasher,
+    ImageBackendConfig, ImageOutputFormat, ImageReader, Instant, Mutex,
+    NativeAssetStudioExportManifestEntry, NativeImageEncodeSettings, NativeInMemoryMediaSource,
+    NativeObjectExportOptions, NativePayloadSignature, NativePlayableExport,
+    NativePlayableExportObject, NativeSemanticExportClaim, NativeSemanticExportPathRegistry,
+    NativeSemanticExportPathState, NativeSemanticPathClaim, Path, PathBuf, Read, RegionConfig,
+    UnityAssetInfo, UnityObjectReadOutput, Write, ASSETSTUDIO_MANIFEST_APPEND_LOCKS,
+    ASSETSTUDIO_MANIFEST_LOCKS, UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+    UNITY_ENGINE_RGBA_IR_HEADER_LEN, UNITY_ENGINE_RGBA_IR_MAGIC,
+};
 
 pub(super) fn write_native_object_payload(
     options: &NativeObjectExportOptions<'_>,
@@ -12,6 +27,60 @@ pub(super) fn write_native_object_payload(
         return Ok(());
     }
 
+    let Some(target) = claim_native_payload_target(options, path_state, asset, read_output)? else {
+        return Ok(());
+    };
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| ExportPipelineError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let payload_kind = read_output.response.payload_kind.as_deref().unwrap_or("");
+    if is_text_asset_acb_target(asset, &target) {
+        path_state.acb_sources.push(NativeInMemoryMediaSource {
+            target: target.clone(),
+            // Deliberate copy: ACB sources outlive the whole export into the media
+            // post-process stage, so they must not pin the read-batch bundle.
+            payload: read_output.payload.to_vec(),
+        });
+        return Ok(());
+    }
+
+    let written_files = write_native_payload_by_kind(
+        path_state,
+        &target,
+        read_output,
+        options.region,
+        options.image_encode,
+    )?;
+    let manifest_target = if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
+        native_image_surrogate_public_target(&target, options.region)
+    } else {
+        target.clone()
+    };
+    let manifest_written_files = written_files.clone();
+    path_state.written_files.extend(written_files);
+    if is_text_asset_decoded_usm_target(asset, &target, options.region) {
+        return Ok(());
+    }
+    write_native_payload_manifest(
+        options.output_dir,
+        options.region,
+        &manifest_target,
+        manifest_written_files,
+        asset,
+        read_output,
+    )
+}
+
+fn claim_native_payload_target(
+    options: &NativeObjectExportOptions<'_>,
+    path_state: &mut NativeSemanticExportPathState,
+    asset: &UnityAssetInfo,
+    read_output: &UnityObjectReadOutput,
+) -> Result<Option<PathBuf>, ExportPipelineError> {
     let target = native_object_output_path(
         options.output_dir,
         options.export_path,
@@ -32,8 +101,8 @@ pub(super) fn write_native_object_payload(
         &read_output.payload,
     )?
     .unwrap_or(target);
-    let target = match path_state.claim_payload(target, asset, read_output) {
-        NativeSemanticPathClaim::Claimed(target) => target,
+    match path_state.claim_payload(target, asset, read_output) {
+        NativeSemanticPathClaim::Claimed(target) => Ok(Some(target)),
         NativeSemanticPathClaim::Duplicate { existing } => {
             debug!(
                 asset_type = asset.asset_type.as_deref().unwrap_or(""),
@@ -42,91 +111,71 @@ pub(super) fn write_native_object_payload(
                 output_path = %existing.display(),
                 "skipping byte-identical duplicate native assetstudio object"
             );
-            return Ok(());
+            Ok(None)
         }
-    };
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ExportPipelineError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
     }
+}
 
+fn write_native_payload_by_kind(
+    path_state: &mut NativeSemanticExportPathState,
+    target: &Path,
+    read_output: &UnityObjectReadOutput,
+    region: &RegionConfig,
+    image_encode: &NativeImageEncodeSettings,
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
     let payload_kind = read_output.response.payload_kind.as_deref().unwrap_or("");
-    if is_text_asset_acb_target(asset, &target) {
-        path_state.acb_sources.push(NativeInMemoryMediaSource {
-            target: target.clone(),
-            // Deliberate copy: ACB sources outlive the whole export into the media
-            // post-process stage, so they must not pin the read-batch bundle.
-            payload: read_output.payload.to_vec(),
-        });
-        return Ok(());
-    }
-
     let written_files = if payload_kind == "image_array_bundle_raw_rgba" {
         write_native_image_payload_bundle_final_files_now(
             path_state,
-            &target,
+            target,
             &read_output.payload,
-            options.region,
-            options.image_encode,
+            region,
+            image_encode,
         )?
     } else if payload_kind.starts_with("image_array_bundle_")
         || payload_kind == "animator_bundle_fbx"
     {
-        write_payload_bundle(&target, &read_output.payload)?
-    } else if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
+        write_payload_bundle(target, &read_output.payload)?
+    } else if matches!(payload_kind, "image_bmp" | "image_raw_rgba") {
         write_native_image_payload_final_files_now(
             path_state,
-            &target,
+            target,
             &read_output.payload,
-            options.region,
-            options.image_encode,
+            region,
+            image_encode,
         )?
     } else {
-        write_native_payload_file(&target, &read_output.payload)?;
-        vec![target.clone()]
+        write_native_payload_file(target, &read_output.payload)?;
+        vec![target.to_path_buf()]
     };
-    // Image payloads deduplicate inside their own encode-and-write; everything
-    // else is written raw here and still needs the pass.
-    let deduplicated_during_write = payload_kind == "image_bmp"
-        || payload_kind == "image_raw_rgba"
-        || payload_kind == "image_array_bundle_raw_rgba";
-    if !deduplicated_during_write {
+    if !matches!(
+        payload_kind,
+        "image_bmp" | "image_raw_rgba" | "image_array_bundle_raw_rgba"
+    ) {
         for written_file in &written_files {
             remove_byte_identical_semantic_duplicates(written_file, &path_state.registry)?;
         }
     }
-    let manifest_target = if payload_kind == "image_bmp" || payload_kind == "image_raw_rgba" {
-        native_image_surrogate_public_target(&target, options.region)
-    } else {
-        target.clone()
-    };
-    let manifest_written_files = written_files.clone();
-    path_state.written_files.extend(written_files);
-    if is_text_asset_decoded_usm_target(asset, &target, options.region) {
+    Ok(written_files)
+}
+
+fn write_native_payload_manifest(
+    output_dir: &Path,
+    region: &RegionConfig,
+    manifest_target: &Path,
+    written_files: Vec<PathBuf>,
+    asset: &UnityAssetInfo,
+    read_output: &UnityObjectReadOutput,
+) -> Result<(), ExportPipelineError> {
+    let payload_kind = read_output.response.payload_kind.as_deref().unwrap_or("");
+    if payload_kind.starts_with("image_array_bundle_") {
+        for written_file in written_files {
+            let target = native_image_surrogate_public_target(&written_file, region);
+            write_assetstudio_export_manifest_entry(output_dir, &target, asset, read_output)?;
+        }
         return Ok(());
     }
-    if payload_kind.starts_with("image_array_bundle_") {
-        for written_file in manifest_written_files {
-            let manifest_target =
-                native_image_surrogate_public_target(&written_file, options.region);
-            write_assetstudio_export_manifest_entry(
-                options.output_dir,
-                &manifest_target,
-                asset,
-                read_output,
-            )?;
-        }
-    } else {
-        write_assetstudio_export_manifest_entry(
-            options.output_dir,
-            &manifest_target,
-            asset,
-            read_output,
-        )?;
-    }
-    Ok(())
+    write_assetstudio_export_manifest_entry(output_dir, manifest_target, asset, read_output)
 }
 
 pub(super) fn is_playable_mono_typetree(

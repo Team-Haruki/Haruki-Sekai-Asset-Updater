@@ -8,11 +8,11 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::core::asset_execution::{AssetExecutionContext, ExecutionProgressUpdate};
-use crate::core::config::AppConfig;
+use crate::core::config::{AppConfig, RegionConfig};
 use crate::core::errors::{AssetExecutionError, RegionError};
 use crate::core::models::{
-    AssetUpdateMode, AssetUpdateRequest, JobFailure, JobFailureKind, JobPhase, JobProgressEvent,
-    JobSnapshot, JobStatus,
+    AssetUpdateMode, AssetUpdateRequest, ExecutionPlan, ExecutionSummary, JobFailure,
+    JobFailureKind, JobPhase, JobProgressEvent, JobSnapshot, JobStatus,
 };
 use crate::core::pipeline::build_execution_plan;
 use crate::core::regions::{build_url_preview, select_region};
@@ -45,6 +45,21 @@ pub struct JobListSummary {
 
 /// Per-region execution locks, keyed by lowercased region name.
 type RegionLockMap = Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>;
+
+#[derive(Clone)]
+struct PlanningContext {
+    jobs: Arc<RwLock<HashMap<Uuid, JobSnapshot>>>,
+    config: Arc<AppConfig>,
+    cancel_flags: Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>,
+    job_semaphore: Option<Arc<Semaphore>>,
+    region_locks: RegionLockMap,
+    haruki_3d_active: Arc<RwLock<HashSet<String>>>,
+}
+
+enum PlanningDisposition {
+    Stop,
+    Execute,
+}
 
 #[derive(Clone)]
 pub struct JobManager {
@@ -188,274 +203,344 @@ impl JobManager {
     }
 
     fn spawn_planning(&self, id: Uuid, request: AssetUpdateRequest) {
-        let jobs = self.jobs.clone();
-        let config = self.config.clone();
-        let cancel_flags = self.cancel_flags.clone();
-        let job_semaphore = self.job_semaphore.clone();
-        let region_locks = self.region_locks.clone();
-        let haruki_3d_active = self.haruki_3d_active.clone();
-
-        tokio::spawn(async move {
-            let cancel_flag = {
-                let flags = cancel_flags.read().await;
-                flags.get(&id).cloned()
-            };
-
-            {
-                let mut job_map = jobs.write().await;
-                if let Some(job) = job_map.get_mut(&id) {
-                    if job.status == JobStatus::Cancelled {
-                        job.updated_at = chrono::Utc::now();
-                        return;
-                    }
-                    job.status = JobStatus::Planning;
-                    job.message = "preparing region-specific execution context".to_string();
-                    push_progress_event(
-                        job,
-                        JobPhase::Planning,
-                        "preparing region-specific execution context".to_string(),
-                    );
-                    job.updated_at = chrono::Utc::now();
-                }
-            }
-
-            sleep(Duration::from_millis(10)).await;
-
-            if is_cancelled(&cancel_flag) {
-                finish_cancelled(
-                    &jobs,
-                    id,
-                    "job cancelled before planning finished".to_string(),
-                )
-                .await;
-                remove_cancel_flag(&cancel_flags, id).await;
-                return;
-            }
-
-            let planning_message = match build_execution_plan(&config, &request) {
-                Ok(plan) => {
-                    let cancelled_before_execution = {
-                        let mut job_map = jobs.write().await;
-                        if let Some(job) = job_map.get_mut(&id) {
-                            if job.status == JobStatus::Cancelled {
-                                job.updated_at = chrono::Utc::now();
-                                true
-                            } else {
-                                job.preview = Some(plan.url_preview.clone());
-                                job.plan = Some(plan.clone());
-                                if request.dry_run {
-                                    job.status = JobStatus::Completed;
-                                    job.message = "dry-run plan completed".to_string();
-                                    push_progress_event(
-                                        job,
-                                        JobPhase::Completed,
-                                        "dry-run plan completed".to_string(),
-                                    );
-                                    let now = chrono::Utc::now();
-                                    job.updated_at = now;
-                                    info!(
-                                        job_id = %id,
-                                        region = %job.region,
-                                        elapsed_ms = job_elapsed_ms(job, now),
-                                        completed = job.progress.completed_downloads,
-                                        failed = job.progress.failed_downloads,
-                                        total = job.progress.total_downloads,
-                                        "dry-run plan completed"
-                                    );
-                                } else {
-                                    job.status = JobStatus::Running;
-                                    job.message = "job planned; starting execution".to_string();
-                                    push_progress_event(
-                                        job,
-                                        JobPhase::PlanningDownloads,
-                                        "job planned; starting execution".to_string(),
-                                    );
-                                    info!(job_id = %id, region = %job.region, "job planned; starting execution");
-                                    job.updated_at = chrono::Utc::now();
-                                }
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    };
-                    if cancelled_before_execution {
-                        remove_cancel_flag(&cancel_flags, id).await;
-                        return;
-                    }
-                    if request.dry_run {
-                        None
-                    } else {
-                        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-                        let progress_jobs = jobs.clone();
-                        let progress_task =
-                            tokio::spawn(progress_consumer(progress_jobs, id, progress_rx));
-                        let region = match select_region(&config, &request.region) {
-                            Ok(region) => region.clone(),
-                            Err(err) => {
-                                finish_failed(&jobs, id, err.to_string()).await;
-                                remove_cancel_flag(&cancel_flags, id).await;
-                                return;
-                            }
-                        };
-                        let executor = match AssetExecutionContext::new(
-                            &config,
-                            &request.region,
-                            &region,
-                            &request,
-                        ) {
-                            Ok(executor) => executor,
-                            Err(err) => {
-                                finish_failed(&jobs, id, err.to_string()).await;
-                                remove_cancel_flag(&cancel_flags, id).await;
-                                return;
-                            }
-                        };
-                        // Serialize same-region execution (protects the shared download record from
-                        // lost updates) and bound how many heavy pipelines run at once. Take the
-                        // region lock first, then a concurrency permit, so a job doesn't tie up a
-                        // slot while merely waiting on region contention.
-                        let region_lock = acquire_region_lock(&region_locks, &request.region).await;
-                        let _region_guard = region_lock.lock().await;
-                        let _job_permit = match &job_semaphore {
-                            Some(sem) => sem.clone().acquire_owned().await.ok(),
-                            None => None,
-                        };
-                        let execution = async {
-                            match request.mode {
-                                AssetUpdateMode::Update => {
-                                    executor
-                                        .execute(&config, Some(progress_tx), cancel_flag.clone())
-                                        .await
-                                }
-                                AssetUpdateMode::PrefetchRawBundles => {
-                                    executor
-                                        .prefetch_asset_bundles(
-                                            &config,
-                                            Some(progress_tx),
-                                            cancel_flag.clone(),
-                                        )
-                                        .await
-                                }
-                            }
-                        };
-                        let execution_result = timeout(
-                            Duration::from_secs(config.execution.timeout_seconds),
-                            execution,
-                        )
-                        .await;
-                        let _ = progress_task.await;
-                        match execution_result {
-                            Ok(Ok(summary)) => {
-                                if is_cancelled(&cancel_flag) {
-                                    finish_cancelled(&jobs, id, "job cancelled".to_string()).await;
-                                    remove_cancel_flag(&cancel_flags, id).await;
-                                    return;
-                                }
-                                let cancelled_after_execution = {
-                                    let mut job_map = jobs.write().await;
-                                    if let Some(job) = job_map.get_mut(&id) {
-                                        if job.status == JobStatus::Cancelled {
-                                            job.updated_at = chrono::Utc::now();
-                                            true
-                                        } else {
-                                            let completed_downloads = summary.completed_downloads;
-                                            let failed_downloads = summary.failed_downloads;
-                                            let total_downloads = summary.queued_downloads;
-                                            // If every queued download failed, report the run as
-                                            // Failed so monitoring/alerts don't see a green
-                                            // "job completed" for a wholly-failed run.
-                                            let total_failure = total_downloads > 0
-                                                && completed_downloads == 0
-                                                && failed_downloads > 0;
-                                            job.execution = Some(summary);
-                                            job.preview =
-                                                Some(build_url_preview(&region, &request));
-                                            let now = chrono::Utc::now();
-                                            job.updated_at = now;
-                                            if total_failure {
-                                                let message = format!(
-                                                    "all {failed_downloads} bundle download(s) failed"
-                                                );
-                                                job.status = JobStatus::Failed;
-                                                job.failure = Some(classify_failure(&message));
-                                                job.message = message.clone();
-                                                push_progress_event(job, JobPhase::Failed, message);
-                                                error!(
-                                                    job_id = %id,
-                                                    region = %job.region,
-                                                    elapsed_ms = job_elapsed_ms(job, now),
-                                                    completed = completed_downloads,
-                                                    failed = failed_downloads,
-                                                    total = total_downloads,
-                                                    "job failed: all downloads failed"
-                                                );
-                                            } else {
-                                                job.status = JobStatus::Completed;
-                                                job.failure = None;
-                                                job.message = "job completed".to_string();
-                                                push_progress_event(
-                                                    job,
-                                                    JobPhase::Completed,
-                                                    "job completed".to_string(),
-                                                );
-                                                info!(
-                                                    job_id = %id,
-                                                    region = %job.region,
-                                                    elapsed_ms = job_elapsed_ms(job, now),
-                                                    completed = completed_downloads,
-                                                    failed = failed_downloads,
-                                                    total = total_downloads,
-                                                    "job completed"
-                                                );
-                                            }
-                                            false
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                };
-                                if cancelled_after_execution {
-                                    remove_cancel_flag(&cancel_flags, id).await;
-                                    return;
-                                }
-                                if request.mode == AssetUpdateMode::Update
-                                    && region.export.haruki_3d.enabled
-                                {
-                                    spawn_haruki_3d_child_job(
-                                        jobs.clone(),
-                                        cancel_flags.clone(),
-                                        haruki_3d_active.clone(),
-                                        config.clone(),
-                                        id,
-                                        request.clone(),
-                                    )
-                                    .await;
-                                }
-                                None
-                            }
-                            Ok(Err(AssetExecutionError::Cancelled)) => {
-                                finish_cancelled(&jobs, id, "job cancelled".to_string()).await;
-                                remove_cancel_flag(&cancel_flags, id).await;
-                                return;
-                            }
-                            Ok(Err(err)) => Some(err.to_string()),
-                            Err(_) => Some(format!(
-                                "job execution timed out after {} seconds",
-                                config.execution.timeout_seconds
-                            )),
-                        }
-                    }
-                }
-                Err(err) => Some(err.to_string()),
-            };
-
-            if let Some(message) = planning_message {
-                finish_failed(&jobs, id, message).await;
-            }
-            remove_cancel_flag(&cancel_flags, id).await;
-        });
+        let context = PlanningContext {
+            jobs: self.jobs.clone(),
+            config: self.config.clone(),
+            cancel_flags: self.cancel_flags.clone(),
+            job_semaphore: self.job_semaphore.clone(),
+            region_locks: self.region_locks.clone(),
+            haruki_3d_active: self.haruki_3d_active.clone(),
+        };
+        tokio::spawn(run_planning(context, id, request));
     }
+}
+
+async fn run_planning(context: PlanningContext, id: Uuid, request: AssetUpdateRequest) {
+    let cancel_flag = context.cancel_flag(id).await;
+    if !begin_planning(&context.jobs, id).await {
+        remove_cancel_flag(&context.cancel_flags, id).await;
+        return;
+    }
+    sleep(Duration::from_millis(10)).await;
+    if is_cancelled(&cancel_flag) {
+        finish_cancelled(
+            &context.jobs,
+            id,
+            "job cancelled before planning finished".to_string(),
+        )
+        .await;
+        remove_cancel_flag(&context.cancel_flags, id).await;
+        return;
+    }
+    let result = run_planned_job(&context, id, &request, cancel_flag).await;
+    if let Err(message) = result {
+        finish_failed(&context.jobs, id, message).await;
+    }
+    remove_cancel_flag(&context.cancel_flags, id).await;
+}
+
+impl PlanningContext {
+    async fn cancel_flag(&self, id: Uuid) -> Option<Arc<AtomicBool>> {
+        self.cancel_flags.read().await.get(&id).cloned()
+    }
+}
+
+async fn begin_planning(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid) -> bool {
+    let mut job_map = jobs.write().await;
+    let Some(job) = job_map.get_mut(&id) else {
+        return false;
+    };
+    if job.status == JobStatus::Cancelled {
+        job.updated_at = chrono::Utc::now();
+        return false;
+    }
+    job.status = JobStatus::Planning;
+    job.message = "preparing region-specific execution context".to_string();
+    push_progress_event(
+        job,
+        JobPhase::Planning,
+        "preparing region-specific execution context".to_string(),
+    );
+    job.updated_at = chrono::Utc::now();
+    true
+}
+
+async fn run_planned_job(
+    context: &PlanningContext,
+    id: Uuid,
+    request: &AssetUpdateRequest,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<(), String> {
+    let plan = build_execution_plan(&context.config, request).map_err(|err| err.to_string())?;
+    match apply_execution_plan(&context.jobs, id, request, plan).await {
+        PlanningDisposition::Stop => Ok(()),
+        PlanningDisposition::Execute => {
+            execute_planned_job(context, id, request, cancel_flag).await
+        }
+    }
+}
+
+async fn apply_execution_plan(
+    jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>,
+    id: Uuid,
+    request: &AssetUpdateRequest,
+    plan: ExecutionPlan,
+) -> PlanningDisposition {
+    let mut job_map = jobs.write().await;
+    let Some(job) = job_map.get_mut(&id) else {
+        return PlanningDisposition::Stop;
+    };
+    if job.status == JobStatus::Cancelled {
+        job.updated_at = chrono::Utc::now();
+        return PlanningDisposition::Stop;
+    }
+    job.preview = Some(plan.url_preview.clone());
+    job.plan = Some(plan);
+    if request.dry_run {
+        complete_dry_run_job(job, id);
+        PlanningDisposition::Stop
+    } else {
+        mark_job_execution_started(job, id);
+        PlanningDisposition::Execute
+    }
+}
+
+fn complete_dry_run_job(job: &mut JobSnapshot, id: Uuid) {
+    job.status = JobStatus::Completed;
+    job.message = "dry-run plan completed".to_string();
+    push_progress_event(
+        job,
+        JobPhase::Completed,
+        "dry-run plan completed".to_string(),
+    );
+    let now = chrono::Utc::now();
+    job.updated_at = now;
+    info!(
+        job_id = %id,
+        region = %job.region,
+        elapsed_ms = job_elapsed_ms(job, now),
+        completed = job.progress.completed_downloads,
+        failed = job.progress.failed_downloads,
+        total = job.progress.total_downloads,
+        "dry-run plan completed"
+    );
+}
+
+fn mark_job_execution_started(job: &mut JobSnapshot, id: Uuid) {
+    job.status = JobStatus::Running;
+    job.message = "job planned; starting execution".to_string();
+    push_progress_event(
+        job,
+        JobPhase::PlanningDownloads,
+        "job planned; starting execution".to_string(),
+    );
+    job.updated_at = chrono::Utc::now();
+    info!(job_id = %id, region = %job.region, "job planned; starting execution");
+}
+
+async fn execute_planned_job(
+    context: &PlanningContext,
+    id: Uuid,
+    request: &AssetUpdateRequest,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<(), String> {
+    let region = select_region(&context.config, &request.region)
+        .map_err(|err| err.to_string())?
+        .clone();
+    let executor = AssetExecutionContext::new(&context.config, &request.region, &region, request)
+        .map_err(|err| err.to_string())?;
+    let execution_result =
+        run_asset_execution(context, request, executor, cancel_flag.clone(), id).await;
+    handle_asset_execution_result(context, id, request, &region, cancel_flag, execution_result)
+        .await
+}
+
+async fn run_asset_execution(
+    context: &PlanningContext,
+    request: &AssetUpdateRequest,
+    executor: AssetExecutionContext,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    id: Uuid,
+) -> Result<Result<ExecutionSummary, AssetExecutionError>, tokio::time::error::Elapsed> {
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel();
+    let progress_task = tokio::spawn(progress_consumer(context.jobs.clone(), id, progress_rx));
+    let region_lock = acquire_region_lock(&context.region_locks, &request.region).await;
+    let _region_guard = region_lock.lock().await;
+    let _job_permit = acquire_job_permit(&context.job_semaphore).await;
+    let execution = run_asset_update(
+        executor,
+        context.config.clone(),
+        request.mode.clone(),
+        progress_tx,
+        cancel_flag,
+    );
+    let result = timeout(
+        Duration::from_secs(context.config.execution.timeout_seconds),
+        execution,
+    )
+    .await;
+    let _ = progress_task.await;
+    result
+}
+
+async fn acquire_job_permit(
+    semaphore: &Option<Arc<Semaphore>>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    match semaphore {
+        Some(semaphore) => semaphore.clone().acquire_owned().await.ok(),
+        None => None,
+    }
+}
+
+async fn run_asset_update(
+    executor: AssetExecutionContext,
+    config: Arc<AppConfig>,
+    mode: AssetUpdateMode,
+    progress_tx: mpsc::UnboundedSender<ExecutionProgressUpdate>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<ExecutionSummary, AssetExecutionError> {
+    match mode {
+        AssetUpdateMode::Update => {
+            executor
+                .execute(&config, Some(progress_tx), cancel_flag)
+                .await
+        }
+        AssetUpdateMode::PrefetchRawBundles => {
+            executor
+                .prefetch_asset_bundles(&config, Some(progress_tx), cancel_flag)
+                .await
+        }
+    }
+}
+
+async fn handle_asset_execution_result(
+    context: &PlanningContext,
+    id: Uuid,
+    request: &AssetUpdateRequest,
+    region: &RegionConfig,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    result: Result<Result<ExecutionSummary, AssetExecutionError>, tokio::time::error::Elapsed>,
+) -> Result<(), String> {
+    match result {
+        Ok(Ok(summary)) => {
+            finish_successful_execution(context, id, request, region, &cancel_flag, summary).await
+        }
+        Ok(Err(AssetExecutionError::Cancelled)) => {
+            finish_cancelled(&context.jobs, id, "job cancelled".to_string()).await;
+            Ok(())
+        }
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(format!(
+            "job execution timed out after {} seconds",
+            context.config.execution.timeout_seconds
+        )),
+    }
+}
+
+async fn finish_successful_execution(
+    context: &PlanningContext,
+    id: Uuid,
+    request: &AssetUpdateRequest,
+    region: &RegionConfig,
+    cancel_flag: &Option<Arc<AtomicBool>>,
+    summary: ExecutionSummary,
+) -> Result<(), String> {
+    if is_cancelled(cancel_flag) {
+        finish_cancelled(&context.jobs, id, "job cancelled".to_string()).await;
+        return Ok(());
+    }
+    if complete_job_snapshot(&context.jobs, id, request, region, summary).await {
+        return Ok(());
+    }
+    if request.mode == AssetUpdateMode::Update && region.export.haruki_3d.enabled {
+        spawn_haruki_3d_child_job(
+            context.jobs.clone(),
+            context.cancel_flags.clone(),
+            context.haruki_3d_active.clone(),
+            context.config.clone(),
+            id,
+            request.clone(),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+async fn complete_job_snapshot(
+    jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>,
+    id: Uuid,
+    request: &AssetUpdateRequest,
+    region: &RegionConfig,
+    summary: ExecutionSummary,
+) -> bool {
+    let mut job_map = jobs.write().await;
+    let Some(job) = job_map.get_mut(&id) else {
+        return false;
+    };
+    if job.status == JobStatus::Cancelled {
+        job.updated_at = chrono::Utc::now();
+        return true;
+    }
+    let completed = summary.completed_downloads;
+    let failed = summary.failed_downloads;
+    let total = summary.queued_downloads;
+    job.execution = Some(summary);
+    job.preview = Some(build_url_preview(region, request));
+    let now = chrono::Utc::now();
+    job.updated_at = now;
+    if total > 0 && completed == 0 && failed > 0 {
+        mark_all_downloads_failed(job, id, now, completed, failed, total);
+    } else {
+        mark_job_completed(job, id, now, completed, failed, total);
+    }
+    false
+}
+
+fn mark_all_downloads_failed(
+    job: &mut JobSnapshot,
+    id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+    completed: usize,
+    failed: usize,
+    total: usize,
+) {
+    let message = format!("all {failed} bundle download(s) failed");
+    job.status = JobStatus::Failed;
+    job.failure = Some(classify_failure(&message));
+    job.message = message.clone();
+    push_progress_event(job, JobPhase::Failed, message);
+    error!(
+        job_id = %id,
+        region = %job.region,
+        elapsed_ms = job_elapsed_ms(job, now),
+        completed,
+        failed,
+        total,
+        "job failed: all downloads failed"
+    );
+}
+
+fn mark_job_completed(
+    job: &mut JobSnapshot,
+    id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+    completed: usize,
+    failed: usize,
+    total: usize,
+) {
+    job.status = JobStatus::Completed;
+    job.failure = None;
+    job.message = "job completed".to_string();
+    push_progress_event(job, JobPhase::Completed, "job completed".to_string());
+    info!(
+        job_id = %id,
+        region = %job.region,
+        elapsed_ms = job_elapsed_ms(job, now),
+        completed,
+        failed,
+        total,
+        "job completed"
+    );
 }
 
 async fn finish_failed(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>, id: Uuid, message: String) {

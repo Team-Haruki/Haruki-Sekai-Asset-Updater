@@ -1,10 +1,9 @@
-FROM debian:trixie-slim AS builder
+FROM rust:trixie AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    curl \
     git \
     clang \
     pkg-config \
@@ -16,9 +15,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libswresample-dev \
     libswscale-dev && \
     rm -rf /var/lib/apt/lists/*
-ENV PATH=/root/.cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal --default-toolchain stable
 COPY Cargo.toml Cargo.toml
 COPY Cargo.lock Cargo.lock
 COPY src src
@@ -56,7 +52,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
-RUN mkdir -p logs
+RUN groupadd --gid 10001 haruki && \
+    useradd --uid 10001 --gid haruki --no-create-home --home-dir /app \
+      --shell /usr/sbin/nologin haruki && \
+    mkdir -p logs && \
+    chown -R haruki:haruki /app
 
 ENV TZ=Asia/Shanghai \
     MALLOC_ARENA_MAX=4 \
@@ -65,5 +65,7 @@ ENV TZ=Asia/Shanghai \
     HARUKI_CONFIG_PATH=/app/haruki-asset-configs.yaml
 
 EXPOSE 8080
+
+USER haruki:haruki
 
 CMD ["./haruki-sekai-asset-updater"]

@@ -61,20 +61,72 @@ mod payload;
 mod tasks;
 mod types;
 
-use self::assetstudio::*;
-use self::images::*;
-use self::limits::*;
-// Nothing in this module names these directly any more -- the image flush that
-// did was removed -- but the submodules and tests reach them through `super::`,
-// which resolves against the bindings this glob creates here.
-#[allow(unused_imports)]
-use self::media_postprocess::*;
-use self::paths::*;
+use self::assetstudio::{
+    assetstudio_export_type_selector, assetstudio_type_selector_matches,
+    normalize_assetstudio_type_name, run_unity_rs_object_export,
+};
+#[cfg(test)]
+use self::assetstudio::{
+    assetstudio_object_mode_supported_type, native_image_format_for_asset,
+    native_object_read_subchunks, native_read_batch_size_for_assets, native_read_kind_for_asset,
+    native_skipped_unsupported_asset, select_native_object_readable_assets,
+    sort_native_object_reads_for_failure_isolation,
+};
+use self::images::{
+    convert_native_surrogate_images_to_png, encode_dynamic_image, encode_native_rgba_ir,
+    handle_png_conversion, write_encoded_image,
+};
+#[cfg(test)]
+use self::limits::sum_process_tree_cpu_percent;
+use self::limits::{
+    acquire_cpu_budget_permit, acquire_cpu_budget_permit_blocking,
+    acquire_image_memory_permit_blocking, configure_cpu_budget_throttle, CpuBudgetPermit,
+};
+#[cfg(test)]
+use self::media_postprocess::{
+    acquire_media_encode_permit, process_usm_file, process_usm_input_with_metrics,
+    scoped_upload_files, share_acb_waveforms, should_keep_music_long_hca_track, MediaEncodeKind,
+};
+use self::paths::{
+    assetbundle_typetree_output_path, native_object_output_path, strip_container_prefix,
+};
+#[cfg(test)]
+use self::paths::{assetstudio_fix_file_name, native_object_output_extension};
 pub(crate) use self::payload::flat_pipeline_enabled;
-use self::payload::*;
-use self::tasks::*;
+use self::payload::{
+    decode_image_payload_bytes, image_format_extension, image_output_file_for_format,
+    is_playable_mono_typetree, native_rgba_ir_contiguous_pixels, safe_payload_bundle_path,
+    write_assetstudio_playable_payloads, write_native_object_payload, NativeRgbaIr,
+};
+#[cfg(test)]
+use self::payload::{
+    parse_payload_bundle, parse_payload_bundle_borrowed, playable_container_output_path,
+    remove_byte_identical_semantic_duplicates, text_asset_public_bytes_target,
+    write_assetstudio_export_manifest_entry, write_native_image_payload_final_files,
+    write_native_image_payload_final_files_with_backend, write_native_payload_file,
+};
+#[cfg(test)]
+use self::tasks::usm_segment_key;
+use self::tasks::{
+    asset_studio_export_type_list, merge_usm_inputs, panic_message,
+    post_process_files_by_extension, prepare_usm_processing_inputs, remove_export_file_if_exists,
+    run_path_tasks, run_tasks, scan_all_files, UsmProcessingInput,
+};
 pub(crate) use self::types::NativeSemanticExportPathRegistry;
-use self::types::*;
+#[cfg(test)]
+use self::types::UNITY_ENGINE_FAST_IMAGE_FORMAT;
+use self::types::{
+    NativeAssetStudioExportManifestEntry, NativeImageEncodeSettings, NativeObjectExportOptions,
+    NativeObjectExportSummary, NativePayloadSignature, NativePlayableExport,
+    NativePlayableExportObject, NativeSemanticExportClaim, NativeSemanticExportPathState,
+    NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput, UnityObjectReadResponse,
+    ASSETSTUDIO_MANIFEST_APPEND_LOCKS, ASSETSTUDIO_MANIFEST_LOCKS,
+    ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS, UNITY_ENGINE_DEFAULT_IMAGE_FORMAT,
+    UNITY_ENGINE_IMAGE_SURROGATE_FORMAT, UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC,
+    UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION, UNITY_ENGINE_RGBA_IR_HEADER_LEN,
+    UNITY_ENGINE_RGBA_IR_MAGIC,
+};
 
 pub use self::media_postprocess::post_process_exported_files;
 pub use self::types::{

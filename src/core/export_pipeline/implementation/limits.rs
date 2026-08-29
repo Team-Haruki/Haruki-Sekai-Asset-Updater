@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Arc, Condvar, Duration, ExportPipelineError, HashMap, Instant, Mutex, OnceLock,
+    ResourcesConfig, StdCommand,
+};
 
 pub(super) struct CpuBudgetAcquire {
     pub(super) permit: CpuBudgetPermit,
@@ -412,7 +415,7 @@ pub(super) fn sum_process_tree_cpu_percent(root_pid: u32, ps_output: &str) -> f6
 
 #[cfg(all(test, target_os = "linux"))]
 mod limits_tests {
-    use super::*;
+    use super::{parse_linux_proc_stat, sum_process_tree_cpu_ticks};
 
     #[test]
     fn parses_linux_proc_stat_with_spaces_in_process_name() {

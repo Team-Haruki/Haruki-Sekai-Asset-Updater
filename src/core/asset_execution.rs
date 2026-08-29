@@ -35,6 +35,13 @@ type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 static BUNDLE_CACHE_WRITE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
+fn asset_category_name(category: &AssetCategory) -> &'static str {
+    match category {
+        AssetCategory::StartApp => "StartApp",
+        AssetCategory::OnDemand | AssetCategory::LivePv | AssetCategory::Other(_) => "OnDemand",
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum AssetCategory {
     StartApp,
@@ -123,6 +130,27 @@ struct DownloadTask {
     priority: usize,
     export_payloads: bool,
     stage_haruki_3d: bool,
+}
+
+struct BundleWritePlan {
+    raw_target: Option<PathBuf>,
+    haruki_3d_target: Option<PathBuf>,
+    temp_target: Option<PathBuf>,
+    bundle_hash_index: Option<Arc<std::sync::Mutex<DownloadRecord>>>,
+    bundle_hash_index_key: String,
+}
+
+struct Haruki3dExportPlan {
+    config: crate::core::config::Haruki3dExportConfig,
+    info: AssetBundleInfo,
+    tasks: Vec<DownloadTask>,
+    pending_tasks: Vec<DownloadTask>,
+    pending_paths: HashSet<String>,
+    downloaded_assets: DownloadRecord,
+    record_path: PathBuf,
+    dependency_index_path: PathBuf,
+    asset_root: PathBuf,
+    work_run_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -1537,73 +1565,16 @@ impl AssetExecutionContext {
             },
         );
 
-        // The bundle path originates from the (untrusted) asset-info server. Validate it before it
-        // is used to build any filesystem path, so a name like "../../etc/foo" can't escape the
-        // temp/export directories.
-        let safe_bundle_path = validate_relative_bundle_path(&task.bundle_path)?.to_path_buf();
-        let raw_bundle_target = if self.matches_raw_bundle_filters(&task.bundle_path) {
-            Some(self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?)
-        } else {
-            None
-        };
-        let haruki_3d_work_target = if task.stage_haruki_3d {
-            match haruki_3d_work_root {
-                Some(work_root) => Some(raw_bundle_output_path(work_root, &task.bundle_path)?),
-                None => None,
-            }
-        } else {
-            None
-        };
-        let temp_file = std::env::temp_dir()
-            .join(&self.region_name)
-            .join(&safe_bundle_path);
-
-        // Deobfuscation (a full-buffer transform), retention/staging, and temp-file writes are
-        // CPU/blocking work. Run them on a blocking thread so the async runtime workers (which also
-        // serve HTTP and other jobs) aren't stalled while many bundles process concurrently.
+        let temp_file = self.bundle_temp_file(task)?;
+        let write_plan = self.bundle_write_plan(
+            task,
+            &asset_save_dir,
+            haruki_3d_work_root,
+            &temp_file,
+            bundle_hash_index,
+        )?;
         let blocking_started = Instant::now();
-        let temp_file_for_blocking = task.export_payloads.then(|| temp_file.clone());
-        let deobfuscated = fetch.body;
-        let bundle_hash_index = bundle_hash_index.cloned();
-        let bundle_hash_index_key = bundle_hash_index_key(&task.bundle_path)?;
-        tokio::task::spawn_blocking(move || -> Result<(), AssetExecutionError> {
-            if let Some(raw_path) = raw_bundle_target {
-                Self::write_raw_bundle(&raw_path, &deobfuscated)?;
-            }
-            if let Some(work_path) = haruki_3d_work_target {
-                Self::write_haruki_3d_work_bundle(&work_path, &deobfuscated)?;
-                if let Some(index) = bundle_hash_index {
-                    let digest = hex::encode(Sha256::digest(&deobfuscated));
-                    index
-                        .lock()
-                        .map_err(|_| {
-                            AssetExecutionError::BlockingTask(
-                                "bundle hash index lock poisoned".to_string(),
-                            )
-                        })?
-                        .insert(bundle_hash_index_key, digest);
-                }
-            }
-            if let Some(temp_file) = temp_file_for_blocking {
-                if let Some(parent) = temp_file.parent() {
-                    std::fs::create_dir_all(parent).map_err(|source| {
-                        AssetExecutionError::CreateTempDir {
-                            path: parent.to_path_buf(),
-                            source,
-                        }
-                    })?;
-                }
-                std::fs::write(&temp_file, deobfuscated).map_err(|source| {
-                    AssetExecutionError::WriteTempFile {
-                        path: temp_file,
-                        source,
-                    }
-                })?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|source| AssetExecutionError::BlockingTask(source.to_string()))??;
+        Self::persist_bundle_payload(fetch.body, write_plan).await?;
         if task.export_payloads {
             Self::send_progress(
                 progress,
@@ -1618,24 +1589,132 @@ impl AssetExecutionContext {
             return Ok(None);
         }
 
-        let category = match task.category {
-            AssetCategory::StartApp => "StartApp",
-            AssetCategory::OnDemand | AssetCategory::LivePv => "OnDemand",
-            AssetCategory::Other(_) => "OnDemand",
+        self.export_bundle_payloads(
+            app_config,
+            task,
+            &asset_save_dir,
+            &temp_file,
+            export_path_registry,
+        )
+        .await
+    }
+
+    fn bundle_temp_file(&self, task: &DownloadTask) -> Result<PathBuf, AssetExecutionError> {
+        // Asset-info is untrusted, so validate before using the bundle name in any path.
+        let safe_path = validate_relative_bundle_path(&task.bundle_path)?;
+        Ok(std::env::temp_dir().join(&self.region_name).join(safe_path))
+    }
+
+    fn bundle_write_plan(
+        &self,
+        task: &DownloadTask,
+        asset_save_dir: &str,
+        haruki_3d_work_root: Option<&Path>,
+        temp_file: &Path,
+        bundle_hash_index: Option<&Arc<std::sync::Mutex<DownloadRecord>>>,
+    ) -> Result<BundleWritePlan, AssetExecutionError> {
+        let raw_target = self
+            .matches_raw_bundle_filters(&task.bundle_path)
+            .then(|| self.raw_bundle_output_path(asset_save_dir, &task.bundle_path))
+            .transpose()?;
+        let haruki_3d_target = task
+            .stage_haruki_3d
+            .then_some(haruki_3d_work_root)
+            .flatten()
+            .map(|root| raw_bundle_output_path(root, &task.bundle_path))
+            .transpose()?;
+        Ok(BundleWritePlan {
+            raw_target,
+            haruki_3d_target,
+            temp_target: task.export_payloads.then(|| temp_file.to_path_buf()),
+            bundle_hash_index: bundle_hash_index.cloned(),
+            bundle_hash_index_key: bundle_hash_index_key(&task.bundle_path)?,
+        })
+    }
+
+    async fn persist_bundle_payload(
+        payload: Vec<u8>,
+        plan: BundleWritePlan,
+    ) -> Result<(), AssetExecutionError> {
+        tokio::task::spawn_blocking(move || Self::write_bundle_payload(&payload, plan))
+            .await
+            .map_err(|source| AssetExecutionError::BlockingTask(source.to_string()))?
+    }
+
+    fn write_bundle_payload(
+        payload: &[u8],
+        plan: BundleWritePlan,
+    ) -> Result<(), AssetExecutionError> {
+        if let Some(path) = plan.raw_target {
+            Self::write_raw_bundle(&path, payload)?;
+        }
+        if let Some(path) = plan.haruki_3d_target {
+            Self::write_haruki_3d_work_bundle(&path, payload)?;
+            Self::record_bundle_payload_hash(
+                plan.bundle_hash_index,
+                plan.bundle_hash_index_key,
+                payload,
+            )?;
+        }
+        if let Some(path) = plan.temp_target {
+            Self::write_temp_bundle(&path, payload)?;
+        }
+        Ok(())
+    }
+
+    fn record_bundle_payload_hash(
+        index: Option<Arc<std::sync::Mutex<DownloadRecord>>>,
+        key: String,
+        payload: &[u8],
+    ) -> Result<(), AssetExecutionError> {
+        let Some(index) = index else {
+            return Ok(());
         };
+        let digest = hex::encode(Sha256::digest(payload));
+        index
+            .lock()
+            .map_err(|_| {
+                AssetExecutionError::BlockingTask("bundle hash index lock poisoned".to_string())
+            })?
+            .insert(key, digest);
+        Ok(())
+    }
+
+    fn write_temp_bundle(path: &Path, payload: &[u8]) -> Result<(), AssetExecutionError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                AssetExecutionError::CreateTempDir {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        std::fs::write(path, payload).map_err(|source| AssetExecutionError::WriteTempFile {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    async fn export_bundle_payloads(
+        &self,
+        app_config: &AppConfig,
+        task: &DownloadTask,
+        asset_save_dir: &str,
+        temp_file: &Path,
+        export_path_registry: &NativeSemanticExportPathRegistry,
+    ) -> Result<Option<NativeBundlePostProcessJob>, AssetExecutionError> {
         let export_started = Instant::now();
         let payload_export = export_unity_asset_bundle_payloads_with_registry(
             app_config,
             &self.region,
-            &temp_file,
+            temp_file,
             &task.bundle_path,
-            Path::new(&asset_save_dir),
-            category,
+            Path::new(asset_save_dir),
+            asset_category_name(&task.category),
             export_path_registry,
         )
         .await;
-        let _ = remove_file_if_exists(&temp_file);
-
+        let _ = remove_file_if_exists(temp_file);
         Ok(Some(NativeBundlePostProcessJob {
             bundle_path: task.bundle_path.clone(),
             bundle_hash: task.bundle_hash.clone(),
@@ -1975,8 +2054,7 @@ impl AssetExecutionContext {
         progress: Option<UnboundedSender<ExecutionProgressUpdate>>,
         cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<Haruki3dExportSummary, AssetExecutionError> {
-        let haruki_3d = self.region.export.haruki_3d.clone();
-        if !haruki_3d.enabled {
+        if !self.region.export.haruki_3d.enabled {
             return Ok(Haruki3dExportSummary::default());
         }
         self.ensure_not_cancelled(&cancel_flag)?;
@@ -1987,166 +2065,271 @@ impl AssetExecutionContext {
                 message: "fetching asset bundle info for Haruki 3D export".to_string(),
             },
         );
+        let Some(mut plan) = self.prepare_haruki_3d_export_plan().await? else {
+            return Ok(Haruki3dExportSummary::default());
+        };
+        Self::send_progress(
+            &progress,
+            ExecutionProgressUpdate::DownloadsPlanned {
+                total: plan.pending_tasks.len(),
+            },
+        );
+        self.prepare_haruki_3d_staging(&plan, &progress, &cancel_flag)?;
+        self.run_haruki_3d_export_plan(&mut plan, &progress).await?;
+        Self::finish_haruki_3d_export_plan(&plan)?;
+        Ok(Haruki3dExportSummary {
+            matched_bundles: plan.tasks.len(),
+            downloaded_bundles: plan.pending_tasks.len(),
+        })
+    }
+
+    async fn prepare_haruki_3d_export_plan(
+        &mut self,
+    ) -> Result<Option<Haruki3dExportPlan>, AssetExecutionError> {
         if self.requires_cookies() {
             self.fetch_runtime_cookies().await?;
         }
         let info = self.fetch_asset_bundle_info().await?;
         let tasks = self.build_haruki_3d_tasks(&info);
-        let bundle_dependency_index_path = self
-            .haruki_3d_bundle_dependency_index_path()
-            .ok_or_else(|| {
-                AssetExecutionError::BlockingTask(
-                    "3D bundle dependency index path is unavailable".to_string(),
-                )
-            })?;
-        Self::save_haruki_3d_dependency_index(&bundle_dependency_index_path, &info, &tasks)?;
-        let record_path = self.haruki_3d_download_record_path().ok_or_else(|| {
-            AssetExecutionError::BlockingTask("3D download record path is unavailable".to_string())
-        })?;
-        let mut downloaded_assets = load_download_record(&record_path)?;
-        let can_reuse_download_record = self.can_reuse_haruki_3d_download_record().await;
-        let pending_tasks: Vec<_> = tasks
+        let dependency_index_path = self.required_haruki_3d_dependency_index_path()?;
+        Self::save_haruki_3d_dependency_index(&dependency_index_path, &info, &tasks)?;
+        let record_path = self.required_haruki_3d_download_record_path()?;
+        let downloaded_assets = load_download_record(&record_path)?;
+        let can_reuse = self.can_reuse_haruki_3d_download_record().await;
+        let pending_tasks = Self::pending_haruki_3d_tasks(&tasks, &downloaded_assets, can_reuse);
+        let pending_paths = pending_tasks
             .iter()
-            .filter(|task| {
-                !can_reuse_download_record
-                    || downloaded_assets
-                        .get(&task.bundle_path)
-                        .is_none_or(|hash| hash != &task.bundle_hash)
-            })
+            .map(|task| task.bundle_path.clone())
             .collect();
-        let pending_paths: HashSet<_> = pending_tasks
-            .iter()
-            .map(|task| task.bundle_path.as_str())
-            .collect();
-        Self::send_progress(
-            &progress,
-            ExecutionProgressUpdate::DownloadsPlanned {
-                total: pending_tasks.len(),
-            },
-        );
-        let asset_root = self.haruki_3d_work_asset_root();
-        let Some(asset_root) = asset_root else {
-            return Ok(Haruki3dExportSummary::default());
+        let Some(asset_root) = self.haruki_3d_work_asset_root() else {
+            return Ok(None);
         };
         let work_run_dir = asset_root
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| asset_root.clone());
+        Ok(Some(Haruki3dExportPlan {
+            config: self.region.export.haruki_3d.clone(),
+            info,
+            tasks,
+            pending_tasks,
+            pending_paths,
+            downloaded_assets,
+            record_path,
+            dependency_index_path,
+            asset_root,
+            work_run_dir,
+        }))
+    }
 
-        for task in &pending_tasks {
-            self.ensure_not_cancelled(&cancel_flag)?;
+    fn required_haruki_3d_dependency_index_path(&self) -> Result<PathBuf, AssetExecutionError> {
+        self.haruki_3d_bundle_dependency_index_path()
+            .ok_or_else(|| {
+                AssetExecutionError::BlockingTask(
+                    "3D bundle dependency index path is unavailable".to_string(),
+                )
+            })
+    }
+
+    fn required_haruki_3d_download_record_path(&self) -> Result<PathBuf, AssetExecutionError> {
+        self.haruki_3d_download_record_path().ok_or_else(|| {
+            AssetExecutionError::BlockingTask("3D download record path is unavailable".to_string())
+        })
+    }
+
+    fn pending_haruki_3d_tasks(
+        tasks: &[DownloadTask],
+        downloaded_assets: &DownloadRecord,
+        can_reuse: bool,
+    ) -> Vec<DownloadTask> {
+        tasks
+            .iter()
+            .filter(|task| {
+                !can_reuse
+                    || downloaded_assets
+                        .get(&task.bundle_path)
+                        .is_none_or(|hash| hash != &task.bundle_hash)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn prepare_haruki_3d_staging(
+        &self,
+        plan: &Haruki3dExportPlan,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+        cancel_flag: &Option<Arc<AtomicBool>>,
+    ) -> Result<(), AssetExecutionError> {
+        self.verify_pending_haruki_3d_bundles(plan, progress, cancel_flag)?;
+        self.create_haruki_3d_sparse_placeholders(plan)?;
+        self.update_haruki_3d_sparse_marker(plan)
+    }
+
+    fn verify_pending_haruki_3d_bundles(
+        &self,
+        plan: &Haruki3dExportPlan,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+        cancel_flag: &Option<Arc<AtomicBool>>,
+    ) -> Result<(), AssetExecutionError> {
+        for task in &plan.pending_tasks {
+            self.ensure_not_cancelled(cancel_flag)?;
             Self::send_progress(
-                &progress,
+                progress,
                 ExecutionProgressUpdate::BundleStarted {
                     bundle: task.bundle_path.clone(),
                 },
             );
-            let output_path = raw_bundle_output_path(&asset_root, &task.bundle_path)?;
-            if output_path.exists() {
-                Self::send_progress(
-                    &progress,
-                    ExecutionProgressUpdate::BundleCompleted {
-                        bundle: task.bundle_path.clone(),
-                    },
-                );
-                continue;
+            let output_path = raw_bundle_output_path(&plan.asset_root, &task.bundle_path)?;
+            if !output_path.exists() {
+                return Err(AssetExecutionError::MissingHaruki3dStagingBundle {
+                    path: output_path,
+                });
             }
-            return Err(AssetExecutionError::MissingHaruki3dStagingBundle { path: output_path });
+            Self::send_progress(
+                progress,
+                ExecutionProgressUpdate::BundleCompleted {
+                    bundle: task.bundle_path.clone(),
+                },
+            );
         }
+        Ok(())
+    }
 
-        for task in &tasks {
-            if pending_paths.contains(task.bundle_path.as_str()) {
+    fn create_haruki_3d_sparse_placeholders(
+        &self,
+        plan: &Haruki3dExportPlan,
+    ) -> Result<(), AssetExecutionError> {
+        for task in &plan.tasks {
+            if plan.pending_paths.contains(&task.bundle_path) {
                 continue;
             }
-            let output_path = raw_bundle_output_path(&asset_root, &task.bundle_path)?;
+            let output_path = raw_bundle_output_path(&plan.asset_root, &task.bundle_path)?;
             if !output_path.exists() {
                 Self::write_haruki_3d_work_bundle(&output_path, &[])?;
             }
         }
-        let sparse_input_marker = asset_root.join(".haruki-sparse-input");
-        if pending_tasks.len() < tasks.len() {
-            Self::write_haruki_3d_work_bundle(&sparse_input_marker, &[])?;
-        } else if sparse_input_marker.exists() {
-            std::fs::remove_file(&sparse_input_marker).map_err(|source| {
+        Ok(())
+    }
+
+    fn update_haruki_3d_sparse_marker(
+        &self,
+        plan: &Haruki3dExportPlan,
+    ) -> Result<(), AssetExecutionError> {
+        let marker = plan.asset_root.join(".haruki-sparse-input");
+        if plan.pending_tasks.len() < plan.tasks.len() {
+            return Self::write_haruki_3d_work_bundle(&marker, &[]);
+        }
+        if marker.exists() {
+            std::fs::remove_file(&marker).map_err(|source| {
                 AssetExecutionError::RemoveHaruki3dStagingDir {
-                    path: sparse_input_marker.clone(),
+                    path: marker,
                     source,
                 }
             })?;
         }
+        Ok(())
+    }
 
-        let bundle_hash_index_path = self.haruki_3d_bundle_hash_index_path().ok_or_else(|| {
+    async fn run_haruki_3d_export_plan(
+        &self,
+        plan: &mut Haruki3dExportPlan,
+        progress: &Option<UnboundedSender<ExecutionProgressUpdate>>,
+    ) -> Result<(), AssetExecutionError> {
+        let hash_index_path = self.haruki_3d_bundle_hash_index_path().ok_or_else(|| {
             AssetExecutionError::BlockingTask(
                 "3D bundle hash index path is unavailable".to_string(),
             )
         })?;
-        let exporter_commands = Self::build_haruki_3d_exporter_commands(
-            &haruki_3d,
-            &asset_root,
-            &bundle_hash_index_path,
-            &bundle_dependency_index_path,
+        let commands = Self::build_haruki_3d_exporter_commands(
+            &plan.config,
+            &plan.asset_root,
+            &hash_index_path,
+            &plan.dependency_index_path,
         );
-
-        for args in exporter_commands {
+        for args in commands {
             if let Err(error) = self
-                .run_haruki_3d_exporter_stage(&haruki_3d, &args, &progress)
+                .run_haruki_3d_exporter_stage(&plan.config, &args, progress)
                 .await
             {
-                if let AssetExecutionError::Haruki3dExporterFailed { stderr, .. } = &error {
-                    let task_paths: HashSet<_> =
-                        tasks.iter().map(|task| task.bundle_path.as_str()).collect();
-                    let mut recovery_paths = HashSet::new();
-                    for bundle_path in missing_haruki_3d_bundle_paths(stderr) {
-                        if !task_paths.contains(bundle_path.as_str()) {
-                            continue;
-                        }
-                        recovery_paths.insert(bundle_path.clone());
-                        recovery_paths.extend(bundle_dependency_closure(&info, &bundle_path));
-                    }
-                    let removed = recovery_paths
-                        .iter()
-                        .filter(|path| downloaded_assets.remove(path.as_str()).is_some())
-                        .count();
-                    if removed > 0 {
-                        save_download_record(&record_path, &downloaded_assets)?;
-                        tracing::warn!(
-                            region = %self.region_name,
-                            removed,
-                            "invalidated missing sparse 3D bundles for targeted retry"
-                        );
-                    }
-                }
-                if haruki_3d.cleanup_work_dir_after_failure {
-                    Self::remove_haruki_3d_work_dir(&work_run_dir)?;
-                }
+                self.handle_haruki_3d_export_failure(plan, &error)?;
                 return Err(error);
             }
         }
-
-        let catalog_args = Self::build_haruki_3d_runtime_catalog_command(&haruki_3d);
+        let catalog_args = Self::build_haruki_3d_runtime_catalog_command(&plan.config);
         if let Err(error) = self
-            .run_haruki_3d_exporter_stage(&haruki_3d, &catalog_args, &progress)
+            .run_haruki_3d_exporter_stage(&plan.config, &catalog_args, progress)
             .await
         {
-            if haruki_3d.cleanup_work_dir_after_failure {
-                Self::remove_haruki_3d_work_dir(&work_run_dir)?;
-            }
+            self.cleanup_failed_haruki_3d_export(plan)?;
             return Err(error);
         }
+        Ok(())
+    }
 
-        let completed_record = tasks
+    fn handle_haruki_3d_export_failure(
+        &self,
+        plan: &mut Haruki3dExportPlan,
+        error: &AssetExecutionError,
+    ) -> Result<(), AssetExecutionError> {
+        if let AssetExecutionError::Haruki3dExporterFailed { stderr, .. } = error {
+            self.invalidate_missing_haruki_3d_bundles(plan, stderr)?;
+        }
+        self.cleanup_failed_haruki_3d_export(plan)
+    }
+
+    fn invalidate_missing_haruki_3d_bundles(
+        &self,
+        plan: &mut Haruki3dExportPlan,
+        stderr: &str,
+    ) -> Result<(), AssetExecutionError> {
+        let task_paths: HashSet<_> = plan
+            .tasks
+            .iter()
+            .map(|task| task.bundle_path.as_str())
+            .collect();
+        let recovery_paths = missing_haruki_3d_bundle_paths(stderr)
+            .into_iter()
+            .filter(|path| task_paths.contains(path.as_str()))
+            .flat_map(|path| {
+                std::iter::once(path.clone()).chain(bundle_dependency_closure(&plan.info, &path))
+            })
+            .collect::<HashSet<_>>();
+        let removed = recovery_paths
+            .iter()
+            .filter(|path| plan.downloaded_assets.remove(path.as_str()).is_some())
+            .count();
+        if removed > 0 {
+            save_download_record(&plan.record_path, &plan.downloaded_assets)?;
+            tracing::warn!(
+                region = %self.region_name,
+                removed,
+                "invalidated missing sparse 3D bundles for targeted retry"
+            );
+        }
+        Ok(())
+    }
+
+    fn cleanup_failed_haruki_3d_export(
+        &self,
+        plan: &Haruki3dExportPlan,
+    ) -> Result<(), AssetExecutionError> {
+        if plan.config.cleanup_work_dir_after_failure {
+            Self::remove_haruki_3d_work_dir(&plan.work_run_dir)?;
+        }
+        Ok(())
+    }
+
+    fn finish_haruki_3d_export_plan(plan: &Haruki3dExportPlan) -> Result<(), AssetExecutionError> {
+        let completed_record = plan
+            .tasks
             .iter()
             .map(|task| (task.bundle_path.clone(), task.bundle_hash.clone()))
             .collect();
-        save_download_record(&record_path, &completed_record)?;
-
-        if haruki_3d.cleanup_work_dir_after_success {
-            Self::remove_haruki_3d_work_dir(&work_run_dir)?;
+        save_download_record(&plan.record_path, &completed_record)?;
+        if plan.config.cleanup_work_dir_after_success {
+            Self::remove_haruki_3d_work_dir(&plan.work_run_dir)?;
         }
-        Ok(Haruki3dExportSummary {
-            matched_bundles: tasks.len(),
-            downloaded_bundles: pending_tasks.len(),
-        })
+        Ok(())
     }
 
     async fn run_haruki_3d_exporter_stage(

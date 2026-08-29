@@ -1433,57 +1433,9 @@ impl AudioFifo {
             if available <= 0 || (!flush && available < self.frame_size) {
                 break;
             }
-            let samples = if flush && self.pad_final_frame && available < self.frame_size {
-                self.frame_size
-            } else if flush {
-                available.min(self.frame_size)
-            } else {
-                self.frame_size
-            };
+            let samples = self.samples_to_encode(available, flush);
             unsafe {
-                ffi::av_frame_unref(self.frame.ptr);
-                (*self.frame.ptr).format = self.sample_fmt;
-                (*self.frame.ptr).sample_rate = self.sample_rate;
-                (*self.frame.ptr).nb_samples = samples;
-                check(
-                    ffi::av_channel_layout_copy(
-                        &mut (*self.frame.ptr).ch_layout,
-                        &self.ch_layout.inner,
-                    ),
-                    "av_channel_layout_copy audio fifo frame",
-                )?;
-                check(
-                    ffi::av_frame_get_buffer(self.frame.ptr, 0),
-                    "av_frame_get_buffer audio fifo frame",
-                )?;
-                let read = ffi::av_audio_fifo_read(
-                    self.ptr,
-                    (*self.frame.ptr).data.as_ptr() as *const *mut c_void,
-                    available.min(samples),
-                );
-                let expected_read = available.min(samples);
-                if read != expected_read {
-                    if read < 0 {
-                        return Err(ExportPipelineError::Media {
-                            message: format!("av_audio_fifo_read failed: {}", ffmpeg_error(read)),
-                        });
-                    }
-                    return Err(media_error(
-                        "av_audio_fifo_read read fewer samples than requested",
-                    ));
-                }
-                if read < samples {
-                    check(
-                        ffi::av_samples_set_silence(
-                            (*self.frame.ptr).extended_data,
-                            read,
-                            samples - read,
-                            self.ch_layout.inner.nb_channels,
-                            self.sample_fmt,
-                        ),
-                        "av_samples_set_silence audio fifo padding",
-                    )?;
-                }
+                self.fill_frame_from_fifo(available, samples)?;
                 (*self.frame.ptr).pts = *frame_index;
                 *frame_index += samples as i64;
                 check(
@@ -1495,6 +1447,72 @@ impl AudioFifo {
             }
         }
         Ok(())
+    }
+
+    fn samples_to_encode(&self, available: i32, flush: bool) -> i32 {
+        if flush && self.pad_final_frame && available < self.frame_size {
+            self.frame_size
+        } else if flush {
+            available.min(self.frame_size)
+        } else {
+            self.frame_size
+        }
+    }
+
+    unsafe fn fill_frame_from_fifo(
+        &mut self,
+        available: i32,
+        samples: i32,
+    ) -> Result<(), ExportPipelineError> {
+        unsafe {
+            ffi::av_frame_unref(self.frame.ptr);
+            (*self.frame.ptr).format = self.sample_fmt;
+            (*self.frame.ptr).sample_rate = self.sample_rate;
+            (*self.frame.ptr).nb_samples = samples;
+            check(
+                ffi::av_channel_layout_copy(
+                    &mut (*self.frame.ptr).ch_layout,
+                    &self.ch_layout.inner,
+                ),
+                "av_channel_layout_copy audio fifo frame",
+            )?;
+            check(
+                ffi::av_frame_get_buffer(self.frame.ptr, 0),
+                "av_frame_get_buffer audio fifo frame",
+            )?;
+            let expected_read = available.min(samples);
+            let read = ffi::av_audio_fifo_read(
+                self.ptr,
+                (*self.frame.ptr).data.as_ptr() as *const *mut c_void,
+                expected_read,
+            );
+            if read != expected_read {
+                return Err(audio_fifo_read_error(read));
+            }
+            if read < samples {
+                check(
+                    ffi::av_samples_set_silence(
+                        (*self.frame.ptr).extended_data,
+                        read,
+                        samples - read,
+                        self.ch_layout.inner.nb_channels,
+                        self.sample_fmt,
+                    ),
+                    "av_samples_set_silence audio fifo padding",
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn audio_fifo_read_error(read: i32) -> ExportPipelineError {
+    if read < 0 {
+        ExportPipelineError::Media {
+            message: format!("av_audio_fifo_read failed: {}", ffmpeg_error(read)),
+        }
+    } else {
+        media_error("av_audio_fifo_read read fewer samples than requested")
     }
 }
 

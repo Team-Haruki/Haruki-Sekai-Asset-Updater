@@ -1,4 +1,17 @@
-use super::*;
+use super::{
+    acquire_cpu_budget_permit_blocking, codec, configure_cpu_budget_throttle,
+    convert_hca_bytes_to_flac_with_backend, convert_hca_bytes_to_mp3_with_backend,
+    convert_m2v_bytes_to_mp4_with_backend, convert_m2v_to_mp4_with_backend,
+    convert_native_surrogate_images_to_png, convert_usm_to_mp4_with_backend,
+    convert_wav_bytes_to_flac_with_backend, convert_wav_bytes_to_mp3_with_backend,
+    handle_png_conversion, merge_usm_inputs, panic_message, post_process_files_by_extension,
+    prepare_usm_processing_inputs, record_max_phase_ms, remove_export_file_if_exists,
+    remove_file_if_exists, run_tasks, scan_all_files, upload_to_all_storages, AppConfig, Arc,
+    AtomicUsize, AudioOutputFormat, Condvar, CpuBudgetPermit, Cursor, Duration,
+    ExportPipelineError, FrameRate, HashMap, Instant, MediaBackend, Mutex,
+    NativeInMemoryMediaSource, OnceLock, Ordering, Path, PathBuf, PostProcessSummary, Read,
+    RegionConfig, Seek, StorageUploadOptions, UsmProcessingInput, VecDeque,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn post_process_exported_files(
@@ -531,171 +544,286 @@ pub(super) async fn process_usm_input_with_metrics(
     let writes_mp4 = region.export.video.writes_mp4();
     let writes_m2v = region.export.video.writes_m2v();
 
-    if !usm_input_has_crid_magic(usm_input)? {
-        if let Some(usm_file) = usm_input.path() {
-            tracing::warn!(
-                path = %usm_file.display(),
-                "skipping .usm post-process input without CRID magic"
-            );
-            output.generated_files.push(usm_file.to_path_buf());
-        } else {
-            tracing::warn!("skipping in-memory .usm post-process input without CRID magic");
-            usm_input.cleanup_sources()?;
-        }
+    if skip_invalid_usm_input(usm_input, &mut output)? {
         return Ok(output);
     }
 
-    if let Some(usm_file) = usm_input.path() {
-        if writes_mp4 && !writes_m2v && region.export.video.direct_mp4 {
-            let mp4 = export_path.join(format!("{output_name}.mp4"));
-            let encode_slot = acquire_media_encode_permit_async(
-                MediaEncodeKind::Video,
-                video_encode_concurrency,
-                cpu_budget,
-            )
-            .await?;
-            record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
-            let phase_started = Instant::now();
-            convert_usm_to_mp4_with_backend(usm_file, &mp4, ffmpeg_path, media_backend, retry)
-                .await?;
-            drop(encode_slot.cpu_permit);
-            drop(encode_slot.permit);
-            add_elapsed_phase_ms(
-                &mut output.phase_ms,
-                "post_process.usm.convert_mp4",
-                phase_started,
-            );
-            usm_input.cleanup_sources()?;
-            output.generated_files.push(mp4);
-            return Ok(output);
-        }
+    if process_direct_usm_path(
+        usm_input,
+        export_path,
+        &output_name,
+        region,
+        ffmpeg_path,
+        media_backend,
+        retry,
+        video_encode_concurrency,
+        cpu_budget,
+        &mut output,
+    )
+    .await?
+    {
+        return Ok(output);
     }
 
-    let frame_rate = match usm_input {
-        UsmProcessingInput::Path(usm_file) => codec::read_usm_metadata(usm_file)
-            .ok()
-            .as_ref()
-            .and_then(|metadata| metadata.video_frame_rate())
-            .filter(|(_, denominator)| *denominator > 0)
-            .map(FrameRate::from_tuple),
-        UsmProcessingInput::Bytes { .. } => None,
-    };
+    let frame_rate = usm_frame_rate(usm_input);
 
-    if writes_mp4 && !writes_m2v {
-        let phase_started = Instant::now();
-        let streams = export_usm_input_to_memory(usm_input, false)?;
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.usm.extract",
-            phase_started,
-        );
-        if let Some(video) = streams
-            .into_iter()
-            .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
-        {
-            let mp4 = export_path.join(format!("{output_name}.mp4"));
-            let encode_slot = acquire_media_encode_permit_async(
-                MediaEncodeKind::Video,
-                video_encode_concurrency,
-                cpu_budget,
-            )
-            .await?;
-            record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
-            let phase_started = Instant::now();
-            convert_m2v_bytes_to_mp4_with_backend(
-                &video.data,
-                &mp4,
-                ffmpeg_path,
-                media_backend,
-                frame_rate,
-                retry,
-            )
-            .await?;
-            drop(encode_slot.cpu_permit);
-            drop(encode_slot.permit);
-            add_elapsed_phase_ms(
-                &mut output.phase_ms,
-                "post_process.usm.convert_mp4",
-                phase_started,
-            );
-            usm_input.cleanup_sources()?;
-            output.generated_files.push(mp4);
-            return Ok(output);
-        }
+    if process_video_only_usm(
+        usm_input,
+        export_path,
+        &output_name,
+        writes_mp4,
+        writes_m2v,
+        ffmpeg_path,
+        media_backend,
+        frame_rate,
+        retry,
+        video_encode_concurrency,
+        cpu_budget,
+        &mut output,
+    )
+    .await?
+    {
+        return Ok(output);
     }
 
     if matches!(usm_input, UsmProcessingInput::Bytes { .. }) {
-        let phase_started = Instant::now();
-        let mut streams = export_usm_input_to_memory(usm_input, true)?;
-        let mut generated = write_usm_streams(export_path, &streams)?;
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.usm.extract",
-            phase_started,
-        );
+        process_memory_usm(
+            usm_input,
+            export_path,
+            &output_name,
+            writes_mp4,
+            writes_m2v,
+            ffmpeg_path,
+            media_backend,
+            frame_rate,
+            retry,
+            video_encode_concurrency,
+            cpu_budget,
+            &mut output,
+        )
+        .await?;
+        return Ok(output);
+    }
 
-        let video = if writes_mp4 {
+    process_path_usm(
+        usm_input,
+        export_path,
+        &output_name,
+        writes_mp4,
+        writes_m2v,
+        ffmpeg_path,
+        media_backend,
+        frame_rate,
+        retry,
+        video_encode_concurrency,
+        cpu_budget,
+        &mut output,
+    )
+    .await?;
+    Ok(output)
+}
+
+fn skip_invalid_usm_input(
+    usm_input: &UsmProcessingInput,
+    output: &mut UsmPostProcessOutput,
+) -> Result<bool, ExportPipelineError> {
+    if usm_input_has_crid_magic(usm_input)? {
+        return Ok(false);
+    }
+    if let Some(usm_file) = usm_input.path() {
+        tracing::warn!(
+            path = %usm_file.display(),
+            "skipping .usm post-process input without CRID magic"
+        );
+        output.generated_files.push(usm_file.to_path_buf());
+    } else {
+        tracing::warn!("skipping in-memory .usm post-process input without CRID magic");
+        usm_input.cleanup_sources()?;
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_direct_usm_path(
+    usm_input: &UsmProcessingInput,
+    export_path: &Path,
+    output_name: &str,
+    region: &RegionConfig,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
+    output: &mut UsmPostProcessOutput,
+) -> Result<bool, ExportPipelineError> {
+    if !region.export.video.writes_mp4()
+        || region.export.video.writes_m2v()
+        || !region.export.video.direct_mp4
+    {
+        return Ok(false);
+    }
+    let Some(usm_file) = usm_input.path() else {
+        return Ok(false);
+    };
+    let mp4 = export_path.join(format!("{output_name}.mp4"));
+    let encode_slot = acquire_media_encode_permit_async(
+        MediaEncodeKind::Video,
+        video_encode_concurrency,
+        cpu_budget,
+    )
+    .await?;
+    record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
+    let phase_started = Instant::now();
+    convert_usm_to_mp4_with_backend(usm_file, &mp4, ffmpeg_path, media_backend, retry).await?;
+    drop(encode_slot.cpu_permit);
+    drop(encode_slot.permit);
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.usm.convert_mp4",
+        phase_started,
+    );
+    usm_input.cleanup_sources()?;
+    output.generated_files.push(mp4);
+    Ok(true)
+}
+
+fn usm_frame_rate(usm_input: &UsmProcessingInput) -> Option<FrameRate> {
+    let UsmProcessingInput::Path(usm_file) = usm_input else {
+        return None;
+    };
+    codec::read_usm_metadata(usm_file)
+        .ok()
+        .as_ref()
+        .and_then(|metadata| metadata.video_frame_rate())
+        .filter(|(_, denominator)| *denominator > 0)
+        .map(FrameRate::from_tuple)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_video_only_usm(
+    usm_input: &UsmProcessingInput,
+    export_path: &Path,
+    output_name: &str,
+    writes_mp4: bool,
+    writes_m2v: bool,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    frame_rate: Option<FrameRate>,
+    retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
+    output: &mut UsmPostProcessOutput,
+) -> Result<bool, ExportPipelineError> {
+    if !writes_mp4 || writes_m2v {
+        return Ok(false);
+    }
+    let phase_started = Instant::now();
+    let streams = export_usm_input_to_memory(usm_input, false)?;
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.usm.extract",
+        phase_started,
+    );
+    let Some(video) = streams
+        .into_iter()
+        .find(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
+    else {
+        return Ok(false);
+    };
+    let mp4 = export_path.join(format!("{output_name}.mp4"));
+    convert_usm_m2v_bytes(
+        &video.data,
+        &mp4,
+        ffmpeg_path,
+        media_backend,
+        frame_rate,
+        retry,
+        video_encode_concurrency,
+        cpu_budget,
+        &mut output.phase_ms,
+    )
+    .await?;
+    usm_input.cleanup_sources()?;
+    output.generated_files.push(mp4);
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_memory_usm(
+    usm_input: &UsmProcessingInput,
+    export_path: &Path,
+    output_name: &str,
+    writes_mp4: bool,
+    writes_m2v: bool,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    frame_rate: Option<FrameRate>,
+    retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
+    output: &mut UsmPostProcessOutput,
+) -> Result<(), ExportPipelineError> {
+    let phase_started = Instant::now();
+    let mut streams = export_usm_input_to_memory(usm_input, true)?;
+    let mut generated = write_usm_streams(export_path, &streams)?;
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.usm.extract",
+        phase_started,
+    );
+    let video = writes_mp4
+        .then(|| {
             streams
                 .iter()
                 .position(|stream| stream.extension.eq_ignore_ascii_case("m2v"))
                 .map(|position| streams.swap_remove(position))
-        } else {
-            None
-        };
-        drop(streams);
-        if let Some(video) = video {
-            let mp4 = export_path.join(format!("{output_name}.mp4"));
-            let encode_slot = acquire_media_encode_permit_async(
-                MediaEncodeKind::Video,
-                video_encode_concurrency,
-                cpu_budget,
-            )
-            .await?;
-            record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
-            let phase_started = Instant::now();
-            convert_m2v_bytes_to_mp4_with_backend(
-                &video.data,
-                &mp4,
-                ffmpeg_path,
-                media_backend,
-                frame_rate,
-                retry,
-            )
-            .await?;
-            drop(encode_slot.cpu_permit);
-            drop(encode_slot.permit);
-            add_elapsed_phase_ms(
-                &mut output.phase_ms,
-                "post_process.usm.convert_mp4",
-                phase_started,
-            );
-            generated.push(mp4);
-            if !writes_m2v {
-                generated.retain(|path| {
-                    !path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| ext.eq_ignore_ascii_case("m2v"))
-                        .unwrap_or(false)
-                });
-                remove_file_if_exists(&export_path.join(format!("{}.m2v", video.name))).map_err(
-                    |source| ExportPipelineError::Io {
-                        path: export_path.join(format!("{}.m2v", video.name)),
-                        source,
-                    },
-                )?;
-            }
+        })
+        .flatten();
+    if let Some(video) = video {
+        let mp4 = export_path.join(format!("{output_name}.mp4"));
+        convert_usm_m2v_bytes(
+            &video.data,
+            &mp4,
+            ffmpeg_path,
+            media_backend,
+            frame_rate,
+            retry,
+            video_encode_concurrency,
+            cpu_budget,
+            &mut output.phase_ms,
+        )
+        .await?;
+        generated.push(mp4);
+        if !writes_m2v {
+            generated.retain(|path| !has_extension(path, "m2v"));
+            let m2v = export_path.join(format!("{}.m2v", video.name));
+            remove_file_if_exists(&m2v)
+                .map_err(|source| ExportPipelineError::Io { path: m2v, source })?;
         }
-
-        usm_input.cleanup_sources()?;
-        output.generated_files = generated;
-        return Ok(output);
     }
+    usm_input.cleanup_sources()?;
+    output.generated_files = generated;
+    Ok(())
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn process_path_usm(
+    usm_input: &UsmProcessingInput,
+    export_path: &Path,
+    output_name: &str,
+    writes_mp4: bool,
+    writes_m2v: bool,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    frame_rate: Option<FrameRate>,
+    retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
+    output: &mut UsmPostProcessOutput,
+) -> Result<(), ExportPipelineError> {
     let usm_file = usm_input
         .path()
         .expect("non-memory USM processing requires a path");
-
     let phase_started = Instant::now();
     let extracted = codec::export_usm(usm_file, export_path)?;
     add_elapsed_phase_ms(
@@ -704,52 +832,112 @@ pub(super) async fn process_usm_input_with_metrics(
         phase_started,
     );
     let mut generated = extracted.clone();
-
     if writes_mp4 {
-        for extracted_file in extracted {
-            if extracted_file
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("m2v"))
-                .unwrap_or(false)
-            {
-                let mp4 = export_path.join(format!("{output_name}.mp4"));
-                let encode_slot = acquire_media_encode_permit_async(
-                    MediaEncodeKind::Video,
-                    video_encode_concurrency,
-                    cpu_budget,
-                )
-                .await?;
-                record_usm_video_encode_acquire(&mut output.phase_ms, &encode_slot);
-                let phase_started = Instant::now();
-                convert_m2v_to_mp4_with_backend(
-                    &extracted_file,
-                    &mp4,
-                    !writes_m2v,
-                    ffmpeg_path,
-                    media_backend,
-                    frame_rate,
-                    retry,
-                )
-                .await?;
-                drop(encode_slot.cpu_permit);
-                drop(encode_slot.permit);
-                add_elapsed_phase_ms(
-                    &mut output.phase_ms,
-                    "post_process.usm.convert_mp4",
-                    phase_started,
-                );
-                generated.push(mp4);
-                if !writes_m2v {
-                    generated.retain(|path| path != &extracted_file);
-                }
+        for extracted_file in extracted
+            .into_iter()
+            .filter(|path| has_extension(path, "m2v"))
+        {
+            let mp4 = export_path.join(format!("{output_name}.mp4"));
+            convert_usm_m2v_path(
+                &extracted_file,
+                &mp4,
+                !writes_m2v,
+                ffmpeg_path,
+                media_backend,
+                frame_rate,
+                retry,
+                video_encode_concurrency,
+                cpu_budget,
+                &mut output.phase_ms,
+            )
+            .await?;
+            generated.push(mp4);
+            if !writes_m2v {
+                generated.retain(|path| path != &extracted_file);
             }
         }
     }
-
     usm_input.cleanup_sources()?;
     output.generated_files = generated;
-    Ok(output)
+    Ok(())
+}
+
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn convert_usm_m2v_bytes(
+    video: &[u8],
+    mp4: &Path,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    frame_rate: Option<FrameRate>,
+    retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
+    phase_ms: &mut HashMap<String, u64>,
+) -> Result<(), ExportPipelineError> {
+    let encode_slot = acquire_media_encode_permit_async(
+        MediaEncodeKind::Video,
+        video_encode_concurrency,
+        cpu_budget,
+    )
+    .await?;
+    record_usm_video_encode_acquire(phase_ms, &encode_slot);
+    let phase_started = Instant::now();
+    convert_m2v_bytes_to_mp4_with_backend(
+        video,
+        mp4,
+        ffmpeg_path,
+        media_backend,
+        frame_rate,
+        retry,
+    )
+    .await?;
+    drop(encode_slot.cpu_permit);
+    drop(encode_slot.permit);
+    add_elapsed_phase_ms(phase_ms, "post_process.usm.convert_mp4", phase_started);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn convert_usm_m2v_path(
+    m2v: &Path,
+    mp4: &Path,
+    remove_source: bool,
+    ffmpeg_path: &str,
+    media_backend: MediaBackend,
+    frame_rate: Option<FrameRate>,
+    retry: &crate::core::config::RetryConfig,
+    video_encode_concurrency: usize,
+    cpu_budget: usize,
+    phase_ms: &mut HashMap<String, u64>,
+) -> Result<(), ExportPipelineError> {
+    let encode_slot = acquire_media_encode_permit_async(
+        MediaEncodeKind::Video,
+        video_encode_concurrency,
+        cpu_budget,
+    )
+    .await?;
+    record_usm_video_encode_acquire(phase_ms, &encode_slot);
+    let phase_started = Instant::now();
+    convert_m2v_to_mp4_with_backend(
+        m2v,
+        mp4,
+        remove_source,
+        ffmpeg_path,
+        media_backend,
+        frame_rate,
+        retry,
+    )
+    .await?;
+    drop(encode_slot.cpu_permit);
+    drop(encode_slot.permit);
+    add_elapsed_phase_ms(phase_ms, "post_process.usm.convert_mp4", phase_started);
+    Ok(())
 }
 
 pub(super) fn usm_input_has_crid_magic(
@@ -952,198 +1140,244 @@ pub(super) fn handle_acb_files_streaming(
     let (track_sender, track_receiver) =
         std::sync::mpsc::sync_channel::<HcaTrackProcessJob>(queue_capacity);
     let track_receiver = Arc::new(Mutex::new(track_receiver));
-    let results = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
-    let phase_ms = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
-    let source_files = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
-    let first_error = Arc::new(Mutex::new(None::<ExportPipelineError>));
-    let hca_track_count = Arc::new(AtomicUsize::new(0));
+    let state = AcbStreamingState::default();
     let hca_started = Instant::now();
-    let mut hca_handles = Vec::with_capacity(hca_worker_count);
-
-    for _ in 0..hca_worker_count {
-        let track_receiver = track_receiver.clone();
-        let results = results.clone();
-        let phase_ms = phase_ms.clone();
-        let first_error = first_error.clone();
-        let output_dir_for_error = options.output_dir.to_path_buf();
-        let region = options.region.clone();
-        let ffmpeg_path = options.ffmpeg_path.to_string();
-        let media_backend = options.media_backend;
-        let retry = options.retry.clone();
-        let audio_encode_concurrency = options.audio_encode_concurrency;
-        let cpu_budget = options.cpu_budget;
-        let handle = std::thread::Builder::new()
-            .name("hca-memory-export".to_string())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || loop {
-                if first_error.lock().unwrap().is_some() {
-                    break;
-                }
-
-                let next_track = track_receiver.lock().unwrap().recv();
-                let Ok(track_job) = next_track else {
-                    break;
-                };
-
-                let track_options = HcaTrackProcessOptions {
-                    output_dir: &track_job.output_dir,
-                    region: &region,
-                    ffmpeg_path: &ffmpeg_path,
-                    media_backend,
-                    retry: &retry,
-                    audio_encode_concurrency,
-                    cpu_budget,
-                };
-                match process_hca_track(track_job.track, &track_options) {
-                    Ok(track_output) => {
-                        results.lock().unwrap().extend(track_output.generated_files);
-                        merge_raw_phase_ms(&mut phase_ms.lock().unwrap(), &track_output.phase_ms);
-                    }
-                    Err(err) => {
-                        set_first_error(&first_error, err);
-                        break;
-                    }
-                }
-            })
-            .map_err(|source| ExportPipelineError::Io {
-                path: output_dir_for_error,
-                source,
-            })?;
-        hca_handles.push(handle);
-    }
+    let hca_handles =
+        spawn_hca_stream_workers(hca_worker_count, track_receiver, state.clone(), options)?;
 
     let acb_queue = Arc::new(Mutex::new(VecDeque::from(acb_inputs)));
-    let mut acb_handles = Vec::with_capacity(acb_worker_count);
-    for _ in 0..acb_worker_count {
-        let acb_queue = acb_queue.clone();
-        let track_sender = track_sender.clone();
-        let results = results.clone();
-        let phase_ms = phase_ms.clone();
-        let source_files = source_files.clone();
-        let first_error = first_error.clone();
-        let hca_track_count = hca_track_count.clone();
-        let output_dir_for_error = options.output_dir.to_path_buf();
-        let worker_output_dir = options.output_dir.to_path_buf();
-        let region = options.region.clone();
-        let ffmpeg_path = options.ffmpeg_path.to_string();
-        let media_backend = options.media_backend;
-        let retry = options.retry.clone();
-        let hca_concurrency = options.hca_concurrency;
-        let audio_encode_concurrency = options.audio_encode_concurrency;
-        let cpu_budget = options.cpu_budget;
-        let handle = std::thread::Builder::new()
-            .name("acb-track-extract".to_string())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || loop {
-                if first_error.lock().unwrap().is_some() {
-                    break;
-                }
-
-                let next_acb = acb_queue.lock().unwrap().pop_front();
-                let Some(acb_input) = next_acb else {
-                    break;
-                };
-
-                let worker_options = AcbPostProcessOptions {
-                    output_dir: &worker_output_dir,
-                    region: &region,
-                    ffmpeg_path: &ffmpeg_path,
-                    media_backend,
-                    retry: &retry,
-                    hca_concurrency,
-                    audio_encode_concurrency,
-                    cpu_budget,
-                };
-                match extract_acb_tracks_from_input(acb_input, &worker_options) {
-                    Ok(output) => {
-                        results.lock().unwrap().extend(output.generated_files);
-                        merge_raw_phase_ms(&mut phase_ms.lock().unwrap(), &output.phase_ms);
-                        if let Some(source_file) = output.source_file {
-                            source_files.lock().unwrap().push(source_file);
-                        }
-                        let track_output_dir = output.output_dir;
-                        for track in output.hca_tracks {
-                            hca_track_count.fetch_add(1, Ordering::Relaxed);
-                            let job = HcaTrackProcessJob {
-                                track,
-                                output_dir: track_output_dir.clone(),
-                            };
-                            if !send_hca_track(&track_sender, job, &first_error) {
-                                break;
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        set_first_error(&first_error, err);
-                        break;
-                    }
-                }
-            })
-            .map_err(|source| ExportPipelineError::Io {
-                path: output_dir_for_error,
-                source,
-            })?;
-        acb_handles.push(handle);
-    }
+    let acb_handles = spawn_acb_stream_workers(
+        acb_worker_count,
+        acb_queue,
+        track_sender.clone(),
+        state.clone(),
+        options,
+    )?;
     drop(track_sender);
+    join_stream_workers(acb_handles, "acb track extract")?;
+    join_stream_workers(hca_handles, "hca memory export")?;
+    finish_acb_streaming(
+        state,
+        acb_file_count,
+        acb_worker_count,
+        hca_worker_count,
+        hca_started,
+    )
+}
 
-    for handle in acb_handles {
+#[derive(Clone, Default)]
+struct AcbStreamingState {
+    results: Arc<Mutex<Vec<PathBuf>>>,
+    phase_ms: Arc<Mutex<HashMap<String, u64>>>,
+    source_files: Arc<Mutex<Vec<PathBuf>>>,
+    first_error: Arc<Mutex<Option<ExportPipelineError>>>,
+    hca_track_count: Arc<AtomicUsize>,
+}
+
+fn spawn_hca_stream_workers(
+    worker_count: usize,
+    receiver: Arc<Mutex<std::sync::mpsc::Receiver<HcaTrackProcessJob>>>,
+    state: AcbStreamingState,
+    options: &AcbPostProcessOptions<'_>,
+) -> Result<Vec<std::thread::JoinHandle<()>>, ExportPipelineError> {
+    let mut handles = Vec::with_capacity(worker_count);
+    for _ in 0..worker_count {
+        let receiver = receiver.clone();
+        let state = state.clone();
+        let owned_options = OwnedAcbPostProcessOptions::from(options);
+        handles.push(
+            std::thread::Builder::new()
+                .name("hca-memory-export".to_string())
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || run_hca_stream_worker(receiver, state, owned_options))
+                .map_err(|source| ExportPipelineError::Io {
+                    path: options.output_dir.to_path_buf(),
+                    source,
+                })?,
+        );
+    }
+    Ok(handles)
+}
+
+fn run_hca_stream_worker(
+    receiver: Arc<Mutex<std::sync::mpsc::Receiver<HcaTrackProcessJob>>>,
+    state: AcbStreamingState,
+    options: OwnedAcbPostProcessOptions,
+) {
+    while state.first_error.lock().unwrap().is_none() {
+        let Ok(job) = receiver.lock().unwrap().recv() else {
+            break;
+        };
+        let track_options = HcaTrackProcessOptions {
+            output_dir: &job.output_dir,
+            region: &options.region,
+            ffmpeg_path: &options.ffmpeg_path,
+            media_backend: options.media_backend,
+            retry: &options.retry,
+            audio_encode_concurrency: options.audio_encode_concurrency,
+            cpu_budget: options.cpu_budget,
+        };
+        match process_hca_track(job.track, &track_options) {
+            Ok(output) => merge_hca_stream_output(&state, output),
+            Err(err) => {
+                set_first_error(&state.first_error, err);
+                break;
+            }
+        }
+    }
+}
+
+fn merge_hca_stream_output(state: &AcbStreamingState, output: HcaTrackProcessOutput) {
+    state.results.lock().unwrap().extend(output.generated_files);
+    merge_raw_phase_ms(&mut state.phase_ms.lock().unwrap(), &output.phase_ms);
+}
+
+fn spawn_acb_stream_workers(
+    worker_count: usize,
+    queue: Arc<Mutex<VecDeque<AcbExtractionInput>>>,
+    sender: std::sync::mpsc::SyncSender<HcaTrackProcessJob>,
+    state: AcbStreamingState,
+    options: &AcbPostProcessOptions<'_>,
+) -> Result<Vec<std::thread::JoinHandle<()>>, ExportPipelineError> {
+    let mut handles = Vec::with_capacity(worker_count);
+    for _ in 0..worker_count {
+        let queue = queue.clone();
+        let sender = sender.clone();
+        let state = state.clone();
+        let owned_options = OwnedAcbPostProcessOptions::from(options);
+        handles.push(
+            std::thread::Builder::new()
+                .name("acb-track-extract".to_string())
+                .stack_size(32 * 1024 * 1024)
+                .spawn(move || run_acb_stream_worker(queue, sender, state, owned_options))
+                .map_err(|source| ExportPipelineError::Io {
+                    path: options.output_dir.to_path_buf(),
+                    source,
+                })?,
+        );
+    }
+    Ok(handles)
+}
+
+fn run_acb_stream_worker(
+    queue: Arc<Mutex<VecDeque<AcbExtractionInput>>>,
+    sender: std::sync::mpsc::SyncSender<HcaTrackProcessJob>,
+    state: AcbStreamingState,
+    options: OwnedAcbPostProcessOptions,
+) {
+    while state.first_error.lock().unwrap().is_none() {
+        let Some(input) = queue.lock().unwrap().pop_front() else {
+            break;
+        };
+        let worker_options = options.as_borrowed();
+        match extract_acb_tracks_from_input(input, &worker_options) {
+            Ok(output) => forward_acb_stream_output(output, &sender, &state),
+            Err(err) => {
+                set_first_error(&state.first_error, err);
+                break;
+            }
+        }
+    }
+}
+
+fn forward_acb_stream_output(
+    output: AcbTrackExtractionOutput,
+    sender: &std::sync::mpsc::SyncSender<HcaTrackProcessJob>,
+    state: &AcbStreamingState,
+) {
+    state.results.lock().unwrap().extend(output.generated_files);
+    merge_raw_phase_ms(&mut state.phase_ms.lock().unwrap(), &output.phase_ms);
+    if let Some(source_file) = output.source_file {
+        state.source_files.lock().unwrap().push(source_file);
+    }
+    for track in output.hca_tracks {
+        state.hca_track_count.fetch_add(1, Ordering::Relaxed);
+        let job = HcaTrackProcessJob {
+            track,
+            output_dir: output.output_dir.clone(),
+        };
+        if !send_hca_track(sender, job, &state.first_error) {
+            break;
+        }
+    }
+}
+
+fn join_stream_workers(
+    handles: Vec<std::thread::JoinHandle<()>>,
+    worker: &str,
+) -> Result<(), ExportPipelineError> {
+    for handle in handles {
         handle
             .join()
             .map_err(|panic| ExportPipelineError::WorkerPanic {
-                worker: "acb track extract".to_string(),
+                worker: worker.to_string(),
                 message: panic_message(panic),
             })?;
     }
-    for handle in hca_handles {
-        handle
-            .join()
-            .map_err(|panic| ExportPipelineError::WorkerPanic {
-                worker: "hca memory export".to_string(),
-                message: panic_message(panic),
-            })?;
-    }
+    Ok(())
+}
 
-    if let Some(err) = first_error.lock().unwrap().take() {
+fn finish_acb_streaming(
+    state: AcbStreamingState,
+    acb_file_count: usize,
+    acb_worker_count: usize,
+    hca_worker_count: usize,
+    hca_started: Instant,
+) -> Result<AcbPostProcessOutput, ExportPipelineError> {
+    if let Some(err) = state.first_error.lock().unwrap().take() {
         return Err(err);
     }
+    let mut output = AcbPostProcessOutput::default();
+    add_acb_streaming_metrics(
+        &mut output,
+        &state,
+        acb_file_count,
+        acb_worker_count,
+        hca_worker_count,
+        hca_started,
+    );
+    output.generated_files = std::mem::take(&mut *state.results.lock().unwrap());
+    remove_acb_source_files(&state.source_files, &mut output.phase_ms)?;
+    Ok(output)
+}
 
-    let mut merged = AcbPostProcessOutput::default();
-    merged.phase_ms.insert(
-        "media_scheduler.acb_file_count".to_string(),
-        acb_file_count as u64,
-    );
-    merged.phase_ms.insert(
-        "media_scheduler.acb_worker_count".to_string(),
-        acb_worker_count as u64,
-    );
-    merged.phase_ms.insert(
-        "media_scheduler.hca_track_count".to_string(),
-        hca_track_count.load(Ordering::Relaxed) as u64,
-    );
-    merged.phase_ms.insert(
-        "media_scheduler.hca_worker_count".to_string(),
-        hca_worker_count as u64,
-    );
-    merge_raw_phase_ms(&mut merged.phase_ms, &phase_ms.lock().unwrap());
+fn add_acb_streaming_metrics(
+    output: &mut AcbPostProcessOutput,
+    state: &AcbStreamingState,
+    acb_file_count: usize,
+    acb_worker_count: usize,
+    hca_worker_count: usize,
+    hca_started: Instant,
+) {
+    for (key, value) in [
+        ("media_scheduler.acb_file_count", acb_file_count),
+        ("media_scheduler.acb_worker_count", acb_worker_count),
+        (
+            "media_scheduler.hca_track_count",
+            state.hca_track_count.load(Ordering::Relaxed),
+        ),
+        ("media_scheduler.hca_worker_count", hca_worker_count),
+    ] {
+        output.phase_ms.insert(key.to_string(), value as u64);
+    }
+    merge_raw_phase_ms(&mut output.phase_ms, &state.phase_ms.lock().unwrap());
     add_elapsed_phase_ms(
-        &mut merged.phase_ms,
+        &mut output.phase_ms,
         "post_process.acb.hca_tracks_wall",
         hca_started,
     );
-    // Workers have joined, so this holds the only reference; move the vec out instead of cloning.
-    merged.generated_files = std::mem::take(&mut *results.lock().unwrap());
+}
 
+fn remove_acb_source_files(
+    source_files: &Arc<Mutex<Vec<PathBuf>>>,
+    phase_ms: &mut HashMap<String, u64>,
+) -> Result<(), ExportPipelineError> {
     for source_file in source_files.lock().unwrap().iter() {
         let phase_started = Instant::now();
         remove_export_file_if_exists(source_file)?;
-        add_elapsed_phase_ms(
-            &mut merged.phase_ms,
-            "post_process.acb.remove_source",
-            phase_started,
-        );
+        add_elapsed_phase_ms(phase_ms, "post_process.acb.remove_source", phase_started);
     }
-    Ok(merged)
+    Ok(())
 }
 
 pub(super) fn set_first_error(
@@ -1211,6 +1445,36 @@ pub(super) struct OwnedAcbPostProcessOptions {
     pub(super) hca_concurrency: usize,
     pub(super) audio_encode_concurrency: usize,
     pub(super) cpu_budget: usize,
+}
+
+impl OwnedAcbPostProcessOptions {
+    fn as_borrowed(&self) -> AcbPostProcessOptions<'_> {
+        AcbPostProcessOptions {
+            output_dir: &self.output_dir,
+            region: &self.region,
+            ffmpeg_path: &self.ffmpeg_path,
+            media_backend: self.media_backend,
+            retry: &self.retry,
+            hca_concurrency: self.hca_concurrency,
+            audio_encode_concurrency: self.audio_encode_concurrency,
+            cpu_budget: self.cpu_budget,
+        }
+    }
+}
+
+impl From<&AcbPostProcessOptions<'_>> for OwnedAcbPostProcessOptions {
+    fn from(options: &AcbPostProcessOptions<'_>) -> Self {
+        Self {
+            output_dir: options.output_dir.to_path_buf(),
+            region: options.region.clone(),
+            ffmpeg_path: options.ffmpeg_path.to_string(),
+            media_backend: options.media_backend,
+            retry: options.retry.clone(),
+            hca_concurrency: options.hca_concurrency,
+            audio_encode_concurrency: options.audio_encode_concurrency,
+            cpu_budget: options.cpu_budget,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1325,30 +1589,7 @@ where
         ..AcbTrackExtractionOutput::default()
     };
 
-    let phase_started = Instant::now();
-    let mut hca_tracks = share_acb_waveforms(codec::export_acb_unique_to_memory(
-        acb_reader,
-        Some(source_hint),
-    )?);
-    add_elapsed_phase_ms(
-        &mut output.phase_ms,
-        "post_process.acb.extract_tracks",
-        phase_started,
-    );
-
-    let phase_started = Instant::now();
-    let acb_path_lower = source_hint
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_lowercase();
-    if acb_path_lower.contains("music/long") {
-        hca_tracks.retain(|track| should_keep_music_long_hca_track(&track.name, &track.extension));
-    }
-    add_elapsed_phase_ms(
-        &mut output.phase_ms,
-        "post_process.acb.filter_tracks",
-        phase_started,
-    );
+    let hca_tracks = extract_and_filter_acb_tracks(acb_reader, source_hint, &mut output.phase_ms)?;
 
     if !options.region.export.hca.decode {
         return Ok(output);
@@ -1356,6 +1597,40 @@ where
 
     output.hca_tracks = hca_tracks;
     Ok(output)
+}
+
+fn extract_and_filter_acb_tracks<R>(
+    acb_reader: R,
+    source_hint: &Path,
+    phase_ms: &mut HashMap<String, u64>,
+) -> Result<Vec<SharedAcbTrack>, ExportPipelineError>
+where
+    R: Read + Seek,
+{
+    let phase_started = Instant::now();
+    let tracks = share_acb_waveforms(codec::export_acb_unique_to_memory(
+        acb_reader,
+        Some(source_hint),
+    )?);
+    add_elapsed_phase_ms(phase_ms, "post_process.acb.extract_tracks", phase_started);
+    let phase_started = Instant::now();
+    let tracks = filter_music_long_tracks(source_hint, tracks);
+    add_elapsed_phase_ms(phase_ms, "post_process.acb.filter_tracks", phase_started);
+    Ok(tracks)
+}
+
+fn filter_music_long_tracks(
+    source_hint: &Path,
+    mut tracks: Vec<SharedAcbTrack>,
+) -> Vec<SharedAcbTrack> {
+    let source = source_hint
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase();
+    if source.contains("music/long") {
+        tracks.retain(|track| should_keep_music_long_hca_track(&track.name, &track.extension));
+    }
+    tracks
 }
 
 pub(super) fn should_keep_music_long_hca_track(name: &str, extension: &str) -> bool {
@@ -1594,163 +1869,239 @@ pub(super) fn process_hca_track(
     options: &HcaTrackProcessOptions<'_>,
 ) -> Result<HcaTrackProcessOutput, ExportPipelineError> {
     let mut output = HcaTrackProcessOutput::default();
-    let hca_name = format!("{}.{}", track.name, track.extension);
     if !track.extension.eq_ignore_ascii_case("hca") {
+        return write_non_hca_track(track, options);
+    }
+
+    let Some(formats) = HcaFormatPlan::from_options(options) else {
+        return Ok(output);
+    };
+    let wav_file = options.output_dir.join(format!("{}.wav", track.name));
+
+    if formats.wav_only() {
+        decode_hca_to_wav_file(&track.data, &wav_file, options.cpu_budget, &mut output)?;
+        return Ok(output);
+    }
+
+    if !formats.encodes_audio() {
+        return Ok(output);
+    }
+
+    let wav_bytes = prepare_hca_wav_bytes(
+        &track.data,
+        &wav_file,
+        formats,
+        options.cpu_budget,
+        &mut output,
+    )?;
+
+    if formats.encode_mp3 {
+        encode_hca_mp3(&track, wav_bytes.as_deref(), options, &mut output)?;
+    }
+    if formats.encode_flac {
+        encode_hca_flac(&track, wav_bytes.as_deref(), options, &mut output)?;
+    }
+
+    Ok(output)
+}
+
+#[derive(Clone, Copy)]
+struct HcaFormatPlan {
+    keep_wav: bool,
+    encode_mp3: bool,
+    encode_flac: bool,
+}
+
+impl HcaFormatPlan {
+    fn from_options(options: &HcaTrackProcessOptions<'_>) -> Option<Self> {
+        let formats = options.region.export.audio.output_formats();
+        (!formats.is_empty()).then(|| Self {
+            keep_wav: formats.contains(&AudioOutputFormat::Wav),
+            encode_mp3: formats.contains(&AudioOutputFormat::Mp3),
+            encode_flac: formats.contains(&AudioOutputFormat::Flac),
+        })
+    }
+
+    fn wav_only(self) -> bool {
+        self.keep_wav && !self.encode_mp3 && !self.encode_flac
+    }
+
+    fn encodes_audio(self) -> bool {
+        self.encode_mp3 || self.encode_flac
+    }
+
+    fn needs_wav_bytes(self) -> bool {
+        (self.keep_wav && self.encodes_audio()) || (self.encode_mp3 && self.encode_flac)
+    }
+}
+
+fn write_non_hca_track(
+    track: SharedAcbTrack,
+    options: &HcaTrackProcessOptions<'_>,
+) -> Result<HcaTrackProcessOutput, ExportPipelineError> {
+    let mut output = HcaTrackProcessOutput::default();
+    let phase_started = Instant::now();
+    let output_path = options
+        .output_dir
+        .join(format!("{}.{}", track.name, track.extension));
+    std::fs::write(&output_path, track.data).map_err(|source| ExportPipelineError::Io {
+        path: output_path.clone(),
+        source,
+    })?;
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.hca.write_non_hca",
+        phase_started,
+    );
+    output.generated_files.push(output_path);
+    Ok(output)
+}
+
+fn record_hca_cpu_wait(output: &mut HcaTrackProcessOutput, wait_ms: u64) {
+    add_phase_ms(
+        &mut output.phase_ms,
+        "post_process.hca.cpu_budget_wait",
+        wait_ms,
+    );
+    add_phase_ms(&mut output.phase_ms, "cpu_budget.wait", wait_ms);
+}
+
+fn decode_hca_to_wav_file(
+    data: &[u8],
+    wav_file: &Path,
+    cpu_budget: usize,
+    output: &mut HcaTrackProcessOutput,
+) -> Result<(), ExportPipelineError> {
+    let cpu_slot = acquire_cpu_budget_permit_blocking(cpu_budget)?;
+    record_hca_cpu_wait(output, cpu_slot.wait_ms);
+    let phase_started = Instant::now();
+    codec::decode_hca_bytes_to_wav(data, wav_file)?;
+    drop(cpu_slot.permit);
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.hca.decode_write_wav",
+        phase_started,
+    );
+    output.generated_files.push(wav_file.to_path_buf());
+    Ok(())
+}
+
+fn prepare_hca_wav_bytes(
+    data: &[u8],
+    wav_file: &Path,
+    formats: HcaFormatPlan,
+    cpu_budget: usize,
+    output: &mut HcaTrackProcessOutput,
+) -> Result<Option<Vec<u8>>, ExportPipelineError> {
+    if !formats.needs_wav_bytes() {
+        return Ok(None);
+    }
+    let cpu_slot = acquire_cpu_budget_permit_blocking(cpu_budget)?;
+    record_hca_cpu_wait(output, cpu_slot.wait_ms);
+    let phase_started = Instant::now();
+    let wav_bytes = codec::decode_hca_bytes_to_wav_bytes(data)?;
+    drop(cpu_slot.permit);
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.hca.decode_wav",
+        phase_started,
+    );
+    if formats.keep_wav {
         let phase_started = Instant::now();
-        let output_path = options.output_dir.join(hca_name);
-        std::fs::write(&output_path, track.data).map_err(|source| ExportPipelineError::Io {
-            path: output_path.clone(),
+        std::fs::write(wav_file, &wav_bytes).map_err(|source| ExportPipelineError::Io {
+            path: wav_file.to_path_buf(),
             source,
         })?;
         add_elapsed_phase_ms(
             &mut output.phase_ms,
-            "post_process.hca.write_non_hca",
+            "post_process.hca.write_wav",
             phase_started,
         );
-        output.generated_files.push(output_path);
-        return Ok(output);
+        output.generated_files.push(wav_file.to_path_buf());
     }
+    Ok(Some(wav_bytes))
+}
 
-    let audio_formats = options.region.export.audio.output_formats();
-    if audio_formats.is_empty() {
-        return Ok(output);
-    }
-    let keep_wav = audio_formats.contains(&AudioOutputFormat::Wav);
-    let encode_mp3 = audio_formats.contains(&AudioOutputFormat::Mp3);
-    let encode_flac = audio_formats.contains(&AudioOutputFormat::Flac);
-    let needs_wav_bytes = (keep_wav && (encode_mp3 || encode_flac)) || (encode_mp3 && encode_flac);
-    let wav_file = options.output_dir.join(format!("{}.wav", track.name));
-
-    if keep_wav && !encode_mp3 && !encode_flac {
-        let cpu_slot = acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
-        add_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.cpu_budget_wait",
-            cpu_slot.wait_ms,
-        );
-        add_phase_ms(&mut output.phase_ms, "cpu_budget.wait", cpu_slot.wait_ms);
-        let phase_started = Instant::now();
-        codec::decode_hca_bytes_to_wav(&track.data, &wav_file)?;
-        drop(cpu_slot.permit);
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.decode_write_wav",
-            phase_started,
-        );
-        output.generated_files.push(wav_file);
-        return Ok(output);
-    }
-
-    if !encode_mp3 && !encode_flac {
-        return Ok(output);
-    }
-
-    let wav_bytes = if needs_wav_bytes {
-        let cpu_slot = acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
-        add_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.cpu_budget_wait",
-            cpu_slot.wait_ms,
-        );
-        add_phase_ms(&mut output.phase_ms, "cpu_budget.wait", cpu_slot.wait_ms);
-        let phase_started = Instant::now();
-        let wav_bytes = codec::decode_hca_bytes_to_wav_bytes(&track.data)?;
-        drop(cpu_slot.permit);
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.decode_wav",
-            phase_started,
-        );
-
-        if keep_wav {
-            let phase_started = Instant::now();
-            std::fs::write(&wav_file, &wav_bytes).map_err(|source| ExportPipelineError::Io {
-                path: wav_file.clone(),
-                source,
-            })?;
-            add_elapsed_phase_ms(
-                &mut output.phase_ms,
-                "post_process.hca.write_wav",
-                phase_started,
-            );
-            output.generated_files.push(wav_file.clone());
-        }
-        Some(wav_bytes)
+fn encode_hca_mp3(
+    track: &SharedAcbTrack,
+    wav_bytes: Option<&[u8]>,
+    options: &HcaTrackProcessOptions<'_>,
+    output: &mut HcaTrackProcessOutput,
+) -> Result<(), ExportPipelineError> {
+    let mp3 = options.output_dir.join(format!("{}.mp3", track.name));
+    let encode_slot = acquire_media_encode_permit(
+        MediaEncodeKind::Audio,
+        options.audio_encode_concurrency,
+        options.cpu_budget,
+    )?;
+    record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
+    let phase_started = Instant::now();
+    if let Some(wav_bytes) = wav_bytes {
+        convert_wav_bytes_to_mp3_with_backend(
+            wav_bytes,
+            &mp3,
+            options.ffmpeg_path,
+            options.media_backend,
+            options.retry,
+        )?;
     } else {
-        None
-    };
-
-    if encode_mp3 {
-        let mp3 = options.output_dir.join(format!("{}.mp3", track.name));
-        let encode_slot = acquire_media_encode_permit(
-            MediaEncodeKind::Audio,
-            options.audio_encode_concurrency,
-            options.cpu_budget,
+        convert_hca_bytes_to_mp3_with_backend(
+            &track.data,
+            &mp3,
+            options.ffmpeg_path,
+            options.media_backend,
+            options.retry,
         )?;
-        record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
-        let phase_started = Instant::now();
-        if let Some(wav_bytes) = wav_bytes.as_deref() {
-            convert_wav_bytes_to_mp3_with_backend(
-                wav_bytes,
-                &mp3,
-                options.ffmpeg_path,
-                options.media_backend,
-                options.retry,
-            )?;
-        } else {
-            convert_hca_bytes_to_mp3_with_backend(
-                &track.data,
-                &mp3,
-                options.ffmpeg_path,
-                options.media_backend,
-                options.retry,
-            )?;
-        }
-        drop(encode_slot.cpu_permit);
-        drop(encode_slot.permit);
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.convert_mp3",
-            phase_started,
-        );
-        output.generated_files.push(mp3);
     }
+    drop(encode_slot.cpu_permit);
+    drop(encode_slot.permit);
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.hca.convert_mp3",
+        phase_started,
+    );
+    output.generated_files.push(mp3);
+    Ok(())
+}
 
-    if encode_flac {
-        let flac = options.output_dir.join(format!("{}.flac", track.name));
-        let encode_slot = acquire_media_encode_permit(
-            MediaEncodeKind::Audio,
-            options.audio_encode_concurrency,
-            options.cpu_budget,
+fn encode_hca_flac(
+    track: &SharedAcbTrack,
+    wav_bytes: Option<&[u8]>,
+    options: &HcaTrackProcessOptions<'_>,
+    output: &mut HcaTrackProcessOutput,
+) -> Result<(), ExportPipelineError> {
+    let flac = options.output_dir.join(format!("{}.flac", track.name));
+    let encode_slot = acquire_media_encode_permit(
+        MediaEncodeKind::Audio,
+        options.audio_encode_concurrency,
+        options.cpu_budget,
+    )?;
+    record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
+    let phase_started = Instant::now();
+    if let Some(wav_bytes) = wav_bytes {
+        convert_wav_bytes_to_flac_with_backend(
+            wav_bytes,
+            &flac,
+            options.ffmpeg_path,
+            options.media_backend,
+            options.retry,
         )?;
-        record_hca_media_encode_acquire(&mut output.phase_ms, &encode_slot);
-        let phase_started = Instant::now();
-        if let Some(wav_bytes) = wav_bytes.as_deref() {
-            convert_wav_bytes_to_flac_with_backend(
-                wav_bytes,
-                &flac,
-                options.ffmpeg_path,
-                options.media_backend,
-                options.retry,
-            )?;
-        } else {
-            convert_hca_bytes_to_flac_with_backend(
-                &track.data,
-                &flac,
-                options.ffmpeg_path,
-                options.media_backend,
-                options.retry,
-            )?;
-        }
-        drop(encode_slot.cpu_permit);
-        drop(encode_slot.permit);
-        add_elapsed_phase_ms(
-            &mut output.phase_ms,
-            "post_process.hca.convert_flac",
-            phase_started,
-        );
-        output.generated_files.push(flac);
+    } else {
+        convert_hca_bytes_to_flac_with_backend(
+            &track.data,
+            &flac,
+            options.ffmpeg_path,
+            options.media_backend,
+            options.retry,
+        )?;
     }
-
-    Ok(output)
+    drop(encode_slot.cpu_permit);
+    drop(encode_slot.permit);
+    add_elapsed_phase_ms(
+        &mut output.phase_ms,
+        "post_process.hca.convert_flac",
+        phase_started,
+    );
+    output.generated_files.push(flac);
+    Ok(())
 }
