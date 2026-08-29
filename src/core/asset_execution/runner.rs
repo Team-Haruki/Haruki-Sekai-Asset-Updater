@@ -898,14 +898,25 @@ impl AssetExecutionContext {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
 
+    use axum::Router;
     use tempfile::tempdir;
 
+    use crate::core::config::{
+        AppConfig, RegionConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
+    };
     use crate::core::download_records::DownloadRecord;
+    use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
+    use crate::core::pipeline::prepare_asset_run;
 
-    use super::super::model::AssetExecutionContext;
-
+    use super::super::model::{
+        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
+    };
     use super::super::runner::post_process_backlog_capacity;
+    use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
 
     #[tokio::test]
     async fn blocking_record_save_returns_the_original_record() {
@@ -932,5 +943,242 @@ mod tests {
         assert_eq!(post_process_backlog_capacity(0, 0), 1);
         assert_eq!(post_process_backlog_capacity(8, 2), 4);
         assert_eq!(post_process_backlog_capacity(4, 12), 24);
+    }
+
+    /// Serves an asset-info document and one bundle per name, so `execute` can
+    /// be driven end to end without a network.
+    fn serve(
+        bundles: Vec<(&'static str, Vec<u8>)>,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<()>,
+        AssetBundleInfo,
+    ) {
+        use axum::routing::get;
+
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: bundles
+                .iter()
+                .map(|(name, _)| {
+                    (
+                        (*name).to_string(),
+                        AssetBundleDetail {
+                            bundle_name: (*name).to_string(),
+                            cache_file_name: name.replace('/', "_"),
+                            cache_directory_name: "d".to_string(),
+                            hash: format!("{name}-hash"),
+                            category: AssetCategory::StartApp,
+                            crc: 1,
+                            file_size: 1,
+                            dependencies: Vec::new(),
+                            paths: Vec::new(),
+                            is_builtin: false,
+                            is_relocate: None,
+                            md5_hash: None,
+                            download_path: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+
+        let encrypted = encrypt_asset_info(&info);
+        let mut app = Router::new().route(
+            "/info/production/abc/1/hash",
+            get(move || {
+                let encrypted = encrypted.clone();
+                async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                        encrypted,
+                    )
+                }
+            }),
+        );
+        for (name, body) in bundles {
+            app = app.route(
+                &format!("/bundle/{name}"),
+                get(move || {
+                    let body = body.clone();
+                    async move {
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                            axum::body::Body::from(body),
+                        )
+                    }
+                }),
+            );
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, app).await.unwrap();
+        });
+        (addr, handle, info)
+    }
+
+    fn execution_config(
+        addr: std::net::SocketAddr,
+        temp: &std::path::Path,
+    ) -> (AppConfig, AssetUpdateRequest) {
+        let mut profile_hashes = BTreeMap::new();
+        profile_hashes.insert("production".to_string(), "abc".to_string());
+        let region = RegionConfig {
+            enabled: true,
+            provider: RegionProviderConfig::ColorfulPalette {
+                asset_info_url_template: format!(
+                    "http://{addr}/info/{{env}}/{{hash}}/{{asset_version}}/{{asset_hash}}"
+                ),
+                asset_bundle_url_template: format!("http://{addr}/bundle/{{bundle_path}}"),
+                profile: "production".to_string(),
+                profile_hashes,
+                required_cookies: false,
+                cookie_bootstrap_url: None,
+            },
+            crypto: crate::core::config::CryptoConfig {
+                aes_key_hex: Some(TEST_AES_KEY_HEX.to_string()),
+                aes_iv_hex: Some(TEST_AES_IV_HEX.to_string()),
+            },
+            runtime: RegionRuntimeConfig {
+                unity_version: "2022.3.21f1".to_string(),
+            },
+            paths: RegionPathsConfig {
+                asset_save_dir: Some(temp.join("exports").to_string_lossy().into_owned()),
+                downloaded_asset_record_file: Some(
+                    temp.join("record.json").to_string_lossy().into_owned(),
+                ),
+            },
+            filters: crate::core::config::RegionFiltersConfig {
+                start_app: vec!["^start/".to_string()],
+                on_demand: Vec::new(),
+                skip: Vec::new(),
+                priority: vec!["^start/".to_string()],
+            },
+            ..RegionConfig::default()
+        };
+        let mut regions = BTreeMap::new();
+        regions.insert("jp".to_string(), region);
+        (
+            AppConfig {
+                regions,
+                ..AppConfig::default()
+            },
+            AssetUpdateRequest {
+                region: "jp".to_string(),
+                asset_version: Some("1".to_string()),
+                asset_hash: Some("hash".to_string()),
+                dry_run: false,
+                mode: AssetUpdateMode::Update,
+            },
+        )
+    }
+
+    /// Every queued bundle must be accounted for exactly once, and a bundle
+    /// the exporter makes nothing of must not abort the run -- one bad bundle
+    /// turning into a dead job is the failure mode worth guarding.
+    ///
+    /// It also pins something surprising. These bundles are not Unity bundles
+    /// at all, and they still count as *completed*: unity-rs accepts input it
+    /// does not recognise as a collection with no objects, which is
+    /// indistinguishable from a bundle that legitimately exports nothing. The
+    /// consequence is visible here -- they land in the download record, so a
+    /// later run treats them as done and never refetches them.
+    #[tokio::test]
+    async fn every_queued_bundle_is_accounted_for_exactly_once() {
+        let temp = tempdir().unwrap();
+        // Deobfuscation strips this header; what is left is not a Unity bundle.
+        let garbage = |tag: u8| vec![0x20, 0x00, 0x00, 0x00, b'N', b'O', b'P', b'E', tag];
+        let (addr, server, _info) = serve(vec![
+            ("start/a", garbage(1)),
+            ("start/b", garbage(2)),
+            ("start/c", garbage(3)),
+        ]);
+        let (config, request) = execution_config(addr, temp.path());
+
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
+        let summary = executor.execute(&config, None, None).await.unwrap();
+
+        assert_eq!(summary.queued_downloads, 3);
+        assert_eq!(
+            summary.completed_downloads + summary.failed_downloads,
+            3,
+            "every queued bundle must be accounted for exactly once"
+        );
+        assert_eq!(
+            (summary.completed_downloads, summary.failed_downloads),
+            (3, 0),
+            "an unrecognised bundle exports as an empty object set, not an error"
+        );
+
+        let record =
+            crate::core::download_records::load_download_record(temp.path().join("record.json"))
+                .unwrap();
+        assert_eq!(
+            record.len(),
+            3,
+            "recorded as done, so a later run will not refetch them"
+        );
+        server.abort();
+    }
+
+    /// A run cancelled before it starts reports cancellation rather than
+    /// quietly succeeding with nothing done.
+    #[tokio::test]
+    async fn a_cancelled_run_stops_instead_of_reporting_success() {
+        let temp = tempdir().unwrap();
+        let (addr, server, _info) = serve(vec![("start/a", vec![0x20, 0, 0, 0, b'X'])]);
+        let (config, request) = execution_config(addr, temp.path());
+
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let error = executor
+            .execute(&config, None, Some(cancelled))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().to_lowercase().contains("cancel"),
+            "{error}"
+        );
+        server.abort();
+    }
+
+    /// Nothing to download is a successful run with an empty summary, not an
+    /// error -- the scheduler calls this on every region, most of which have no
+    /// new assets most of the time.
+    #[tokio::test]
+    async fn a_run_with_no_matching_bundles_succeeds_empty() {
+        let temp = tempdir().unwrap();
+        let (addr, server, _info) = serve(vec![("other/a", vec![0x20, 0, 0, 0, b'X'])]);
+        let (config, request) = execution_config(addr, temp.path());
+
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
+        let summary = executor.execute(&config, None, None).await.unwrap();
+
+        assert_eq!(summary.queued_downloads, 0);
+        assert_eq!(summary.completed_downloads, 0);
+        assert_eq!(summary.failed_downloads, 0);
+        assert_eq!(summary.discovered_bundles, 1);
+        server.abort();
     }
 }
