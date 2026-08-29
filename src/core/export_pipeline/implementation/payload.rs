@@ -25,7 +25,7 @@ use super::selectors::assetstudio_type_selector_matches;
 use super::types::{
     image_format_extension, DecodedRgbaSurface, NativeAssetStudioExportManifestEntry,
     NativeImageEncodeSettings, NativeInMemoryMediaSource, NativeObjectExportOptions,
-    NativePayloadSignature, NativePlayableExport, NativePlayableExportObject,
+    NativeObjectPayload, NativePayloadSignature, NativePlayableExport, NativePlayableExportObject,
     NativeSemanticExportClaim, NativeSemanticExportPathRegistry, NativeSemanticExportPathState,
     NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
     ASSETSTUDIO_MANIFEST_APPEND_LOCKS, ASSETSTUDIO_MANIFEST_LOCKS,
@@ -347,11 +347,7 @@ impl NativeSemanticExportPathState {
         asset: &UnityAssetInfo,
         read_output: &UnityObjectReadOutput,
     ) -> NativeSemanticPathClaim {
-        self.claim_with_signature(
-            path,
-            asset,
-            native_payload_signature(read_output.payload.bytes()),
-        )
+        self.claim_with_signature(path, asset, payload_signature(&read_output.payload))
     }
 
     pub(super) fn claim_generated_payload(
@@ -402,6 +398,37 @@ pub(super) fn native_payload_signature(payload: &[u8]) -> NativePayloadSignature
     NativePayloadSignature {
         payload_len: payload.len(),
         payload_fingerprint: native_payload_fingerprint(payload),
+    }
+}
+
+/// The content signature of whatever the read produced.
+///
+/// Kept here rather than on the payload type so `types` stays a leaf: it would
+/// otherwise have to import this module, which imports it.
+pub(super) fn payload_signature(payload: &NativeObjectPayload) -> NativePayloadSignature {
+    match payload {
+        NativeObjectPayload::Bytes(bytes) => native_payload_signature(bytes),
+        NativeObjectPayload::Rgba(surface) => {
+            native_surface_signature(surface.width, surface.height, &surface.pixels)
+        }
+    }
+}
+
+/// Signs a decoded surface without serialising it.
+///
+/// The dimensions go in alongside the pixels because the `HARUKI_RGBAIR_V1`
+/// header used to carry them: two images with the same bytes at different
+/// dimensions must not sign the same.
+pub(super) fn native_surface_signature(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> NativePayloadSignature {
+    let mut fingerprint = native_payload_fingerprint(pixels);
+    fingerprint[0] ^= u64::from(width) << 32 | u64::from(height);
+    NativePayloadSignature {
+        payload_len: pixels.len(),
+        payload_fingerprint: fingerprint,
     }
 }
 

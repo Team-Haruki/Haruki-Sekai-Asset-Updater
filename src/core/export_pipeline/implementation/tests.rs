@@ -35,10 +35,10 @@ use super::paths::{
     safe_payload_bundle_path,
 };
 use super::payload::{
-    parse_payload_bundle, parse_payload_bundle_borrowed, playable_container_output_path,
-    text_asset_public_bytes_target, write_assetstudio_export_manifest_entry,
-    write_assetstudio_playable_payloads, write_native_image_payload_final_files,
-    write_native_image_payload_final_files_with_backend,
+    parse_payload_bundle, parse_payload_bundle_borrowed, payload_signature,
+    playable_container_output_path, text_asset_public_bytes_target,
+    write_assetstudio_export_manifest_entry, write_assetstudio_playable_payloads,
+    write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
     write_native_image_surface_final_files_now, write_native_object_payload,
     write_native_payload_file,
 };
@@ -763,6 +763,37 @@ fn surface_flip_matches_the_serialised_row_order() {
         &serialised[super::types::UNITY_ENGINE_RGBA_IR_HEADER_LEN..],
         surface.pixels.as_slice()
     );
+}
+
+/// A decoded surface must sign itself by its pixels.
+///
+/// It first signed by `bytes()`, which is empty for a surface, so every texture
+/// carried the same signature: two competing for one semantic path looked
+/// byte-identical and one was dropped. That cost 1 317 files on the JP image
+/// rule and nothing in the suite noticed.
+#[test]
+fn decoded_surfaces_sign_by_pixels_and_dimensions() {
+    let surface = |width, height, fill| {
+        NativeObjectPayload::Rgba(Box::new(DecodedRgbaSurface {
+            width,
+            height,
+            pixels: vec![fill; (width * height * 4) as usize],
+        }))
+    };
+
+    let red = payload_signature(&surface(2, 2, 1));
+    let same = payload_signature(&surface(2, 2, 1));
+    let other_pixels = payload_signature(&surface(2, 2, 2));
+    let other_shape = payload_signature(&surface(4, 1, 1));
+    let empty = payload_signature(&NativeObjectPayload::Bytes(bytes::Bytes::new()));
+
+    assert_eq!(red, same, "the same surface must sign the same");
+    assert_ne!(red, other_pixels, "different pixels must sign differently");
+    assert_ne!(
+        red, other_shape,
+        "the same bytes at different dimensions must sign differently"
+    );
+    assert_ne!(red, empty, "a surface must not sign like an empty payload");
 }
 
 #[test]
