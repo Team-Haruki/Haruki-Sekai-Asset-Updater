@@ -1,15 +1,11 @@
 //! The run loop: scheduling bundles, recording what completed, finishing jobs.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use reqwest::header::{
-    HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, USER_AGENT,
-};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
@@ -18,16 +14,22 @@ use super::model::{
     AssetExecutionContext, BundleWorkOutput, DownloadTask, NativeBundlePostProcessJob,
 };
 use super::progress::ExecutionProgressUpdate;
-use crate::core::config::{pipeline_options, AppConfig, AssetHttpVersion, RegionConfig};
+use crate::core::config::{
+    pipeline_options, AppConfig, AssetHttpVersion, RegionConfig, RegionProviderConfig,
+};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
 use crate::core::pipeline::PreparedAssetRun;
 use crate::core::storage::{upload_to_all_storages, StorageUploadOptions};
+use sekai_asset_client::{
+    ClientConfig, HttpVersion, ProviderEndpoint, RetryOptions as ClientRetryOptions,
+    SekaiAssetClient,
+};
 use sekai_asset_pipeline::{
     flat_pipeline_enabled, post_process_exported_files, scan_all_files, scoped_upload_files,
-    ExportPipelineError, NativeSemanticExportPathRegistry,
+    ExportPipelineError, NativeSemanticExportPathRegistry, ResolvedRelease,
 };
 
 pub(super) fn publishable_bundle_files(
@@ -120,57 +122,58 @@ impl AssetExecutionContext {
         request: &AssetUpdateRequest,
     ) -> Result<Self, AssetExecutionError> {
         let region = &prepared.region;
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static("ProductName/134 CFNetwork/1408.0.4 Darwin/22.5.0"),
-        );
-        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
-        headers.insert(
-            ACCEPT_LANGUAGE,
-            HeaderValue::from_static("zh-CN,zh-Hans;q=0.9"),
-        );
-        headers.insert(
-            "X-Unity-Version",
-            HeaderValue::from_str(&region.runtime.unity_version)
-                .map_err(|err| AssetExecutionError::HttpClient(err.to_string()))?,
-        );
-
-        let mut builder = reqwest::Client::builder()
-            .default_headers(headers)
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(180))
-            .pool_max_idle_per_host(100)
-            .local_address(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
-            .tcp_keepalive(Duration::from_secs(30));
-        if app_config.server.asset_http_version == AssetHttpVersion::Http1 {
-            builder = builder.http1_only();
-        }
-
-        if let Some(proxy) = &app_config.server.proxy {
-            if !proxy.is_empty() {
-                builder = builder.proxy(
-                    reqwest::Proxy::all(proxy)
-                        .map_err(|err| AssetExecutionError::HttpClient(err.to_string()))?,
-                );
-            }
-        }
+        let endpoint = match &region.provider {
+            RegionProviderConfig::ColorfulPalette {
+                asset_info_url_template,
+                asset_bundle_url_template,
+                profile,
+                profile_hashes,
+                ..
+            } => ProviderEndpoint::ColorfulPalette {
+                asset_info_url_template: asset_info_url_template.clone(),
+                asset_bundle_url_template: asset_bundle_url_template.clone(),
+                profile: profile.clone(),
+                profile_hash: profile_hashes.get(profile).cloned().unwrap_or_default(),
+            },
+            RegionProviderConfig::Nuverse {
+                asset_version_url,
+                asset_info_url_template,
+                asset_bundle_url_template,
+                app_version,
+                ..
+            } => ProviderEndpoint::Nuverse {
+                asset_version_url_template: asset_version_url.clone(),
+                asset_info_url_template: asset_info_url_template.clone(),
+                asset_bundle_url_template: asset_bundle_url_template.clone(),
+                app_version: app_version.clone(),
+            },
+        };
+        let mut client_config = ClientConfig::new(endpoint, &region.runtime.unity_version);
+        client_config.proxy = app_config.server.proxy.clone();
+        client_config.http_version = match app_config.server.asset_http_version {
+            AssetHttpVersion::Auto => HttpVersion::Auto,
+            AssetHttpVersion::Http1 => HttpVersion::Http1,
+        };
+        client_config.retry = ClientRetryOptions {
+            attempts: app_config.execution.retry.attempts,
+            initial_backoff: Duration::from_millis(app_config.execution.retry.initial_backoff_ms),
+            max_backoff: Duration::from_millis(app_config.execution.retry.max_backoff_ms),
+        };
+        let resolved_release =
+            request
+                .asset_version
+                .as_ref()
+                .map(|asset_version| ResolvedRelease {
+                    asset_version: asset_version.clone(),
+                    asset_hash: request.asset_hash.clone().unwrap_or_default(),
+                });
 
         Ok(Self {
-            client: builder
-                .build()
-                .map_err(|err| AssetExecutionError::HttpClient(err.to_string()))?,
+            client: SekaiAssetClient::new(client_config)?,
             region_name: prepared.region_name.clone(),
             region: region.clone(),
             request: request.clone(),
-            retry: app_config.execution.retry.clone(),
-            runtime_cookie: None,
-            resolved_asset_version: request.asset_version.clone(),
+            resolved_release,
             download_record_file: prepared.download_record_file.clone(),
         })
     }

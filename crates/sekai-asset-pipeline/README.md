@@ -9,7 +9,7 @@ batch scheduler.
 
 The crate owns:
 
-- provider and pinned release contracts;
+- provider and pinned release data contracts;
 - manifest parsing, AES decryption, and bundle deobfuscation;
 - safe bundle/output paths;
 - direct `unity-rs-core` export;
@@ -17,9 +17,10 @@ The crate owns:
 - retry/resource options; and
 - deterministic artifact manifests with relative paths, sizes, and SHA-256.
 
-The caller owns:
+The caller owns orchestration, while `sekai-asset-client` can supply the common
+provider transport:
 
-- downloading and authentication;
+- persistent or opportunistic cache policy;
 - SQS/Lambda acknowledgement or long-running job state;
 - batching, progress, and cancellation;
 - S3 or filesystem publication;
@@ -28,8 +29,8 @@ The caller owns:
 ## Single-bundle API
 
 The planner serializes a `BundleRequest` after resolving the region, release,
-and manifest entry. The worker downloads and deobfuscates that exact payload,
-then calls:
+and manifest entry. The worker can use `sekai-asset-client` to download and
+deobfuscate that exact payload, then call:
 
 ```rust,no_run
 use sekai_asset_pipeline::{process_bundle, BundleRequest, PipelineOptions};
@@ -71,3 +72,6 @@ sekai-asset-pipeline = {
 
 Local development can replace it with a path dependency. Enable `media-ffi`
 only when the deployment provides the matching FFmpeg system libraries.
+
+Pin `sekai-asset-client` from the same revision so both crates agree on the
+`BundleRequest` contract.

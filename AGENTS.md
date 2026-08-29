@@ -9,6 +9,7 @@
 - 资产解包只保留直接链接 `unity-rs-core` 的纯 Rust 路径。
 - 当前仓库为 Cargo workspace：
   - `Cargo.toml`
+  - `crates/sekai-asset-client/`
   - `crates/sekai-asset-pipeline/`
   - `src/`
   - `tests/`
@@ -24,8 +25,11 @@
 - `src/`
   Rust 主服务应用代码；负责 HTTP、任务状态、批量调度、发布和 Git 同步。
 - `crates/sekai-asset-pipeline/`
-  可复用的单 bundle 执行内核；负责 provider/manifest/crypto、Unity 导出、
+  可复用的单 bundle 执行内核；负责 provider/manifest 数据结构、crypto、Unity 导出、
   CRI/媒体后处理、安全路径与确定性产物清单，不依赖主服务。
+- `crates/sekai-asset-client/`
+  轻量 provider HTTP 客户端；负责版本解析、Cookie、manifest 获取和有界原子
+  bundle 下载，不包含批量调度、持久缓存、发布或任务状态。
 - `src/core/`
   核心业务逻辑，例如配置、下载、导出、上传、git 同步。
 - `src/service/`

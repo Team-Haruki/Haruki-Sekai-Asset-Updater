@@ -1,5 +1,6 @@
 //! The persistent bundle cache: reading it, validating it, writing into it.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -12,9 +13,7 @@ use super::model::{
 use crate::core::config::AppConfig;
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
-use sekai_asset_pipeline::{
-    deobfuscate_owned, raw_bundle_output_path, validate_relative_bundle_path,
-};
+use sekai_asset_pipeline::{raw_bundle_output_path, validate_relative_bundle_path};
 
 pub(super) fn bundle_hash_index_key(bundle_path: &str) -> Result<String, AssetExecutionError> {
     Ok(raw_bundle_output_path(Path::new(""), bundle_path)?
@@ -45,12 +44,31 @@ impl AssetExecutionContext {
     pub(super) fn record_bundle_payload_hash(
         index: Option<Arc<std::sync::Mutex<DownloadRecord>>>,
         key: String,
-        payload: &[u8],
+        payload: &Path,
     ) -> Result<(), AssetExecutionError> {
         let Some(index) = index else {
             return Ok(());
         };
-        let digest = hex::encode(Sha256::digest(payload));
+        let mut file =
+            std::fs::File::open(payload).map_err(|source| AssetExecutionError::ReadTempFile {
+                path: payload.to_path_buf(),
+                source,
+            })?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read =
+                file.read(&mut buffer)
+                    .map_err(|source| AssetExecutionError::ReadTempFile {
+                        path: payload.to_path_buf(),
+                        source,
+                    })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        let digest = hex::encode(digest.finalize());
         index
             .lock()
             .map_err(|_| {
@@ -62,20 +80,19 @@ impl AssetExecutionContext {
 
     pub(super) async fn get_bundle_with_cache(
         &self,
-        bundle_url: &str,
         task: &DownloadTask,
         cache_dir: &Path,
     ) -> Result<BundleFetch, AssetExecutionError> {
         let safe_bundle_path = validate_relative_bundle_path(&task.bundle_path)?;
         let cache_file = cache_dir.join(&self.region_name).join(safe_bundle_path);
         match Self::bundle_cache_entry_status(&cache_file, task).await {
-            BundleCacheEntryStatus::Current => match tokio::fs::read(&cache_file).await {
-                Ok(body) => {
-                    // Persistent cache entries are already deobfuscated. Returning the owned file
-                    // buffer directly avoids a same-size `data.to_vec()` on every cache hit.
+            BundleCacheEntryStatus::Current => match tokio::fs::metadata(&cache_file).await {
+                Ok(metadata) => {
                     return Ok(BundleFetch {
-                        body,
+                        path: cache_file,
+                        decoded_bytes: metadata.len(),
                         source: BundleFetchSource::CacheHit,
+                        _temporary_directory: None,
                     });
                 }
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
@@ -100,12 +117,18 @@ impl AssetExecutionContext {
             BundleCacheEntryStatus::Missing => {}
         }
 
-        let network_body = self.get_with_retry(bundle_url).await?;
-        let body = deobfuscate_owned(network_body);
-        Self::write_bundle_cache_entry(&cache_file, &task.revision, &body).await?;
+        let request = self.bundle_request(task)?;
+        let downloaded = self
+            .client
+            .download_bundle_to_file(&request, &cache_file)
+            .await?;
+        let metadata_path = bundle_cache_metadata_path(&cache_file);
+        Self::atomic_write_bundle_cache_file(&metadata_path, task.revision.as_bytes()).await?;
         Ok(BundleFetch {
-            body,
+            path: downloaded.path,
+            decoded_bytes: downloaded.decoded_bytes,
             source: BundleFetchSource::CacheMiss,
+            _temporary_directory: None,
         })
     }
 
@@ -159,24 +182,6 @@ impl AssetExecutionContext {
             }
             Err(_) => BundleCacheEntryStatus::Stale,
         }
-    }
-
-    pub(super) async fn write_bundle_cache_entry(
-        cache_file: &Path,
-        bundle_hash: &str,
-        body: &[u8],
-    ) -> Result<(), AssetExecutionError> {
-        if let Some(parent) = cache_file.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|source| {
-                AssetExecutionError::CreateTempDir {
-                    path: parent.to_path_buf(),
-                    source,
-                }
-            })?;
-        }
-        Self::atomic_write_bundle_cache_file(cache_file, body).await?;
-        let metadata_path = bundle_cache_metadata_path(cache_file);
-        Self::atomic_write_bundle_cache_file(&metadata_path, bundle_hash.as_bytes()).await
     }
 
     pub(super) async fn atomic_write_bundle_cache_file(
@@ -337,24 +342,31 @@ mod tests {
             export_payloads: true,
             stage_haruki_3d: false,
         };
-        let url = format!("http://{addr}/bundle/ond/a");
-
         let first = context
-            .fetch_deobfuscated_bundle(&config, &url, &task)
+            .fetch_deobfuscated_bundle(&config, &task)
             .await
             .unwrap();
         let second = context
-            .fetch_deobfuscated_bundle(&config, &url, &task)
+            .fetch_deobfuscated_bundle(&config, &task)
             .await
             .unwrap();
 
         assert_eq!(first.source.as_str(), "cache_miss");
         assert_eq!(second.source.as_str(), "cache_hit");
-        assert_eq!(first.body, b"UnityFS cached test bundle");
-        assert_eq!(second.body, first.body);
+        assert_eq!(
+            tokio::fs::read(&first.path).await.unwrap(),
+            b"UnityFS cached test bundle"
+        );
+        assert_eq!(
+            tokio::fs::read(&second.path).await.unwrap(),
+            tokio::fs::read(&first.path).await.unwrap()
+        );
         assert_eq!(request_count.load(Ordering::SeqCst), 1);
         let cache_file = cache_root.join("cn/ond/a");
-        assert_eq!(tokio::fs::read(&cache_file).await.unwrap(), first.body);
+        assert_eq!(
+            tokio::fs::read(&cache_file).await.unwrap(),
+            b"UnityFS cached test bundle"
+        );
         assert_eq!(
             tokio::fs::read_to_string(bundle_cache_metadata_path(&cache_file))
                 .await
@@ -412,12 +424,12 @@ mod tests {
         };
 
         let fetch = context
-            .fetch_deobfuscated_bundle(&config, "http://127.0.0.1:1/never", &task)
+            .fetch_deobfuscated_bundle(&config, &task)
             .await
             .unwrap();
 
         assert_eq!(fetch.source.as_str(), "cache_hit");
-        assert_eq!(fetch.body, cached_body);
+        assert_eq!(tokio::fs::read(&fetch.path).await.unwrap(), cached_body);
     }
 
     #[test]

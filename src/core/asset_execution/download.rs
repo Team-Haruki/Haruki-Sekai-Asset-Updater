@@ -21,9 +21,8 @@ use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
 use crate::core::models::{ExecutionSummary, JobPhase};
 use sekai_asset_pipeline::{
-    asset_category_name, deobfuscate_owned, export_unity_asset_bundle_payloads_with_registry,
-    raw_bundle_output_path, remove_file_if_exists, validate_relative_bundle_path,
-    NativeSemanticExportPathRegistry,
+    asset_category_name, export_unity_asset_bundle_payloads_with_registry, raw_bundle_output_path,
+    remove_file_if_exists, validate_relative_bundle_path, NativeSemanticExportPathRegistry,
 };
 
 impl AssetExecutionContext {
@@ -220,16 +219,13 @@ impl AssetExecutionContext {
                 region: self.region_name.clone(),
             }
         })?;
-        let bundle_url = self.render_bundle_url(task)?;
         let download_started = Instant::now();
-        let fetch = self
-            .fetch_deobfuscated_bundle(app_config, &bundle_url, task)
-            .await?;
+        let fetch = self.fetch_deobfuscated_bundle(app_config, task).await?;
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDownloaded {
                 bundle: task.bundle_path.clone(),
-                bytes: fetch.body.len(),
+                bytes: usize::try_from(fetch.decoded_bytes).unwrap_or(usize::MAX),
                 elapsed_ms: download_started.elapsed().as_millis(),
             },
         );
@@ -243,7 +239,7 @@ impl AssetExecutionContext {
             bundle_hash_index,
         )?;
         let blocking_started = Instant::now();
-        Self::persist_bundle_payload(fetch.body, write_plan).await?;
+        Self::persist_bundle_payload(fetch.path.clone(), write_plan).await?;
         if task.export_payloads {
             Self::send_progress(
                 progress,
@@ -305,39 +301,36 @@ impl AssetExecutionContext {
     }
 
     pub(super) async fn persist_bundle_payload(
-        payload: Vec<u8>,
+        payload: PathBuf,
         plan: BundleWritePlan,
     ) -> Result<(), AssetExecutionError> {
-        tokio::task::spawn_blocking(move || Self::write_bundle_payload(&payload, plan))
+        tokio::task::spawn_blocking(move || Self::copy_bundle_payload(&payload, plan))
             .await
             .map_err(|source| AssetExecutionError::BlockingTask(source.to_string()))?
     }
 
-    pub(super) fn write_bundle_payload(
-        payload: &[u8],
+    pub(super) fn copy_bundle_payload(
+        payload: &Path,
         plan: BundleWritePlan,
     ) -> Result<(), AssetExecutionError> {
         if let Some(path) = plan.raw_target {
-            Self::write_raw_bundle(&path, payload)?;
+            Self::copy_raw_bundle(payload, &path)?;
         }
         if let Some(path) = plan.haruki_3d_target {
-            Self::write_haruki_3d_work_bundle(&path, payload)?;
+            Self::copy_haruki_3d_work_bundle(payload, &path)?;
             Self::record_bundle_payload_hash(
                 plan.bundle_hash_index,
                 plan.bundle_hash_index_key,
-                payload,
+                &path,
             )?;
         }
         if let Some(path) = plan.temp_target {
-            Self::write_temp_bundle(&path, payload)?;
+            Self::copy_temp_bundle(payload, &path)?;
         }
         Ok(())
     }
 
-    pub(super) fn write_temp_bundle(
-        path: &Path,
-        payload: &[u8],
-    ) -> Result<(), AssetExecutionError> {
+    pub(super) fn copy_temp_bundle(source: &Path, path: &Path) -> Result<(), AssetExecutionError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| {
                 AssetExecutionError::CreateTempDir {
@@ -346,10 +339,11 @@ impl AssetExecutionContext {
                 }
             })?;
         }
-        std::fs::write(path, payload).map_err(|source| AssetExecutionError::WriteTempFile {
+        std::fs::copy(source, path).map_err(|source| AssetExecutionError::WriteTempFile {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        Ok(())
     }
 
     pub(super) async fn export_bundle_payloads(
@@ -394,16 +388,13 @@ impl AssetExecutionContext {
                 region: self.region_name.clone(),
             }
         })?;
-        let bundle_url = self.render_bundle_url(task)?;
         let download_started = Instant::now();
-        let fetch = self
-            .fetch_deobfuscated_bundle(app_config, &bundle_url, task)
-            .await?;
+        let fetch = self.fetch_deobfuscated_bundle(app_config, task).await?;
         Self::send_progress(
             progress,
             ExecutionProgressUpdate::BundleDownloaded {
                 bundle: task.bundle_path.clone(),
-                bytes: fetch.body.len(),
+                bytes: usize::try_from(fetch.decoded_bytes).unwrap_or(usize::MAX),
                 elapsed_ms: download_started.elapsed().as_millis(),
             },
         );
@@ -411,7 +402,7 @@ impl AssetExecutionContext {
             || self.matches_raw_bundle_filters(&task.bundle_path)
         {
             let raw_path = self.raw_bundle_output_path(&asset_save_dir, &task.bundle_path)?;
-            Self::write_raw_bundle(&raw_path, &fetch.body)?;
+            Self::copy_raw_bundle(&fetch.path, &raw_path)?;
             tracing::debug!(
                 region = %self.region_name,
                 bundle = %task.bundle_path,
@@ -426,25 +417,32 @@ impl AssetExecutionContext {
     pub(super) async fn fetch_deobfuscated_bundle(
         &self,
         app_config: &AppConfig,
-        bundle_url: &str,
         task: &DownloadTask,
     ) -> Result<BundleFetch, AssetExecutionError> {
         let Some(cache_dir) = configured_asset_bundle_cache_dir(app_config) else {
-            let body = self.get_with_retry(bundle_url).await?;
+            let temporary_directory =
+                tempfile::tempdir().map_err(|source| AssetExecutionError::CreateTempDir {
+                    path: std::env::temp_dir(),
+                    source,
+                })?;
+            let destination = temporary_directory.path().join("bundle");
+            let request = self.bundle_request(task)?;
+            let downloaded = self
+                .client
+                .download_bundle_to_file(&request, &destination)
+                .await?;
             return Ok(BundleFetch {
-                body: deobfuscate_owned(body),
+                path: downloaded.path,
+                decoded_bytes: downloaded.decoded_bytes,
                 source: BundleFetchSource::Network,
+                _temporary_directory: Some(temporary_directory),
             });
         };
 
-        self.get_bundle_with_cache(bundle_url, task, &cache_dir)
-            .await
+        self.get_bundle_with_cache(task, &cache_dir).await
     }
 
-    pub(super) fn write_raw_bundle(
-        path: &Path,
-        deobfuscated: &[u8],
-    ) -> Result<(), AssetExecutionError> {
+    pub(super) fn copy_raw_bundle(source: &Path, path: &Path) -> Result<(), AssetExecutionError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| {
                 AssetExecutionError::CreateRawBundleDir {
@@ -453,10 +451,11 @@ impl AssetExecutionContext {
                 }
             })?;
         }
-        std::fs::write(path, deobfuscated).map_err(|source| AssetExecutionError::WriteRawBundle {
+        std::fs::copy(source, path).map_err(|source| AssetExecutionError::WriteRawBundle {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        Ok(())
     }
 }
 
@@ -501,7 +500,7 @@ mod tests {
                     hash: "hash-a".to_string(),
                     category: AssetCategory::StartApp,
                     crc: 123,
-                    file_size: 1,
+                    file_size: 10,
                     dependencies: Vec::new(),
                     paths: Vec::new(),
                     is_builtin: false,

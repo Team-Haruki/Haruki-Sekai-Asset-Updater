@@ -14,8 +14,9 @@ impl AssetExecutionContext {
             return None;
         }
         let run_id = self
-            .resolved_asset_version
-            .as_deref()
+            .resolved_release
+            .as_ref()
+            .map(|release| release.asset_version.as_str())
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("current")
             .replace(['/', '\\', ':'], "_");

@@ -18,6 +18,27 @@ use crate::core::errors::AssetExecutionError;
 use sekai_asset_pipeline::raw_bundle_output_path;
 
 impl AssetExecutionContext {
+    pub(crate) fn copy_haruki_3d_work_bundle(
+        source: &Path,
+        path: &Path,
+    ) -> Result<(), AssetExecutionError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| {
+                AssetExecutionError::CreateHaruki3dStagingDir {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+        std::fs::copy(source, path).map_err(|source| {
+            AssetExecutionError::WriteHaruki3dStagingBundle {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn write_haruki_3d_work_bundle(
         path: &Path,
         deobfuscated: &[u8],

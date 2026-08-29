@@ -24,20 +24,28 @@
 ## Layout
 
 - `crates/sekai-asset-pipeline/`: reusable, transport-neutral single-bundle pipeline
+- `crates/sekai-asset-client/`: provider-aware release, manifest, cookie, and bundle HTTP client
 - `src/`: HTTP service, batch scheduling, progress, publishing, and Git synchronization
 - `tests/`: integration tests
 - `docs/migration/v2-api.md`: current HTTP API notes
 
-The shared crate owns provider/release resolution, manifest and crypto
-primitives, Unity export, CRI decoding, media conversion, path validation, and
-the deterministic artifact contract. Its `process_bundle` API accepts one
-resolved, already-downloaded and deobfuscated bundle and returns an
+The pipeline crate owns the serializable provider/release contracts, manifest
+types and crypto primitives, Unity export, CRI decoding, media conversion, path
+validation, and the deterministic artifact contract. Its `process_bundle` API
+accepts one resolved, already-downloaded and deobfuscated bundle and returns an
 `ArtifactManifest` containing relative paths, sizes, and SHA-256 digests.
+
+The client crate owns provider URL templates, release resolution, cookie
+bootstrap, bounded manifest requests, and atomic streaming bundle downloads.
+It keeps cookies, AES keys, proxy configuration, and request headers out of
+`BundleRequest`. Haruki and queue workers can therefore share transport logic
+without importing the long-running service.
 
 Application concerns deliberately remain in the root package: Axum, job state,
 batch concurrency, cancellation, download records, storage publication,
 Haruki 3D, and Git synchronization. A queue worker such as AWS Lambda can depend
-on the shared crate without importing those long-running service concerns. See
+on the two shared crates without importing those long-running service concerns. See
+[`crates/sekai-asset-client/README.md`](crates/sekai-asset-client/README.md) and
 [`crates/sekai-asset-pipeline/README.md`](crates/sekai-asset-pipeline/README.md)
 for the boundary and API example.
 

@@ -11,7 +11,9 @@ use tokio::sync::OwnedSemaphorePermit;
 use crate::core::config::RegionConfig;
 use crate::core::download_records::DownloadRecord;
 use crate::core::models::AssetUpdateRequest;
-use sekai_asset_pipeline::{AssetBundleInfo, ResolvedBundle, UnityAssetBundlePayloadExport};
+use sekai_asset_pipeline::{
+    AssetBundleInfo, ResolvedBundle, ResolvedRelease, UnityAssetBundlePayloadExport,
+};
 
 #[cfg(test)]
 impl BundleFetchSource {
@@ -40,10 +42,14 @@ pub(super) enum BundleCacheEntryStatus {
 
 #[derive(Debug)]
 pub(super) struct BundleFetch {
-    /// Deobfuscated bytes ready to pass directly to unity-rs.
-    pub(super) body: Vec<u8>,
+    /// Deobfuscated file ready to pass directly to unity-rs.
+    pub(super) path: PathBuf,
+    pub(super) decoded_bytes: u64,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) source: BundleFetchSource,
+    /// Keeps network-only downloads alive until the application has copied or
+    /// processed them. Persistent cache hits do not need an owner.
+    pub(super) _temporary_directory: Option<tempfile::TempDir>,
 }
 
 pub(super) enum BundleWorkOutput {
@@ -69,13 +75,11 @@ pub struct Haruki3dExportSummary {
 
 #[derive(Debug, Clone)]
 pub struct AssetExecutionContext {
-    pub(super) client: reqwest::Client,
+    pub(super) client: sekai_asset_client::SekaiAssetClient,
     pub(super) region_name: String,
     pub(super) region: RegionConfig,
     pub(super) request: AssetUpdateRequest,
-    pub(super) retry: crate::core::config::RetryConfig,
-    pub(super) runtime_cookie: Option<String>,
-    pub(super) resolved_asset_version: Option<String>,
+    pub(super) resolved_release: Option<ResolvedRelease>,
     /// Resolved when the run was prepared, so execution cannot disagree with
     /// the plan the caller was shown.
     pub(super) download_record_file: String,

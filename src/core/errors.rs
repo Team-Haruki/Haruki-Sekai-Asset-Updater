@@ -3,20 +3,6 @@ use std::path::PathBuf;
 use sekai_asset_pipeline::ExportPipelineError;
 use thiserror::Error;
 
-/// Flatten a `reqwest::Error` together with its source chain into a single string so persisted job
-/// failure messages keep the underlying DNS/TLS/connect cause instead of only the top-level line.
-pub(crate) fn format_reqwest_error_chain(err: &reqwest::Error) -> String {
-    use std::error::Error as _;
-    let mut message = err.to_string();
-    let mut source = err.source();
-    while let Some(inner) = source {
-        message.push_str(": ");
-        message.push_str(&inner.to_string());
-        source = inner.source();
-    }
-    message
-}
-
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to read config file {path}: {source}")]
@@ -225,14 +211,10 @@ pub enum AssetExecutionError {
     Planning(#[from] PlanningError),
     #[error(transparent)]
     GitSync(#[from] GitSyncError),
-    #[error("http request failed: {}", format_reqwest_error_chain(.0))]
-    Http(#[from] reqwest::Error),
-    #[error("failed to initialize HTTP client: {0}")]
-    HttpClient(String),
+    #[error(transparent)]
+    AssetClient(#[from] sekai_asset_client::ClientError),
     #[error("blocking asset execution task failed: {0}")]
     BlockingTask(String),
-    #[error("HTTP request to {url} returned status {status}")]
-    HttpStatus { url: String, status: u16 },
     #[error("region `{region}` is missing asset_save_dir")]
     MissingAssetSaveDir { region: String },
     #[error("colorful_palette region `{region}` requires asset_version and asset_hash")]

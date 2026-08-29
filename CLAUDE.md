@@ -55,11 +55,11 @@ where the container pins FFmpeg 7 already.
 
 **Entry point:** `src/main.rs` -- starts an Axum HTTP server with graceful shutdown.
 
-**Cargo workspace with a shared execution kernel and an application package
+**Cargo workspace with shared transport and execution crates plus an application package
 (flat modules, no `mod.rs` files):**
 
 - `crates/sekai-asset-pipeline/` -- transport-neutral single-bundle pipeline:
-  - provider/release and manifest contracts
+  - provider/release and manifest data contracts
   - crypto/deobfuscation and path validation
   - direct `unity-rs-core` export
   - CRI decoding and FFmpeg media conversion
@@ -67,12 +67,19 @@ where the container pins FFmpeg 7 already.
   - no HTTP, job state, batch scheduler, publishing, download records, Haruki 3D,
     or Git synchronization
 
+- `crates/sekai-asset-client/` -- provider-aware HTTP transport:
+  - provider URL templates and CN/TW/KR release resolution
+  - JP/EN cookie bootstrap and bounded manifest retrieval
+  - atomic streaming bundle download with prefix-only deobfuscation
+  - typed retry, HTTP, response-size, size-mismatch, and file-write errors
+  - no persistent cache, batch scheduler, publishing, or job state
+
 - `src/core.rs` / `src/core/` -- business logic:
   - `config.rs` -- YAML config loading with `${env:VAR_NAME}` secret resolution
     and projection into `sekai_asset_pipeline::PipelineOptions`
   - `pipeline.rs` -- builds an `ExecutionPlan` from config + request
-  - `asset_execution.rs` -- application batch runner; calls the shared crate directly
-    for crypto, safe paths, Unity export, and media post-processing
+  - `asset_execution.rs` -- application batch runner; calls the client for network
+    transport and the pipeline for safe paths, Unity export, and media post-processing
   - `storage.rs` -- S3-compatible upload via OpenDAL
   - `git_sync.rs` -- chart hash sync via Git CLI
   - `regions.rs` -- multi-region (JP/EN/TW/KR/CN) config selection

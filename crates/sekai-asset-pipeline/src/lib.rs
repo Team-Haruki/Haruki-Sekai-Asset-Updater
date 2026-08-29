@@ -56,5 +56,5 @@ pub use options::{
 };
 pub use path::{raw_bundle_output_path, validate_relative_bundle_path};
 pub use process::process_bundle;
-pub use provider::{ProviderEndpoint, ProviderKind, ResolvedRelease};
+pub use provider::{ProviderKind, ResolvedRelease};
 pub use retry::{retry_async, retry_sync, RetryPolicy};
