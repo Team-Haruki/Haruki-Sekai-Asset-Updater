@@ -11,6 +11,9 @@ pub fn validate_relative_bundle_path(bundle_path: &str) -> Result<&Path, Pipelin
     if bundle_path.is_empty() {
         return Err(invalid("path is empty"));
     }
+    if bundle_path.contains('\\') {
+        return Err(invalid("backslash path separators are not allowed"));
+    }
     if bundle_path
         .split('/')
         .any(|component| component.is_empty() || component == "." || component == "..")
@@ -65,7 +68,15 @@ mod tests {
 
     #[test]
     fn rejects_paths_that_can_escape_a_trusted_root() {
-        for value in ["", "/absolute", "../secret", "a/../secret", "a//b", "./a"] {
+        for value in [
+            "",
+            "/absolute",
+            "../secret",
+            "a/../secret",
+            "a//b",
+            "./a",
+            "a\\..\\secret",
+        ] {
             assert!(validate_relative_bundle_path(value).is_err(), "{value}");
         }
     }

@@ -35,6 +35,7 @@ pub struct SekaiAssetClient {
     pub(crate) retry: RetryOptions,
     pub(crate) max_manifest_bytes: u64,
     pub(crate) max_bundle_bytes: u64,
+    pub(crate) durable_downloads: bool,
     pub(crate) cookie: Option<HeaderValue>,
 }
 
@@ -46,6 +47,7 @@ impl std::fmt::Debug for SekaiAssetClient {
             .field("retry", &self.retry)
             .field("max_manifest_bytes", &self.max_manifest_bytes)
             .field("max_bundle_bytes", &self.max_bundle_bytes)
+            .field("durable_downloads", &self.durable_downloads)
             .field("has_runtime_cookie", &self.cookie.is_some())
             .finish_non_exhaustive()
     }
@@ -99,6 +101,7 @@ impl SekaiAssetClient {
             retry: config.retry,
             max_manifest_bytes: config.limits.max_manifest_bytes,
             max_bundle_bytes: config.limits.max_bundle_bytes,
+            durable_downloads: config.durable_downloads,
             cookie: None,
         })
     }
@@ -121,7 +124,7 @@ impl SekaiAssetClient {
                             source,
                         })?;
                 ensure_success(&url, response.status().as_u16())?;
-                Ok(response.headers().get(SET_COOKIE).cloned())
+                collect_cookie_header(response.headers())
             })
             .await?;
         self.cookie = cookie;
@@ -264,6 +267,37 @@ impl SekaiAssetClient {
     }
 }
 
+fn collect_cookie_header(headers: &HeaderMap) -> Result<Option<HeaderValue>, ClientError> {
+    let mut pairs = Vec::new();
+    for value in headers.get_all(SET_COOKIE) {
+        let raw = value
+            .to_str()
+            .map_err(|error| ClientError::InvalidCookieHeader {
+                reason: error.to_string(),
+            })?;
+        let pair = raw.split(';').next().unwrap_or_default().trim();
+        let Some((name, _)) = pair.split_once('=') else {
+            return Err(ClientError::InvalidCookieHeader {
+                reason: "cookie pair is missing `=`".to_string(),
+            });
+        };
+        if name.trim().is_empty() {
+            return Err(ClientError::InvalidCookieHeader {
+                reason: "cookie name is empty".to_string(),
+            });
+        }
+        pairs.push(pair);
+    }
+    if pairs.is_empty() {
+        return Ok(None);
+    }
+    HeaderValue::from_str(&pairs.join("; "))
+        .map(Some)
+        .map_err(|error| ClientError::InvalidCookieHeader {
+            reason: error.to_string(),
+        })
+}
+
 pub(crate) fn reject_declared_size(
     url: &str,
     limit: u64,
@@ -310,7 +344,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::header::{COOKIE, SET_COOKIE};
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, HeaderValue};
     use axum::routing::{get, post};
     use axum::Router;
     use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
@@ -370,7 +404,18 @@ mod tests {
         let app = Router::new()
             .route(
                 "/signature",
-                post(|| async { ([(SET_COOKIE, "session=abc; Path=/")], "ok") }),
+                post(|| async {
+                    let mut headers = HeaderMap::new();
+                    headers.append(
+                        SET_COOKIE,
+                        HeaderValue::from_static("session=abc; Path=/; HttpOnly"),
+                    );
+                    headers.append(
+                        SET_COOKIE,
+                        HeaderValue::from_static("region=jp; Path=/; Secure"),
+                    );
+                    (headers, "ok")
+                }),
             )
             .route("/version/5.2.0", get(|| async { "20250321" }))
             .route(
@@ -382,10 +427,8 @@ mod tests {
                         let encrypted = encrypted.clone();
                         let cookie_seen = cookie_seen.clone();
                         async move {
-                            if headers
-                                .get(COOKIE)
-                                .and_then(|value| value.to_str().ok())
-                                .is_some_and(|value| value.contains("session=abc"))
+                            if headers.get(COOKIE).and_then(|value| value.to_str().ok())
+                                == Some("session=abc; region=jp")
                             {
                                 cookie_seen.store(true, Ordering::SeqCst);
                             }
@@ -440,6 +483,28 @@ mod tests {
         assert_eq!(actual.bundles.len(), expected.bundles.len());
         assert!(actual.bundles.contains_key("start/a"));
         assert!(cookie_seen.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn invalid_release_url_is_a_non_retryable_configuration_error() {
+        let config = ClientConfig::new(
+            ProviderEndpoint::Nuverse {
+                asset_version_url_template: "://invalid/{app_version}".to_string(),
+                asset_info_url_template: String::new(),
+                asset_bundle_url_template: String::new(),
+                app_version: "5.2.0".to_string(),
+            },
+            "2022.3.21f1",
+        );
+        let client = SekaiAssetClient::new(config).unwrap();
+
+        let error = client
+            .resolve_release(&RequestedRelease::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category(), ClientErrorCategory::Configuration);
+        assert!(!error.is_retryable());
     }
 
     #[tokio::test]

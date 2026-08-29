@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use sekai_asset_pipeline::BundleRequest;
+use sekai_asset_pipeline::{validate_relative_bundle_path, BundleRequest};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
@@ -119,6 +119,7 @@ impl SekaiAssetClient {
         request: &BundleRequest,
         destination: &Path,
     ) -> Result<DownloadedBundle, ClientError> {
+        validate_bundle_request(request)?;
         if self.provider_kind() != request.provider {
             return Err(ClientError::ProviderMismatch {
                 client: self.provider_kind(),
@@ -187,12 +188,14 @@ impl SekaiAssetClient {
                     path: temp_path.clone(),
                     source,
                 })?;
-            file.sync_all()
-                .await
-                .map_err(|source| ClientError::WriteFile {
-                    path: temp_path.clone(),
-                    source,
-                })?;
+            if self.durable_downloads {
+                file.sync_all()
+                    .await
+                    .map_err(|source| ClientError::WriteFile {
+                        path: temp_path.clone(),
+                        source,
+                    })?;
+            }
             Ok((wire_bytes, decoded_bytes))
         }
         .await;
@@ -217,6 +220,29 @@ impl SekaiAssetClient {
             decoded_bytes,
         })
     }
+}
+
+fn validate_bundle_request(request: &BundleRequest) -> Result<(), ClientError> {
+    validate_relative_bundle_path(&request.bundle.bundle_path)?;
+    validate_relative_bundle_path(&request.bundle.download_path)?;
+    if request
+        .bundle
+        .download_path
+        .chars()
+        .any(|value| value.is_control() || matches!(value, '\\' | '?' | '#' | '%'))
+    {
+        return Err(ClientError::InvalidDownloadPath {
+            path: request.bundle.download_path.clone(),
+            reason: "control characters and URL delimiters are not allowed".to_string(),
+        });
+    }
+    if request.bundle.file_size < 0 {
+        return Err(ClientError::InvalidBundleSize {
+            bundle: request.bundle.bundle_path.clone(),
+            file_size: request.bundle.file_size,
+        });
+    }
+    Ok(())
 }
 
 async fn create_temp_file(destination: &Path) -> Result<(File, PathBuf), ClientError> {
@@ -540,6 +566,46 @@ mod tests {
         assert_eq!(error.category(), ClientErrorCategory::SizeMismatch);
         assert_eq!(tokio::fs::read(&destination).await.unwrap(), b"old");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejects_untrusted_download_paths_before_issuing_a_request() {
+        let client = client_for(Router::new(), ClientLimits::default()).await;
+        let dir = tempdir().unwrap();
+        for path in ["../secret", "music/a?token=secret", "music\\a"] {
+            let mut invalid = request(1);
+            invalid.bundle.download_path = path.to_string();
+            let destination = dir.path().join("bundle");
+
+            let error = client
+                .download_bundle_to_file(&invalid, &destination)
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.category(), ClientErrorCategory::Configuration);
+            assert!(!error.is_retryable());
+            assert!(!destination.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_negative_manifest_size_before_issuing_a_request() {
+        let client = client_for(Router::new(), ClientLimits::default()).await;
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("bundle");
+
+        let error = client
+            .download_bundle_to_file(&request(-1), &destination)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientError::InvalidBundleSize { file_size: -1, .. }
+        ));
+        assert_eq!(error.category(), ClientErrorCategory::Configuration);
+        assert!(!error.is_retryable());
+        assert!(!destination.exists());
     }
 
     #[test]

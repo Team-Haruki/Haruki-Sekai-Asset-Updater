@@ -101,7 +101,6 @@ pub(super) struct Haruki3dExportPlan {
 pub(super) struct BundleWritePlan {
     pub(super) raw_target: Option<PathBuf>,
     pub(super) haruki_3d_target: Option<PathBuf>,
-    pub(super) temp_target: Option<PathBuf>,
     pub(super) bundle_hash_index: Option<Arc<std::sync::Mutex<DownloadRecord>>>,
     pub(super) bundle_hash_index_key: String,
 }

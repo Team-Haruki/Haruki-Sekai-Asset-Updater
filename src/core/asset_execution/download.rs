@@ -22,7 +22,7 @@ use crate::core::errors::AssetExecutionError;
 use crate::core::models::{ExecutionSummary, JobPhase};
 use sekai_asset_pipeline::{
     asset_category_name, export_unity_asset_bundle_payloads_with_registry, raw_bundle_output_path,
-    remove_file_if_exists, validate_relative_bundle_path, NativeSemanticExportPathRegistry,
+    NativeSemanticExportPathRegistry,
 };
 
 impl AssetExecutionContext {
@@ -230,24 +230,14 @@ impl AssetExecutionContext {
             },
         );
 
-        let temp_file = self.bundle_temp_file(task)?;
         let write_plan = self.bundle_write_plan(
             task,
             &asset_save_dir,
             haruki_3d_work_root,
-            &temp_file,
             bundle_hash_index,
         )?;
-        let blocking_started = Instant::now();
-        Self::persist_bundle_payload(fetch.path.clone(), write_plan).await?;
-        if task.export_payloads {
-            Self::send_progress(
-                progress,
-                ExecutionProgressUpdate::BundleTempWritten {
-                    bundle: task.bundle_path.clone(),
-                    elapsed_ms: blocking_started.elapsed().as_millis(),
-                },
-            );
+        if write_plan.raw_target.is_some() || write_plan.haruki_3d_target.is_some() {
+            Self::persist_bundle_payload(fetch.path.clone(), write_plan).await?;
         }
 
         if !task.export_payloads {
@@ -258,19 +248,10 @@ impl AssetExecutionContext {
             app_config,
             task,
             &asset_save_dir,
-            &temp_file,
+            &fetch.path,
             export_path_registry,
         )
         .await
-    }
-
-    pub(super) fn bundle_temp_file(
-        &self,
-        task: &DownloadTask,
-    ) -> Result<PathBuf, AssetExecutionError> {
-        // Asset-info is untrusted, so validate before using the bundle name in any path.
-        let safe_path = validate_relative_bundle_path(&task.bundle_path)?;
-        Ok(std::env::temp_dir().join(&self.region_name).join(safe_path))
     }
 
     pub(super) fn bundle_write_plan(
@@ -278,7 +259,6 @@ impl AssetExecutionContext {
         task: &DownloadTask,
         asset_save_dir: &str,
         haruki_3d_work_root: Option<&Path>,
-        temp_file: &Path,
         bundle_hash_index: Option<&Arc<std::sync::Mutex<DownloadRecord>>>,
     ) -> Result<BundleWritePlan, AssetExecutionError> {
         let raw_target = self
@@ -294,7 +274,6 @@ impl AssetExecutionContext {
         Ok(BundleWritePlan {
             raw_target,
             haruki_3d_target,
-            temp_target: task.export_payloads.then(|| temp_file.to_path_buf()),
             bundle_hash_index: bundle_hash_index.cloned(),
             bundle_hash_index_key: bundle_hash_index_key(&task.bundle_path)?,
         })
@@ -324,25 +303,6 @@ impl AssetExecutionContext {
                 &path,
             )?;
         }
-        if let Some(path) = plan.temp_target {
-            Self::copy_temp_bundle(payload, &path)?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn copy_temp_bundle(source: &Path, path: &Path) -> Result<(), AssetExecutionError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| {
-                AssetExecutionError::CreateTempDir {
-                    path: parent.to_path_buf(),
-                    source,
-                }
-            })?;
-        }
-        std::fs::copy(source, path).map_err(|source| AssetExecutionError::WriteTempFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
         Ok(())
     }
 
@@ -351,21 +311,20 @@ impl AssetExecutionContext {
         app_config: &AppConfig,
         task: &DownloadTask,
         asset_save_dir: &str,
-        temp_file: &Path,
+        bundle_file: &Path,
         export_path_registry: &NativeSemanticExportPathRegistry,
     ) -> Result<Option<NativeBundlePostProcessJob>, AssetExecutionError> {
         let export_started = Instant::now();
         let options = pipeline_options(app_config, &self.region);
         let payload_export = export_unity_asset_bundle_payloads_with_registry(
             &options,
-            temp_file,
+            bundle_file,
             &task.bundle_path,
             Path::new(asset_save_dir),
             asset_category_name(&task.category),
             export_path_registry,
         )
         .await;
-        let _ = remove_file_if_exists(temp_file);
         Ok(Some(NativeBundlePostProcessJob {
             bundle_path: task.bundle_path.clone(),
             bundle_hash: task.revision.clone(),

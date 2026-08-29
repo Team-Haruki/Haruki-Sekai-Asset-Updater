@@ -51,6 +51,9 @@ pub struct ClientConfig {
     pub request_timeout: Duration,
     pub retry: RetryOptions,
     pub limits: ClientLimits,
+    /// Force downloaded file contents to stable storage before the atomic
+    /// rename. Disabled by default for ephemeral worker and Haruki inputs.
+    pub durable_downloads: bool,
 }
 
 impl ClientConfig {
@@ -64,6 +67,7 @@ impl ClientConfig {
             request_timeout: Duration::from_secs(180),
             retry: RetryOptions::default(),
             limits: ClientLimits::default(),
+            durable_downloads: false,
         }
     }
 }

@@ -25,10 +25,6 @@ pub enum ExecutionProgressUpdate {
         bytes: usize,
         elapsed_ms: u128,
     },
-    BundleTempWritten {
-        bundle: String,
-        elapsed_ms: u128,
-    },
     BundleExported {
         bundle: String,
         elapsed_ms: u128,

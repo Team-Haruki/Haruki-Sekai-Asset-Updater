@@ -72,6 +72,12 @@ pub enum ClientError {
         client: sekai_asset_pipeline::ProviderKind,
         request: sekai_asset_pipeline::ProviderKind,
     },
+    #[error("bundle {bundle} has invalid negative file_size {file_size}")]
+    InvalidBundleSize { bundle: String, file_size: i64 },
+    #[error("bundle download path `{path}` is invalid: {reason}")]
+    InvalidDownloadPath { path: String, reason: String },
+    #[error("provider returned an invalid Set-Cookie header: {reason}")]
+    InvalidCookieHeader { reason: String },
     #[error("ColorfulPalette release resolution requires asset_version and asset_hash")]
     MissingReleaseInput,
     #[error("Nuverse version response from {url} was empty or not valid UTF-8")]
@@ -83,8 +89,14 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    pub const fn category(&self) -> ClientErrorCategory {
+    pub fn category(&self) -> ClientErrorCategory {
         match self {
+            Self::Network { source, .. } if source.is_builder() => {
+                ClientErrorCategory::Configuration
+            }
+            Self::Network { source, .. } if source.is_redirect() || source.is_decode() => {
+                ClientErrorCategory::PermanentHttp
+            }
             Self::Network { .. } => ClientErrorCategory::TransientNetwork,
             Self::HttpStatus { status, .. }
                 if *status >= 500 || *status == 429 || *status == 408 =>
@@ -100,14 +112,20 @@ impl ClientError {
             | Self::RenameFile { .. } => ClientErrorCategory::FileWrite,
             Self::BuildClient(_)
             | Self::ProviderMismatch { .. }
+            | Self::InvalidBundleSize { .. }
+            | Self::InvalidDownloadPath { .. }
             | Self::MissingReleaseInput
             | Self::InvalidReleaseResponse { .. }
             | Self::MissingManifestCrypto => ClientErrorCategory::Configuration,
+            Self::InvalidCookieHeader { .. } => ClientErrorCategory::PermanentHttp,
+            Self::Pipeline(sekai_asset_pipeline::PipelineError::InvalidBundlePath { .. }) => {
+                ClientErrorCategory::Configuration
+            }
             Self::Pipeline(_) => ClientErrorCategory::Manifest,
         }
     }
 
-    pub const fn is_retryable(&self) -> bool {
+    pub fn is_retryable(&self) -> bool {
         matches!(self.category(), ClientErrorCategory::TransientNetwork)
     }
 }

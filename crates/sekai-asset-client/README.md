@@ -11,6 +11,10 @@ Runtime cookies, manifest keys, proxy settings, and request headers remain in
 the client process. They are never added to the serializable
 `sekai_asset_pipeline::BundleRequest` contract.
 
+JP cookie bootstrap collects every `Set-Cookie` response header and sends all
+cookie pairs back as one `Cookie` header. Cookie attributes such as `Path`,
+`Secure`, and `HttpOnly` are not echoed to the provider.
+
 ## Worker boundary
 
 After a planner has pinned a `BundleRequest`, a worker downloads the exact
@@ -45,3 +49,7 @@ async fn run(
 `ClientError::category()` separates transient network failures, permanent HTTP
 responses, response-size violations, bundle size mismatches, file writes,
 configuration errors, and manifest decode failures for queue retry decisions.
+Invalid bundle paths and negative manifest sizes are rejected as configuration
+errors before a request is issued. Downloads use an atomic rename; set
+`ClientConfig::durable_downloads` only when the caller requires an additional
+`sync_all` before that rename.

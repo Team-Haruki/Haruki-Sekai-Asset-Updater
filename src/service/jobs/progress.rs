@@ -76,20 +76,6 @@ pub(super) async fn progress_consumer(
                         format!("downloaded bundle `{bundle}` ({bytes} bytes) in {elapsed_ms} ms"),
                     );
                 }
-                ExecutionProgressUpdate::BundleTempWritten { bundle, elapsed_ms } => {
-                    tracing::debug!(
-                        job_id = %id,
-                        region = %job.region,
-                        bundle = %bundle,
-                        elapsed_ms,
-                        "bundle temp file written"
-                    );
-                    push_progress_event(
-                        job,
-                        JobPhase::DownloadingBundles,
-                        format!("wrote bundle `{bundle}` temp file in {elapsed_ms} ms"),
-                    );
-                }
                 ExecutionProgressUpdate::BundleExported { bundle, elapsed_ms } => {
                     tracing::debug!(
                         job_id = %id,
