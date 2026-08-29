@@ -40,7 +40,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v2/jobs", get(list_jobs))
         .route("/v2/jobs/{job_id}", get(get_job))
         .route("/v2/jobs/{job_id}/cancel", post(cancel_job))
-        .layer(from_fn_with_state(state.clone(), access_log_middleware))
+        // The middleware is handed the access-log block rather than the whole
+        // `AppState`: passing the state made `logging` import `http`, which is
+        // the wrong direction and closed a cycle between the two.
+        .layer(from_fn_with_state(
+            state.config().logging.access.clone(),
+            access_log_middleware,
+        ))
         .with_state(state)
 }
 
