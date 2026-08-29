@@ -6,9 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 concurrency:
   group: release-${{ github.ref_name }}
   cancel-in-progress: false
@@ -21,6 +18,11 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.name }}
+    # Scoped here rather than at workflow level: `publish` needs `contents:
+    # write` and overrides it anyway, so a workflow-wide grant only widens what
+    # this job gets. Building artifacts needs no more than a checkout.
+    permissions:
+      contents: read
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
