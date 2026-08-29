@@ -1,3 +1,8 @@
+// Only the `/proc` readers below need this, and they are Linux-only; a macOS
+// build sees an unused import without the gate.
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+
 use super::{
     Arc, Condvar, Duration, ExportPipelineError, HashMap, Instant, Mutex, OnceLock,
     ResourcesConfig, StdCommand,
