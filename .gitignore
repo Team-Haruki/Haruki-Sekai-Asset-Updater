@@ -9,6 +9,7 @@
 *.out
 coverage.*
 *.coverprofile
+lcov.info
 
 # env file
 .env
