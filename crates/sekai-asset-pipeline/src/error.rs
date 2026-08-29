@@ -54,6 +54,8 @@ pub enum ExportPipelineError {
     Media { message: String },
     #[error("unity-rs export failed: {message}")]
     UnityRs { message: String },
+    #[error("input {path} is not a recognized Unity asset or container")]
+    UnrecognizedUnityInput { path: PathBuf },
     #[error("failed to serialize Unity export JSON: {source}")]
     JsonSerialize {
         #[source]

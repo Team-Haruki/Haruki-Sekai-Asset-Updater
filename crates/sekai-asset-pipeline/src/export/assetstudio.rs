@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
 use super::limits::acquire_cpu_budget_permit;
 use tracing::warn;
+use unity_rs_core::file_type::{detect_file_type, FileType, HEADER_SCAN_LENGTH};
 use unity_rs_core::loader::AssetLoadOptions;
 use unity_rs_core::mesh::MeshReadLimits;
 use unity_rs_core::monobehaviour::{
@@ -105,6 +107,7 @@ fn call_unity_rs_object_export(
     path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
     let open_started = Instant::now();
+    validate_unity_input(input_path)?;
     let unity_version_override = (!options.region.runtime.unity_version.trim().is_empty())
         .then(|| options.region.runtime.unity_version.parse())
         .transpose()
@@ -211,6 +214,36 @@ fn call_unity_rs_object_export(
     summary.acb_sources = path_state.acb_sources;
     path_state.image_encode.merge_into(&mut summary.phase_ms);
     Ok(summary)
+}
+
+fn validate_unity_input(input_path: &Path) -> Result<(), ExportPipelineError> {
+    let mut file = std::fs::File::open(input_path).map_err(|source| ExportPipelineError::Io {
+        path: input_path.to_path_buf(),
+        source,
+    })?;
+    let file_size = file
+        .metadata()
+        .map_err(|source| ExportPipelineError::Io {
+            path: input_path.to_path_buf(),
+            source,
+        })?
+        .len();
+    let header_length = usize::try_from(file_size)
+        .unwrap_or(usize::MAX)
+        .min(HEADER_SCAN_LENGTH);
+    let mut header = vec![0; header_length];
+    file.read_exact(&mut header)
+        .map_err(|source| ExportPipelineError::Io {
+            path: input_path.to_path_buf(),
+            source,
+        })?;
+
+    if detect_file_type(&header, file_size).file_type == FileType::ResourceFile {
+        return Err(ExportPipelineError::UnrecognizedUnityInput {
+            path: input_path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 fn unity_asset_info(index: usize, object: StudioObject<'_>) -> UnityAssetInfo {

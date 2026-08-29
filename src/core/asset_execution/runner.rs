@@ -1078,16 +1078,9 @@ mod tests {
         )
     }
 
-    /// Every queued bundle must be accounted for exactly once, and a bundle
-    /// the exporter makes nothing of must not abort the run -- one bad bundle
-    /// turning into a dead job is the failure mode worth guarding.
-    ///
-    /// It also pins something surprising. These bundles are not Unity bundles
-    /// at all, and they still count as *completed*: unity-rs accepts input it
-    /// does not recognise as a collection with no objects, which is
-    /// indistinguishable from a bundle that legitimately exports nothing. The
-    /// consequence is visible here -- they land in the download record, so a
-    /// later run treats them as done and never refetches them.
+    /// Every queued bundle must be accounted for exactly once. Unrecognized
+    /// payloads fail export and stay out of the download record so a later run
+    /// can fetch them again; one bad bundle still must not deadlock the job.
     #[tokio::test]
     async fn every_queued_bundle_is_accounted_for_exactly_once() {
         let temp = tempdir().unwrap();
@@ -1116,8 +1109,8 @@ mod tests {
         );
         assert_eq!(
             (summary.completed_downloads, summary.failed_downloads),
-            (3, 0),
-            "an unrecognised bundle exports as an empty object set, not an error"
+            (0, 3),
+            "unrecognized bundle payloads must fail instead of looking complete"
         );
 
         let record =
@@ -1125,8 +1118,8 @@ mod tests {
                 .unwrap();
         assert_eq!(
             record.len(),
-            3,
-            "recorded as done, so a later run will not refetch them"
+            0,
+            "failed bundles must remain eligible for a later refetch"
         );
         server.abort();
     }

@@ -202,10 +202,8 @@ fn scan_all_files_finds_nested_files() {
     assert_eq!(files, vec![a, b]);
 }
 
-/// Even an input with no Unity objects reaches the linked unity-rs engine and
-/// completes successfully.
 #[test]
-fn linked_unity_rs_backend_handles_an_empty_object_set() {
+fn linked_unity_rs_backend_rejects_an_unrecognized_input() {
     let dir = tempdir().unwrap();
     let fake_bundle = dir.path().join("bundle.bin");
     fs::write(&fake_bundle, b"bundle").unwrap();
@@ -213,7 +211,7 @@ fn linked_unity_rs_backend_handles_an_empty_object_set() {
     let options = processing_pipeline_options();
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let summary = runtime
+    let error = runtime
         .block_on(extract_unity_asset_bundle(
             &options,
             &fake_bundle,
@@ -221,9 +219,59 @@ fn linked_unity_rs_backend_handles_an_empty_object_set() {
             &output_dir,
             "StartApp",
         ))
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExportPipelineError::UnrecognizedUnityInput { .. }
+    ));
+}
+
+/// A recognized, structurally valid Unity container may legitimately contain
+/// no serialized files or objects. That remains a successful empty export.
+#[test]
+fn linked_unity_rs_backend_handles_a_valid_empty_container() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("empty.bundle");
+    fs::write(&bundle, empty_unity_fs_bundle()).unwrap();
+    let output_dir = dir.path().join("out");
+    let options = processing_pipeline_options();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let summary = runtime
+        .block_on(extract_unity_asset_bundle(
+            &options,
+            &bundle,
+            "event_story/foo",
+            &output_dir,
+            "StartApp",
+        ))
         .unwrap();
 
     assert!(summary.unity_rs_object_read_plan.is_empty());
+}
+
+fn empty_unity_fs_bundle() -> Vec<u8> {
+    const BLOCKS_AND_DIRECTORY_INFO_COMBINED: u32 = 0x40;
+    let mut blocks_info = vec![0_u8; 16];
+    blocks_info.extend_from_slice(&0_i32.to_be_bytes());
+    blocks_info.extend_from_slice(&0_i32.to_be_bytes());
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"UnityFS\0");
+    bytes.extend_from_slice(&6_u32.to_be_bytes());
+    bytes.extend_from_slice(b"5.x.x\0");
+    bytes.extend_from_slice(b"2022.3.21f1\0");
+    let size_position = bytes.len();
+    bytes.extend_from_slice(&0_i64.to_be_bytes());
+    let blocks_info_size = u32::try_from(blocks_info.len()).unwrap();
+    bytes.extend_from_slice(&blocks_info_size.to_be_bytes());
+    bytes.extend_from_slice(&blocks_info_size.to_be_bytes());
+    bytes.extend_from_slice(&BLOCKS_AND_DIRECTORY_INFO_COMBINED.to_be_bytes());
+    bytes.extend_from_slice(&blocks_info);
+    let bundle_size = i64::try_from(bytes.len()).unwrap();
+    bytes[size_position..size_position + 8].copy_from_slice(&bundle_size.to_be_bytes());
+    bytes
 }
 
 #[test]
