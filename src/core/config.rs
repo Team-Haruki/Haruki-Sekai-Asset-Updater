@@ -5,10 +5,12 @@
 
 mod env;
 mod load;
+mod pipeline;
 mod schema;
 mod tuning;
 mod validate;
 
+pub use pipeline::pipeline_options;
 pub use schema::*;
 
 #[cfg(test)]

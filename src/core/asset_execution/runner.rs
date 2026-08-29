@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,14 +18,33 @@ use super::model::{
     AssetExecutionContext, BundleWorkOutput, DownloadTask, NativeBundlePostProcessJob,
 };
 use super::progress::ExecutionProgressUpdate;
-use crate::core::config::{AppConfig, AssetHttpVersion, RegionConfig};
+use crate::core::config::{pipeline_options, AppConfig, AssetHttpVersion, RegionConfig};
 use crate::core::download_records::{load_download_record, save_download_record, DownloadRecord};
 use crate::core::errors::AssetExecutionError;
-use crate::core::export_pipeline::{post_process_exported_files, NativeSemanticExportPathRegistry};
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
 use crate::core::pipeline::PreparedAssetRun;
 use crate::core::storage::{upload_to_all_storages, StorageUploadOptions};
+use sekai_asset_pipeline::{
+    flat_pipeline_enabled, post_process_exported_files, scan_all_files, scoped_upload_files,
+    ExportPipelineError, NativeSemanticExportPathRegistry,
+};
+
+pub(super) fn publishable_bundle_files(
+    upload_enabled: bool,
+    export_path: &Path,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+    generated_files: &[PathBuf],
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    if !upload_enabled {
+        Ok(Vec::new())
+    } else if scoped_post_process {
+        Ok(scoped_upload_files(scoped_files, generated_files))
+    } else {
+        scan_all_files(export_path)
+    }
+}
 
 pub(super) fn post_process_backlog_capacity(
     download_concurrency: usize,
@@ -338,7 +357,7 @@ impl AssetExecutionContext {
                     )
                     .await
                 {
-                    Ok(Some(mut job)) if crate::core::export_pipeline::flat_pipeline_enabled() => {
+                    Ok(Some(mut job)) if flat_pipeline_enabled() => {
                         // Flat mode: this worker finishes its own bundle instead of
                         // handing it to a second pool, so there is no queue between
                         // the stages and no backlog to bound. Parallelism is exactly
@@ -803,9 +822,9 @@ impl AssetExecutionContext {
         job: NativeBundlePostProcessJob,
         queue_wait_ms: u128,
     ) -> Result<(), AssetExecutionError> {
+        let options = pipeline_options(app_config, region);
         let post_process_summary = post_process_exported_files(
-            app_config,
-            region,
+            &options,
             &job.payload_export.export_path,
             job.payload_export.native_scoped_post_process,
             &job.payload_export.native_written_files,
@@ -816,15 +835,23 @@ impl AssetExecutionContext {
         let mut phase_ms = job.payload_export.unity_rs_export_phase_ms;
         phase_ms.extend(post_process_summary.post_process_phase_ms);
 
+        let publishable_files = publishable_bundle_files(
+            region.upload.enabled,
+            &job.payload_export.export_path,
+            job.payload_export.native_scoped_post_process,
+            &job.payload_export.native_written_files,
+            &post_process_summary.generated_files,
+        )?;
+
         // Publishing is separate from converting, so an upload failure is
         // reported as an upload failure rather than as a broken export.
-        if !post_process_summary.publishable_files.is_empty() {
+        if !publishable_files.is_empty() {
             let upload_started = Instant::now();
             upload_to_all_storages(
                 &app_config.storage,
                 region_name,
                 &job.payload_export.export_root,
-                &post_process_summary.publishable_files,
+                &publishable_files,
                 StorageUploadOptions {
                     selected_providers: &region.upload.providers,
                     public_read_include: &region.upload.public_read.include,
@@ -913,7 +940,7 @@ mod tests {
     use crate::core::pipeline::prepare_asset_run;
 
     use super::super::model::AssetExecutionContext;
-    use super::super::runner::post_process_backlog_capacity;
+    use super::super::runner::{post_process_backlog_capacity, publishable_bundle_files};
     use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
     use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
 
@@ -942,6 +969,21 @@ mod tests {
         assert_eq!(post_process_backlog_capacity(0, 0), 1);
         assert_eq!(post_process_backlog_capacity(8, 2), 4);
         assert_eq!(post_process_backlog_capacity(4, 12), 24);
+    }
+
+    #[test]
+    fn application_upload_setting_controls_publishable_inventory() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.json");
+        std::fs::write(&file, b"{}").unwrap();
+
+        assert_eq!(
+            publishable_bundle_files(true, dir.path(), false, &[], &[]).unwrap(),
+            vec![file]
+        );
+        assert!(publishable_bundle_files(false, dir.path(), false, &[], &[])
+            .unwrap()
+            .is_empty());
     }
 
     /// Serves an asset-info document and one bundle per name, so `execute` can

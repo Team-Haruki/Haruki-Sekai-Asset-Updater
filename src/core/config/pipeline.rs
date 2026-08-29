@@ -13,7 +13,7 @@ use sekai_asset_pipeline::{
     VideoExportOptions, VideoFormat,
 };
 
-pub(super) fn pipeline_options(app_config: &AppConfig, region: &RegionConfig) -> PipelineOptions {
+pub fn pipeline_options(app_config: &AppConfig, region: &RegionConfig) -> PipelineOptions {
     let concurrency = app_config.effective_concurrency();
     PipelineOptions {
         backends: BackendsOptions {

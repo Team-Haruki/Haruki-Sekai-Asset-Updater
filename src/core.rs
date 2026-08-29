@@ -2,7 +2,6 @@ pub mod asset_execution;
 pub mod config;
 pub mod download_records;
 pub mod errors;
-pub mod export_pipeline;
 pub mod git_sync;
 pub mod models;
 pub mod pipeline;

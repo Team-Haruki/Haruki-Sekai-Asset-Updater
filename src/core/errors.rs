@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
+use sekai_asset_pipeline::ExportPipelineError;
 use thiserror::Error;
-
-pub use sekai_asset_pipeline::{CodecError, ExportPipelineError};
 
 /// Flatten a `reqwest::Error` together with its source chain into a single string so persisted job
 /// failure messages keep the underlying DNS/TLS/connect cause instead of only the top-level line.

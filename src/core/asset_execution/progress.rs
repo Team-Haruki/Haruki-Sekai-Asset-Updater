@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::model::AssetExecutionContext;
-use crate::core::export_pipeline::NativeObjectReadPlanStats;
 use crate::core::models::JobPhase;
+use sekai_asset_pipeline::NativeObjectReadPlanStats;
 
 #[derive(Debug, Clone)]
 pub enum ExecutionProgressUpdate {

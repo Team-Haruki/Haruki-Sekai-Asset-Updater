@@ -17,14 +17,14 @@ use super::model::{
 use super::planning::{raw_bundle_output_path, validate_relative_bundle_path};
 use super::progress::ExecutionProgressUpdate;
 use super::runner::BundleMemoryLimiter;
-use crate::core::config::AppConfig;
+use crate::core::config::{pipeline_options, AppConfig};
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
-use crate::core::export_pipeline::{
-    export_unity_asset_bundle_payloads_with_registry, NativeSemanticExportPathRegistry,
-};
 use crate::core::models::{ExecutionSummary, JobPhase};
-use sekai_asset_pipeline::{asset_category_name, deobfuscate_owned, remove_file_if_exists};
+use sekai_asset_pipeline::{
+    asset_category_name, deobfuscate_owned, export_unity_asset_bundle_payloads_with_registry,
+    remove_file_if_exists, NativeSemanticExportPathRegistry,
+};
 
 impl AssetExecutionContext {
     pub async fn prefetch_asset_bundles(
@@ -361,9 +361,9 @@ impl AssetExecutionContext {
         export_path_registry: &NativeSemanticExportPathRegistry,
     ) -> Result<Option<NativeBundlePostProcessJob>, AssetExecutionError> {
         let export_started = Instant::now();
+        let options = pipeline_options(app_config, &self.region);
         let payload_export = export_unity_asset_bundle_payloads_with_registry(
-            app_config,
-            &self.region,
+            &options,
             temp_file,
             &task.bundle_path,
             Path::new(asset_save_dir),
