@@ -1,6 +1,5 @@
-use std::ffi::{c_void, CStr};
+use std::ffi::c_void;
 use std::io::Cursor;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::ptr;
 
@@ -10,9 +9,14 @@ use rsmpeg::ffi;
 use super::FrameRate;
 use crate::core::errors::ExportPipelineError;
 
+mod avio;
 mod error;
+mod raii;
 
-use self::error::{check, cstring, ffmpeg_error, media_error, path_cstring, valid_rational};
+use self::error::{check, ffmpeg_error, media_error, path_cstring, valid_rational};
+use self::raii::{
+    ChannelLayout, CodecContext, Frame, InputContext, OutputContext, Packet, SwrContext,
+};
 
 const AVERROR_EOF: i32 = -541_478_725;
 const AVERROR_EAGAIN: i32 = -(ffi::EAGAIN as i32);
@@ -1094,232 +1098,9 @@ unsafe fn choose_sample_format(
     }
 }
 
-struct InputContext<'a> {
-    ptr: *mut ffi::AVFormatContext,
-    avio: Option<CustomAvio<'a>>,
-}
-
-impl<'a> InputContext<'a> {
-    unsafe fn open_file(
-        url: &CStr,
-        input_format: Option<&str>,
-    ) -> Result<Self, ExportPipelineError> {
-        let mut ptr = ptr::null_mut();
-        let format = input_format_ptr(input_format)?;
-        check(
-            unsafe { ffi::avformat_open_input(&mut ptr, url.as_ptr(), format, ptr::null_mut()) },
-            "avformat_open_input",
-        )?;
-        Ok(Self { ptr, avio: None })
-    }
-
-    unsafe fn open_memory(
-        data: &'a [u8],
-        input_format: Option<&str>,
-    ) -> Result<Self, ExportPipelineError> {
-        let mut ctx = unsafe { ffi::avformat_alloc_context() };
-        if ctx.is_null() {
-            return Err(media_error("avformat_alloc_context failed"));
-        }
-        let avio = CustomAvio::new(data)?;
-        unsafe {
-            (*ctx).pb = avio.ctx;
-            (*ctx).flags |= ffi::AVFMT_FLAG_CUSTOM_IO as i32;
-        }
-        let format = input_format_ptr(input_format)?;
-        let mut ctx_for_open = ctx;
-        let url = cstring("memory:input")?;
-        check(
-            unsafe {
-                ffi::avformat_open_input(&mut ctx_for_open, url.as_ptr(), format, ptr::null_mut())
-            },
-            "avformat_open_input memory",
-        )?;
-        ctx = ctx_for_open;
-        Ok(Self {
-            ptr: ctx,
-            avio: Some(avio),
-        })
-    }
-}
-
-impl Drop for InputContext<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::avformat_close_input(&mut self.ptr);
-        }
-        let _ = self.avio.take();
-    }
-}
-
-struct OutputContext {
-    ptr: *mut ffi::AVFormatContext,
-    io_opened: bool,
-}
-
-impl OutputContext {
-    unsafe fn create(url: &CStr) -> Result<Self, ExportPipelineError> {
-        let mut ptr = ptr::null_mut();
-        check(
-            unsafe {
-                ffi::avformat_alloc_output_context2(
-                    &mut ptr,
-                    ptr::null_mut(),
-                    ptr::null(),
-                    url.as_ptr(),
-                )
-            },
-            "avformat_alloc_output_context2",
-        )?;
-        if ptr.is_null() {
-            return Err(media_error("avformat_alloc_output_context2 returned null"));
-        }
-        Ok(Self {
-            ptr,
-            io_opened: false,
-        })
-    }
-
-    unsafe fn open_io(&mut self, url: &CStr) -> Result<(), ExportPipelineError> {
-        unsafe {
-            if ((*(*self.ptr).oformat).flags & ffi::AVFMT_NOFILE as i32) == 0 {
-                check(
-                    ffi::avio_open(
-                        &mut (*self.ptr).pb,
-                        url.as_ptr(),
-                        ffi::AVIO_FLAG_WRITE as i32,
-                    ),
-                    "avio_open",
-                )?;
-                self.io_opened = true;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl Drop for OutputContext {
-    fn drop(&mut self) {
-        unsafe {
-            if self.io_opened && !self.ptr.is_null() && !(*self.ptr).pb.is_null() {
-                ffi::avio_closep(&mut (*self.ptr).pb);
-            }
-            if !self.ptr.is_null() {
-                ffi::avformat_free_context(self.ptr);
-            }
-        }
-    }
-}
-
-struct CodecContext {
-    ptr: *mut ffi::AVCodecContext,
-}
-
-impl CodecContext {
-    fn new(codec: *const ffi::AVCodec) -> Result<Self, ExportPipelineError> {
-        let ptr = unsafe { ffi::avcodec_alloc_context3(codec) };
-        if ptr.is_null() {
-            Err(media_error("avcodec_alloc_context3 failed"))
-        } else {
-            Ok(Self { ptr })
-        }
-    }
-}
-
-impl Drop for CodecContext {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::avcodec_free_context(&mut self.ptr);
-        }
-    }
-}
-
-struct SwrContext {
-    ptr: *mut ffi::SwrContext,
-}
-
-impl SwrContext {
-    fn new(
-        out_ch_layout: *const ffi::AVChannelLayout,
-        out_sample_fmt: ffi::AVSampleFormat,
-        out_sample_rate: i32,
-        in_ch_layout: *const ffi::AVChannelLayout,
-        in_sample_fmt: ffi::AVSampleFormat,
-        in_sample_rate: i32,
-    ) -> Result<Self, ExportPipelineError> {
-        let mut ptr = ptr::null_mut();
-        check(
-            unsafe {
-                ffi::swr_alloc_set_opts2(
-                    &mut ptr,
-                    out_ch_layout,
-                    out_sample_fmt,
-                    out_sample_rate,
-                    in_ch_layout,
-                    in_sample_fmt,
-                    in_sample_rate,
-                    0,
-                    ptr::null_mut(),
-                )
-            },
-            "swr_alloc_set_opts2",
-        )?;
-        if ptr.is_null() {
-            return Err(media_error("swr_alloc_set_opts2 returned null"));
-        }
-        check(unsafe { ffi::swr_init(ptr) }, "swr_init")?;
-        Ok(Self { ptr })
-    }
-}
-
-impl Drop for SwrContext {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::swr_free(&mut self.ptr);
-        }
-    }
-}
-
-struct ChannelLayout {
-    inner: ffi::AVChannelLayout,
-}
-
-impl ChannelLayout {
-    fn default_for_channels(channels: i32) -> Result<Self, ExportPipelineError> {
-        if channels <= 0 {
-            return Err(media_error("invalid audio channel count"));
-        }
-        let mut inner = unsafe { std::mem::zeroed::<ffi::AVChannelLayout>() };
-        unsafe {
-            ffi::av_channel_layout_default(&mut inner, channels);
-        }
-        Ok(Self { inner })
-    }
-
-    fn default_or_copy(source: *const ffi::AVChannelLayout) -> Result<Self, ExportPipelineError> {
-        let mut inner = unsafe { std::mem::zeroed::<ffi::AVChannelLayout>() };
-        unsafe {
-            if (*source).order == ffi::AV_CHANNEL_ORDER_UNSPEC {
-                ffi::av_channel_layout_default(&mut inner, (*source).nb_channels);
-            } else {
-                check(
-                    ffi::av_channel_layout_copy(&mut inner, source),
-                    "av_channel_layout_copy",
-                )?;
-            }
-        }
-        Ok(Self { inner })
-    }
-}
-
-impl Drop for ChannelLayout {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::av_channel_layout_uninit(&mut self.inner);
-        }
-    }
-}
-
+// Not an owning wrapper: this drives the encoder through
+// `drain_encoder` as it drains, so it stays with the transcoding logic
+// rather than moving to `raii` with the types that only own memory.
 struct AudioFifo {
     ptr: *mut ffi::AVAudioFifo,
     frame_size: i32,
@@ -1467,16 +1248,6 @@ impl AudioFifo {
     }
 }
 
-fn audio_fifo_read_error(read: i32) -> ExportPipelineError {
-    if read < 0 {
-        ExportPipelineError::Media {
-            message: format!("av_audio_fifo_read failed: {}", ffmpeg_error(read)),
-        }
-    } else {
-        media_error("av_audio_fifo_read read fewer samples than requested")
-    }
-}
-
 impl Drop for AudioFifo {
     fn drop(&mut self) {
         unsafe {
@@ -1485,164 +1256,13 @@ impl Drop for AudioFifo {
     }
 }
 
-struct Packet {
-    ptr: *mut ffi::AVPacket,
-}
-
-impl Packet {
-    fn new() -> Result<Self, ExportPipelineError> {
-        let ptr = unsafe { ffi::av_packet_alloc() };
-        if ptr.is_null() {
-            Err(media_error("av_packet_alloc failed"))
-        } else {
-            Ok(Self { ptr })
+fn audio_fifo_read_error(read: i32) -> ExportPipelineError {
+    if read < 0 {
+        ExportPipelineError::Media {
+            message: format!("av_audio_fifo_read failed: {}", ffmpeg_error(read)),
         }
-    }
-}
-
-impl Drop for Packet {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::av_packet_free(&mut self.ptr);
-        }
-    }
-}
-
-struct Frame {
-    ptr: *mut ffi::AVFrame,
-}
-
-impl Frame {
-    fn new() -> Result<Self, ExportPipelineError> {
-        let ptr = unsafe { ffi::av_frame_alloc() };
-        if ptr.is_null() {
-            Err(media_error("av_frame_alloc failed"))
-        } else {
-            Ok(Self { ptr })
-        }
-    }
-}
-
-impl Drop for Frame {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::av_frame_free(&mut self.ptr);
-        }
-    }
-}
-
-struct CustomAvio<'a> {
-    ctx: *mut ffi::AVIOContext,
-    opaque: *mut MemoryInput,
-    _data: PhantomData<&'a [u8]>,
-}
-
-impl<'a> CustomAvio<'a> {
-    fn new(data: &'a [u8]) -> Result<Self, ExportPipelineError> {
-        let buffer_size = 32 * 1024;
-        let buffer = unsafe { ffi::av_malloc(buffer_size) as *mut u8 };
-        if buffer.is_null() {
-            return Err(media_error("av_malloc failed for AVIO buffer"));
-        }
-        let opaque = Box::into_raw(Box::new(MemoryInput {
-            data: data.as_ptr(),
-            len: data.len(),
-            position: 0,
-        }));
-        let ctx = unsafe {
-            ffi::avio_alloc_context(
-                buffer,
-                buffer_size as i32,
-                0,
-                opaque as *mut c_void,
-                Some(read_memory_packet),
-                None,
-                Some(seek_memory),
-            )
-        };
-        if ctx.is_null() {
-            unsafe {
-                ffi::av_free(buffer as *mut c_void);
-                drop(Box::from_raw(opaque));
-            }
-            return Err(media_error("avio_alloc_context failed"));
-        }
-        Ok(Self {
-            ctx,
-            opaque,
-            _data: PhantomData,
-        })
-    }
-}
-
-impl Drop for CustomAvio<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.ctx.is_null() {
-                ffi::avio_context_free(&mut self.ctx);
-            }
-            if !self.opaque.is_null() {
-                drop(Box::from_raw(self.opaque));
-                self.opaque = ptr::null_mut();
-            }
-        }
-    }
-}
-
-struct MemoryInput {
-    data: *const u8,
-    len: usize,
-    position: usize,
-}
-
-unsafe extern "C" fn read_memory_packet(opaque: *mut c_void, buf: *mut u8, buf_size: i32) -> i32 {
-    let input = unsafe { &mut *(opaque as *mut MemoryInput) };
-    if input.position >= input.len {
-        return AVERROR_EOF;
-    }
-    let remaining = input.len - input.position;
-    let len = remaining.min(buf_size as usize);
-    unsafe {
-        ptr::copy_nonoverlapping(input.data.add(input.position), buf, len);
-    }
-    input.position += len;
-    len as i32
-}
-
-unsafe extern "C" fn seek_memory(opaque: *mut c_void, offset: i64, whence: i32) -> i64 {
-    let input = unsafe { &mut *(opaque as *mut MemoryInput) };
-    if whence == ffi::AVSEEK_SIZE as i32 {
-        return input.len as i64;
-    }
-    let base = match whence {
-        libc::SEEK_SET => 0_i64,
-        libc::SEEK_CUR => input.position as i64,
-        libc::SEEK_END => input.len as i64,
-        _ => return -1,
-    };
-    let Some(position) = base.checked_add(offset) else {
-        return -1;
-    };
-    if position < 0 || position as usize > input.len {
-        return -1;
-    }
-    input.position = position as usize;
-    position
-}
-
-fn input_format_ptr(format: Option<&str>) -> Result<*mut ffi::AVInputFormat, ExportPipelineError> {
-    let Some(format) = format else {
-        return Ok(ptr::null_mut());
-    };
-    let format = cstring(format)?;
-    let ptr = unsafe { ffi::av_find_input_format(format.as_ptr()) };
-    if ptr.is_null() {
-        Err(media_error(&format!(
-            "FFmpeg input format is unavailable: {}",
-            format.to_string_lossy()
-        )))
     } else {
-        Ok(ptr as *mut ffi::AVInputFormat)
+        media_error("av_audio_fifo_read read fewer samples than requested")
     }
 }
 
