@@ -1684,3 +1684,96 @@ fn input_format_ptr(format: Option<&str>) -> Result<*mut ffi::AVInputFormat, Exp
         Ok(ptr as *mut ffi::AVInputFormat)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `check` turns a negative FFmpeg return into a message that names both
+    /// the operation and what FFmpeg said. Losing either half makes an FFI
+    /// failure unattributable, which is the usual way these get debugged.
+    #[test]
+    fn check_reports_the_operation_and_the_ffmpeg_reason() {
+        assert!(check(0, "noop").is_ok());
+        assert!(check(1, "positive returns are success").is_ok());
+
+        let err = check(AVERROR_EOF, "avcodec_receive_frame").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("avcodec_receive_frame"), "{message}");
+        assert!(
+            message.contains(&ffmpeg_error(AVERROR_EOF)),
+            "the FFmpeg reason must survive: {message}"
+        );
+    }
+
+    /// An unrecognised code still has to produce something, not an empty string
+    /// or a panic.
+    #[test]
+    fn ffmpeg_error_always_produces_a_message() {
+        assert!(!ffmpeg_error(AVERROR_EOF).is_empty());
+        assert!(!ffmpeg_error(i32::MIN + 1).is_empty());
+    }
+
+    /// Paths and option strings reach FFmpeg as C strings, so an interior NUL
+    /// has to be rejected here rather than silently truncating the value.
+    #[test]
+    fn c_string_conversion_rejects_interior_nul() {
+        assert_eq!(cstring("libmp3lame").unwrap().to_bytes(), b"libmp3lame");
+        assert!(cstring("bad\0name").is_err());
+
+        assert!(path_cstring(Path::new("/tmp/out.mp3")).is_ok());
+        assert!(path_cstring(Path::new("/tmp/ba\0d.mp3")).is_err());
+    }
+
+    #[test]
+    fn only_positive_rationals_are_valid() {
+        let rational = |num, den| ffi::AVRational { num, den };
+        assert!(valid_rational(rational(30, 1)).is_some());
+        assert!(valid_rational(rational(0, 1)).is_none());
+        assert!(valid_rational(rational(30, 0)).is_none());
+        assert!(valid_rational(rational(-1, 1)).is_none());
+    }
+
+    /// The owning wrappers exist so an early return frees what was allocated.
+    /// Allocating and dropping them in a loop is what turns a double free or a
+    /// missing free into a visible failure rather than a slow leak in
+    /// production.
+    #[test]
+    fn allocation_wrappers_allocate_and_free_repeatedly() {
+        for _ in 0..64 {
+            let packet = Packet::new().unwrap();
+            assert!(!packet.ptr.is_null());
+            let frame = Frame::new().unwrap();
+            assert!(!frame.ptr.is_null());
+        }
+    }
+
+    #[test]
+    fn channel_layouts_are_built_for_valid_counts_only() {
+        for channels in [1, 2, 6] {
+            let layout = ChannelLayout::default_for_channels(channels).unwrap();
+            assert_eq!(layout.inner.nb_channels, channels);
+        }
+        assert!(ChannelLayout::default_for_channels(0).is_err());
+        assert!(ChannelLayout::default_for_channels(-2).is_err());
+    }
+
+    /// `default_or_copy` has two branches: an unspecified order is replaced by
+    /// FFmpeg's default for that channel count, and a specified one is copied.
+    /// Getting the first wrong yields a layout with no channels, which fails
+    /// much later inside the encoder.
+    #[test]
+    fn unspecified_channel_order_falls_back_to_the_default_layout() {
+        let mut unspecified = unsafe { std::mem::zeroed::<ffi::AVChannelLayout>() };
+        unspecified.order = ffi::AV_CHANNEL_ORDER_UNSPEC;
+        unspecified.nb_channels = 2;
+        let copied = ChannelLayout::default_or_copy(&unspecified).unwrap();
+        assert_eq!(copied.inner.nb_channels, 2);
+        assert_ne!(copied.inner.order, ffi::AV_CHANNEL_ORDER_UNSPEC);
+
+        let stereo = ChannelLayout::default_for_channels(2).unwrap();
+        let copied = ChannelLayout::default_or_copy(&stereo.inner).unwrap();
+        assert_eq!(copied.inner.nb_channels, 2);
+        assert_eq!(copied.inner.order, stereo.inner.order);
+    }
+}
