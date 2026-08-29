@@ -46,3 +46,5 @@ haruki-sekai-asset-updater
 # Nested worktrees
 cricodecs/target/
 node_modules/
+# Local benchmark workspace (harness, virtualenvs, corpora, result records)
+bench/
