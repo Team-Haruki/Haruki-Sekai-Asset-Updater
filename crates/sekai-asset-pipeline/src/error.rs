@@ -22,6 +22,58 @@ pub enum CodecError {
     Hca(String),
 }
 
+#[derive(Debug, Error)]
+pub enum ExportPipelineError {
+    #[error(transparent)]
+    Codec(#[from] CodecError),
+    #[error("io error at {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("image codec error at {path}: {source}")]
+    Image {
+        path: PathBuf,
+        #[source]
+        source: image::ImageError,
+    },
+    #[error("failed to spawn command `{program}`: {source}")]
+    Spawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("command `{program}` failed with status {status}: {stderr}")]
+    CommandFailed {
+        program: String,
+        status: String,
+        stderr: String,
+    },
+    #[error("media conversion failed: {message}")]
+    Media { message: String },
+    #[error("unity-rs export failed: {message}")]
+    UnityRs { message: String },
+    #[error("failed to serialize Unity export JSON: {source}")]
+    JsonSerialize {
+        #[source]
+        source: sonic_rs::Error,
+    },
+    #[error("failed to parse Unity export JSON: {source}")]
+    JsonParse {
+        #[source]
+        source: sonic_rs::Error,
+    },
+    #[error("failed to spawn worker `{worker}`: {source}")]
+    WorkerSpawn {
+        worker: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("worker `{worker}` panicked: {message}")]
+    WorkerPanic { worker: String, message: String },
+}
+
 /// Failures produced by the reusable bundle pipeline boundary.
 #[derive(Debug, Error)]
 pub enum PipelineError {

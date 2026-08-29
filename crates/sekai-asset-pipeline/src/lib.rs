@@ -9,7 +9,9 @@ mod cleanup;
 mod codec;
 mod crypto;
 mod error;
+mod export;
 mod manifest;
+mod media;
 mod options;
 mod path;
 mod provider;
@@ -24,8 +26,22 @@ pub use codec::{
     CODEC_BACKEND,
 };
 pub use crypto::{decrypt_asset_bundle_info, deobfuscate, deobfuscate_owned};
-pub use error::{CodecError, PipelineError};
+pub use error::{CodecError, ExportPipelineError, PipelineError};
+pub use export::{
+    export_unity_asset_bundle_payloads, export_unity_asset_bundle_payloads_with_registry,
+    extract_unity_asset_bundle, flat_pipeline_enabled, get_export_group,
+    post_process_exported_files, scan_all_files, scoped_upload_files, NativeInMemoryMediaSource,
+    NativeObjectReadPlanStats, NativeObjectTypeReadStats, NativeSemanticExportPathRegistry,
+    NativeSkippedObjectRead, PostProcessSummary, UnityAssetBundlePayloadExport,
+};
 pub use manifest::{asset_category_name, AssetBundleDetail, AssetBundleInfo, AssetCategory};
+pub use media::{
+    convert_hca_bytes_to_flac_with_backend, convert_hca_bytes_to_mp3_with_backend,
+    convert_m2v_bytes_to_mp4_with_backend, convert_m2v_to_mp4_with_backend,
+    convert_usm_to_mp4_with_backend, convert_wav_bytes_to_flac_with_backend,
+    convert_wav_bytes_to_mp3_with_backend, convert_wav_to_flac_with_backend,
+    convert_wav_to_mp3_with_backend, FrameRate,
+};
 pub use options::{
     AcbExportOptions, AssetStudioOptions, AudioExportOptions, AudioFormat, BackendsOptions,
     ConcurrencyOptions, CpuResourceOptions, CpuThrottleOptions, ExecutionOptions, HcaExportOptions,

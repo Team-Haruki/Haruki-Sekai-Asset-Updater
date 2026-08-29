@@ -1,63 +1,19 @@
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::core::config::{AppConfig, RegionConfig};
 use crate::core::errors::ExportPipelineError;
-use sekai_asset_pipeline::PipelineOptions;
 
-mod assetstudio;
-mod images;
-mod limits;
-mod media_postprocess;
 mod options;
-mod paths;
-mod payload;
-mod selectors;
-mod tasks;
-mod types;
 
-use self::assetstudio::run_unity_rs_object_export;
-use self::limits::configure_cpu_budget_throttle;
 use self::options::pipeline_options;
-pub(crate) use self::payload::flat_pipeline_enabled;
-pub(crate) use self::types::NativeSemanticExportPathRegistry;
 
-pub use self::media_postprocess::post_process_exported_files;
-pub use self::types::{
-    NativeObjectReadPlanStats, NativeObjectTypeReadStats, NativeSkippedObjectRead,
-    PostProcessSummary, UnityAssetBundlePayloadExport,
+pub(crate) use sekai_asset_pipeline::{flat_pipeline_enabled, NativeSemanticExportPathRegistry};
+pub use sekai_asset_pipeline::{
+    get_export_group, NativeObjectReadPlanStats, NativeObjectTypeReadStats,
+    NativeSkippedObjectRead, PostProcessSummary, UnityAssetBundlePayloadExport,
 };
 
-pub fn get_export_group(export_path: &str) -> &'static str {
-    if export_path.is_empty() {
-        return "container";
-    }
-
-    let normalized = export_path
-        .replace('\\', "/")
-        .trim_start_matches('/')
-        .to_lowercase();
-
-    for prefix in [
-        "event/center",
-        "event/thumbnail",
-        "gacha/icon",
-        "fix_prefab/mc_new",
-        "mysekai/character/",
-    ] {
-        if normalized.starts_with(prefix) {
-            return "containerFull";
-        }
-    }
-
-    "container"
-}
-
-/// Exports one bundle and post-processes it, without publishing.
-///
-/// No production path uses this -- the service goes through
-/// `export_unity_asset_bundle_payloads` and post-processes on its own
-/// schedule -- but the tests drive a whole bundle through it.
+/// Compatibility entry point for the service's full application config.
 pub async fn extract_unity_asset_bundle(
     app_config: &AppConfig,
     region: &RegionConfig,
@@ -98,19 +54,18 @@ pub async fn export_unity_asset_bundle_payloads(
     output_dir: &Path,
     category: &str,
 ) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
-    let path_registry = NativeSemanticExportPathRegistry::default();
     let options = pipeline_options(app_config, region);
-    export_unity_asset_bundle_payloads_with_options(
+    sekai_asset_pipeline::export_unity_asset_bundle_payloads(
         &options,
         asset_bundle_file,
         export_path,
         output_dir,
         category,
-        &path_registry,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
     app_config: &AppConfig,
     region: &RegionConfig,
@@ -121,7 +76,7 @@ pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
     path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
     let options = pipeline_options(app_config, region);
-    export_unity_asset_bundle_payloads_with_options(
+    sekai_asset_pipeline::export_unity_asset_bundle_payloads_with_registry(
         &options,
         asset_bundle_file,
         export_path,
@@ -132,70 +87,77 @@ pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
     .await
 }
 
-async fn export_unity_asset_bundle_payloads_with_options(
-    app_config: &PipelineOptions,
-    asset_bundle_file: &Path,
-    export_path: &str,
-    output_dir: &Path,
-    category: &str,
-    path_registry: &NativeSemanticExportPathRegistry,
-) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
-    let region = &app_config.region;
-    configure_cpu_budget_throttle(&app_config.resources, app_config.effective_cpu_budget());
-    let exclude_path_prefix = if region.export.by_category {
-        "assets/sekai/assetbundle/resources".to_string()
-    } else if export_path.starts_with("mysekai") {
-        "assets/sekai/assetbundle/resources/ondemand".to_string()
-    } else {
-        format!(
-            "assets/sekai/assetbundle/resources/{}",
-            category.to_lowercase()
-        )
-    };
-
-    let actual_export_path = if region.export.by_category {
-        output_dir.join(category.to_lowercase()).join(export_path)
-    } else {
-        output_dir.join(export_path)
-    };
-    let mut post_process_export_path = actual_export_path.clone();
-
-    let native_object_summary = run_unity_rs_object_export(
-        app_config,
-        region,
-        asset_bundle_file,
-        output_dir,
+#[allow(clippy::too_many_arguments)]
+pub async fn post_process_exported_files(
+    app_config: &AppConfig,
+    region: &RegionConfig,
+    export_path: &Path,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+    acb_sources: Vec<sekai_asset_pipeline::NativeInMemoryMediaSource>,
+) -> Result<PostProcessSummary, ExportPipelineError> {
+    let options = pipeline_options(app_config, region);
+    let mut summary = sekai_asset_pipeline::post_process_exported_files(
+        &options,
         export_path,
-        &exclude_path_prefix,
-        path_registry,
+        scoped_post_process,
+        scoped_files,
+        acb_sources,
     )
     .await?;
-    if region.export.by_category {
-        post_process_export_path = output_dir.to_path_buf();
+
+    if region.upload.enabled {
+        summary.publishable_files = if scoped_post_process {
+            sekai_asset_pipeline::scoped_upload_files(scoped_files, &summary.generated_files)
+        } else {
+            sekai_asset_pipeline::scan_all_files(export_path)?
+        };
     }
-
-    Ok(UnityAssetBundlePayloadExport {
-        export_path: post_process_export_path,
-        export_root: output_dir.to_path_buf(),
-        native_scoped_post_process: true,
-        native_written_files: native_object_summary.written_files,
-        native_acb_sources: native_object_summary.acb_sources,
-        unity_rs_export_phase_ms: native_object_summary.phase_ms,
-        unity_rs_skipped_object_reads: native_object_summary.skipped_object_reads,
-        unity_rs_object_read_plan: native_object_summary.object_read_plan,
-    })
-}
-
-pub(super) fn merge_phase_ms(target: &mut HashMap<String, u64>, source: &HashMap<String, u64>) {
-    for (key, value) in source {
-        *target.entry(format!("read_object.{key}")).or_default() += *value;
-    }
-}
-
-pub(super) fn record_max_phase_ms(target: &mut HashMap<String, u64>, phase: &str, value: u64) {
-    let current = target.entry(phase.to_string()).or_default();
-    *current = (*current).max(value);
+    Ok(summary)
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::post_process_exported_files;
+    use crate::core::config::{AppConfig, RegionConfig};
+
+    #[test]
+    fn application_upload_setting_controls_publishable_inventory() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("sample.json");
+        fs::write(&file, b"{}").unwrap();
+        let config = AppConfig::default();
+        let mut region = RegionConfig::default();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        region.upload.enabled = true;
+        let enabled = runtime
+            .block_on(post_process_exported_files(
+                &config,
+                &region,
+                dir.path(),
+                false,
+                &[],
+                Vec::new(),
+            ))
+            .unwrap();
+        assert_eq!(enabled.publishable_files, vec![file]);
+
+        region.upload.enabled = false;
+        let disabled = runtime
+            .block_on(post_process_exported_files(
+                &config,
+                &region,
+                dir.path(),
+                false,
+                &[],
+                Vec::new(),
+            ))
+            .unwrap();
+        assert!(disabled.publishable_files.is_empty());
+    }
+}
