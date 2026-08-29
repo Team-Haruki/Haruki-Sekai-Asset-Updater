@@ -1080,3 +1080,188 @@ fn prune_terminal_jobs(jobs: &mut HashMap<Uuid, JobSnapshot>, retain: usize) {
         jobs.remove(&id);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::core::models::AssetUpdateMode;
+
+    fn queued_job(region: &str) -> JobSnapshot {
+        JobSnapshot::new(&request(region))
+    }
+
+    fn request(region: &str) -> AssetUpdateRequest {
+        AssetUpdateRequest {
+            region: region.to_string(),
+            asset_version: None,
+            asset_hash: None,
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        }
+    }
+
+    fn manager() -> JobManager {
+        JobManager::new(Arc::new(AppConfig::default()))
+    }
+
+    /// A finished job answers "already terminal", not 404. Its cancel flag is
+    /// pruned when it finishes while the snapshot stays in the map, so driving
+    /// the decision off the flag would report a job that plainly exists as
+    /// missing.
+    #[tokio::test]
+    async fn cancelling_a_terminal_job_reports_terminal_not_missing() {
+        let manager = manager();
+        let mut job = queued_job("jp");
+        job.status = JobStatus::Completed;
+        let id = job.id;
+        manager.jobs.write().await.insert(id, job);
+
+        match manager.cancel(id).await {
+            Some(Err(message)) => assert!(message.contains("terminal"), "{message}"),
+            other => panic!("expected a terminal-state error, got {other:?}"),
+        }
+        assert!(
+            manager.cancel(Uuid::new_v4()).await.is_none(),
+            "an unknown job must be absent, not terminal"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_job_marks_it_and_raises_the_flag() {
+        let manager = manager();
+        let mut job = queued_job("jp");
+        job.status = JobStatus::Running;
+        let id = job.id;
+        let flag = Arc::new(AtomicBool::new(false));
+        manager.jobs.write().await.insert(id, job);
+        manager.cancel_flags.write().await.insert(id, flag.clone());
+
+        let cancelled = manager.cancel(id).await.unwrap().unwrap();
+
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        assert!(flag.load(Ordering::SeqCst), "the worker must see the flag");
+        assert_eq!(
+            manager.jobs.read().await[&id]
+                .failure
+                .as_ref()
+                .unwrap()
+                .kind,
+            JobFailureKind::Cancelled
+        );
+    }
+
+    /// The race this guards: a cancel lands while the pipeline is finishing, so
+    /// the execution path arrives with a successful summary for a job the user
+    /// has already been told is cancelled. Reporting it completed would be a
+    /// lie, and spawning the 3D child job off it would do real work.
+    #[tokio::test]
+    async fn completion_does_not_resurrect_a_cancelled_job() {
+        let jobs: Arc<RwLock<HashMap<Uuid, JobSnapshot>>> = Arc::new(RwLock::new(HashMap::new()));
+        let mut job = queued_job("jp");
+        job.status = JobStatus::Cancelled;
+        let id = job.id;
+        jobs.write().await.insert(id, job);
+
+        let request = request("jp");
+        let region = RegionConfig::default();
+        let stopped = complete_job_snapshot(
+            &jobs,
+            id,
+            &request,
+            &region,
+            ExecutionSummary {
+                discovered_bundles: 10,
+                queued_downloads: 10,
+                completed_downloads: 10,
+                failed_downloads: 0,
+                updated_record_entries: 10,
+                chart_hash_sync_performed: false,
+            },
+        )
+        .await;
+
+        assert!(stopped, "a cancelled job must stop the completion path");
+        assert_eq!(jobs.read().await[&id].status, JobStatus::Cancelled);
+    }
+
+    #[test]
+    fn pruning_keeps_running_jobs_and_the_newest_terminal_ones() {
+        let mut jobs = HashMap::new();
+        let mut ids = Vec::new();
+        for index in 0..4 {
+            let mut job = queued_job("jp");
+            job.status = JobStatus::Completed;
+            job.updated_at = chrono::Utc::now() + chrono::Duration::seconds(index);
+            ids.push(job.id);
+            jobs.insert(job.id, job);
+        }
+        let mut running = queued_job("jp");
+        running.status = JobStatus::Running;
+        running.updated_at = chrono::Utc::now() - chrono::Duration::days(1);
+        let running_id = running.id;
+        jobs.insert(running_id, running);
+
+        prune_terminal_jobs(&mut jobs, 2);
+
+        assert!(
+            jobs.contains_key(&running_id),
+            "a running job is never evicted, however old"
+        );
+        assert!(jobs.contains_key(&ids[3]) && jobs.contains_key(&ids[2]));
+        assert!(!jobs.contains_key(&ids[0]) && !jobs.contains_key(&ids[1]));
+
+        let before = jobs.len();
+        prune_terminal_jobs(&mut jobs, 0);
+        assert_eq!(jobs.len(), before, "retain == 0 disables eviction");
+    }
+
+    /// The lock is what stops two same-region jobs from clobbering each other's
+    /// download record, so it has to be the same lock even when the region
+    /// arrives spelled differently.
+    #[tokio::test]
+    async fn region_locks_are_shared_per_region_and_case_insensitive() {
+        let locks: RegionLockMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let jp = acquire_region_lock(&locks, "jp").await;
+        let jp_upper = acquire_region_lock(&locks, "JP").await;
+        let en = acquire_region_lock(&locks, "en").await;
+
+        assert!(Arc::ptr_eq(&jp, &jp_upper), "`JP` and `jp` are one region");
+        assert!(!Arc::ptr_eq(&jp, &en));
+        assert_eq!(locks.read().await.len(), 2);
+    }
+
+    /// Failures are classified by scanning the message for keywords, in a fixed
+    /// priority order. This pins that order, including where it gets the answer
+    /// wrong: an S3 upload failure whose OpenDAL source mentions an HTTP status
+    /// is reported as `Network`, because the http/request/status arm is tested
+    /// before the storage arm. The kinds are what the API reports, so the
+    /// misread is visible to callers.
+    #[test]
+    fn failure_classification_follows_keyword_priority() {
+        assert_eq!(
+            classify_failure("operation timed out").kind,
+            JobFailureKind::Timeout
+        );
+        assert_eq!(
+            classify_failure("storage upload failed for provider `s3`").kind,
+            JobFailureKind::Storage
+        );
+        assert_eq!(
+            classify_failure(
+                "storage upload failed for provider `s3` file `a.png`: \
+                 Unexpected (permanent), response: HTTP status 403"
+            )
+            .kind,
+            JobFailureKind::Network,
+            "the same storage failure classifies differently once its source \
+             mentions HTTP -- keyword priority, not error type, decides"
+        );
+        assert_eq!(
+            classify_failure("something nobody anticipated").kind,
+            JobFailureKind::Internal
+        );
+        assert!(!classify_failure("something nobody anticipated").retryable);
+    }
+}
