@@ -416,3 +416,286 @@ pub(super) fn parse_bool_env(field: &str, value: &str) -> Result<bool, ConfigErr
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+
+    use crate::core::errors::ConfigError;
+
+    use super::super::schema::MediaBackend;
+    use super::super::test_support::{env_lock, restore_env};
+
+    #[test]
+    fn load_from_path_expands_env_references_across_config_values() {
+        let _env_lock = env_lock();
+        std::env::set_var(
+            "HARUKI_TEST_AES_KEY_HEX",
+            "00112233445566778899aabbccddeeff",
+        );
+        std::env::set_var("HARUKI_TEST_AES_IV_HEX", "0102030405060708090a0b0c0d0e0f10");
+        std::env::set_var("HARUKI_TEST_BEARER_TOKEN", "secret-token");
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 3
+server:
+  auth:
+    bearer_token: "${{env:HARUKI_TEST_BEARER_TOKEN}}"
+logging:
+  access:
+    format: "[${{time}}] ${{status}}"
+regions:
+  jp:
+    enabled: true
+    provider:
+      kind: colorful_palette
+      asset_info_url_template: "https://example.com/{{env}}/{{asset_version}}/{{asset_hash}}"
+      asset_bundle_url_template: "https://example.com/assets/{{bundle_path}}"
+      profile: production
+      profile_hashes:
+        production: abc123
+    crypto:
+      aes_key_hex: "${{env:HARUKI_TEST_AES_KEY_HEX}}"
+      aes_iv_hex: "${{env:HARUKI_TEST_AES_IV_HEX}}"
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(file.path()).unwrap();
+        assert_eq!(
+            config.server.auth.bearer_token.as_deref(),
+            Some("secret-token")
+        );
+        assert_eq!(
+            config.regions["jp"].crypto.aes_key_hex.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
+        assert_eq!(
+            config.regions["jp"].crypto.aes_iv_hex.as_deref(),
+            Some("0102030405060708090a0b0c0d0e0f10")
+        );
+        assert_eq!(config.logging.access.format, "[${time}] ${status}");
+
+        std::env::remove_var("HARUKI_TEST_AES_KEY_HEX");
+        std::env::remove_var("HARUKI_TEST_AES_IV_HEX");
+        std::env::remove_var("HARUKI_TEST_BEARER_TOKEN");
+    }
+
+    #[test]
+    fn load_from_path_applies_asset_studio_env_overrides() {
+        let _env_lock = env_lock();
+        let old_media_backend = std::env::var("HARUKI_MEDIA_BACKEND").ok();
+        let old_read_batch_size = std::env::var("HARUKI_ASSET_STUDIO_READ_BATCH_SIZE").ok();
+        let old_image_format = std::env::var("HARUKI_ASSET_STUDIO_IMAGE_FORMAT").ok();
+        let old_media_encode_concurrency = std::env::var("HARUKI_MEDIA_ENCODE_CONCURRENCY").ok();
+        let old_download_concurrency = std::env::var("HARUKI_DOWNLOAD_CONCURRENCY").ok();
+        let old_post_process_concurrency = std::env::var("HARUKI_POST_PROCESS_CONCURRENCY").ok();
+        let old_concurrency_auto_tune = std::env::var("HARUKI_CONCURRENCY_AUTO_TUNE").ok();
+        let old_cpu_budget_auto = std::env::var("HARUKI_CPU_BUDGET_AUTO").ok();
+        let old_cpu_budget_ratio = std::env::var("HARUKI_CPU_BUDGET_RATIO").ok();
+        let old_cpu_reserved = std::env::var("HARUKI_CPU_RESERVED").ok();
+        let old_cpu_throttle_enabled = std::env::var("HARUKI_CPU_THROTTLE_ENABLED").ok();
+        let old_cpu_throttle_sample_ms = std::env::var("HARUKI_CPU_THROTTLE_SAMPLE_MS").ok();
+        let old_max_in_flight_bundle_bytes =
+            std::env::var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES").ok();
+        std::env::set_var("HARUKI_MEDIA_BACKEND", "cli");
+        std::env::set_var("HARUKI_ASSET_STUDIO_READ_BATCH_SIZE", "48");
+        std::env::set_var("HARUKI_ASSET_STUDIO_IMAGE_FORMAT", "raw_rgba");
+        std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", "9");
+        std::env::set_var("HARUKI_DOWNLOAD_CONCURRENCY", "11");
+        std::env::set_var("HARUKI_POST_PROCESS_CONCURRENCY", "13");
+        std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", "true");
+        std::env::set_var("HARUKI_CPU_BUDGET_AUTO", "true");
+        std::env::set_var("HARUKI_CPU_BUDGET_RATIO", "0.5");
+        std::env::set_var("HARUKI_CPU_RESERVED", "2");
+        std::env::set_var("HARUKI_CPU_THROTTLE_ENABLED", "true");
+        std::env::set_var("HARUKI_CPU_THROTTLE_SAMPLE_MS", "500");
+        std::env::set_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES", "1048576");
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 3
+backends:
+  asset_studio:
+    read_batch_size: 16
+    image_format: raw_rgba
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(file.path()).unwrap();
+        assert_eq!(config.backends.media.backend, MediaBackend::Cli);
+        assert_eq!(config.backends.asset_studio.read_batch_size, 48);
+        assert_eq!(
+            config.backends.asset_studio.image_format.as_deref(),
+            Some("raw_rgba")
+        );
+        assert_eq!(config.concurrency.media_encode, 9);
+        assert_eq!(config.concurrency.audio_encode, 9);
+        assert_eq!(config.concurrency.video_encode, 9);
+        assert_eq!(config.concurrency.download, 11);
+        assert_eq!(config.concurrency.post_process, 13);
+        assert!(config.concurrency.auto_tune);
+        assert!(config.resources.cpu.budget_auto);
+        assert_eq!(config.resources.cpu.budget_ratio, 0.5);
+        assert_eq!(config.resources.cpu.reserved, 2);
+        assert!(config.resources.cpu.throttle.enabled);
+        assert_eq!(config.resources.cpu.throttle.sample_ms, 500);
+        assert_eq!(
+            config.resources.memory.max_in_flight_bundle_bytes,
+            1_048_576
+        );
+
+        match old_media_backend {
+            Some(value) => std::env::set_var("HARUKI_MEDIA_BACKEND", value),
+            None => std::env::remove_var("HARUKI_MEDIA_BACKEND"),
+        }
+        match old_read_batch_size {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_READ_BATCH_SIZE", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_READ_BATCH_SIZE"),
+        }
+        match old_image_format {
+            Some(value) => std::env::set_var("HARUKI_ASSET_STUDIO_IMAGE_FORMAT", value),
+            None => std::env::remove_var("HARUKI_ASSET_STUDIO_IMAGE_FORMAT"),
+        }
+        match old_media_encode_concurrency {
+            Some(value) => std::env::set_var("HARUKI_MEDIA_ENCODE_CONCURRENCY", value),
+            None => std::env::remove_var("HARUKI_MEDIA_ENCODE_CONCURRENCY"),
+        }
+        match old_download_concurrency {
+            Some(value) => std::env::set_var("HARUKI_DOWNLOAD_CONCURRENCY", value),
+            None => std::env::remove_var("HARUKI_DOWNLOAD_CONCURRENCY"),
+        }
+        match old_post_process_concurrency {
+            Some(value) => std::env::set_var("HARUKI_POST_PROCESS_CONCURRENCY", value),
+            None => std::env::remove_var("HARUKI_POST_PROCESS_CONCURRENCY"),
+        }
+        match old_concurrency_auto_tune {
+            Some(value) => std::env::set_var("HARUKI_CONCURRENCY_AUTO_TUNE", value),
+            None => std::env::remove_var("HARUKI_CONCURRENCY_AUTO_TUNE"),
+        }
+        match old_cpu_budget_auto {
+            Some(value) => std::env::set_var("HARUKI_CPU_BUDGET_AUTO", value),
+            None => std::env::remove_var("HARUKI_CPU_BUDGET_AUTO"),
+        }
+        match old_cpu_budget_ratio {
+            Some(value) => std::env::set_var("HARUKI_CPU_BUDGET_RATIO", value),
+            None => std::env::remove_var("HARUKI_CPU_BUDGET_RATIO"),
+        }
+        match old_cpu_reserved {
+            Some(value) => std::env::set_var("HARUKI_CPU_RESERVED", value),
+            None => std::env::remove_var("HARUKI_CPU_RESERVED"),
+        }
+        match old_cpu_throttle_enabled {
+            Some(value) => std::env::set_var("HARUKI_CPU_THROTTLE_ENABLED", value),
+            None => std::env::remove_var("HARUKI_CPU_THROTTLE_ENABLED"),
+        }
+        match old_cpu_throttle_sample_ms {
+            Some(value) => std::env::set_var("HARUKI_CPU_THROTTLE_SAMPLE_MS", value),
+            None => std::env::remove_var("HARUKI_CPU_THROTTLE_SAMPLE_MS"),
+        }
+        match old_max_in_flight_bundle_bytes {
+            Some(value) => std::env::set_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES", value),
+            None => std::env::remove_var("HARUKI_MAX_IN_FLIGHT_BUNDLE_BYTES"),
+        }
+    }
+
+    #[test]
+    fn load_from_path_applies_double_underscore_env_overrides() {
+        let _env_lock = env_lock();
+        let old_port = std::env::var("HARUKI__SERVER__PORT").ok();
+        let old_provider = std::env::var("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0").ok();
+        let old_bucket = std::env::var("HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET").ok();
+
+        std::env::set_var("HARUKI__SERVER__PORT", "19091");
+        std::env::set_var("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0", "assets");
+        std::env::set_var(
+            "HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET",
+            "sekai-jp-assets",
+        );
+
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 3
+storage:
+  providers:
+    - name: assets
+      scheme: s3
+      options:
+        endpoint: https://s3.example.com
+regions:
+  jp:
+    enabled: true
+    upload:
+      enabled: true
+    provider:
+      kind: colorful_palette
+      asset_info_url_template: "https://example.com/{{env}}/{{asset_version}}/{{asset_hash}}"
+      asset_bundle_url_template: "https://example.com/assets/{{bundle_path}}"
+      profile: production
+      profile_hashes:
+        production: abc123
+"#
+        )
+        .unwrap();
+
+        let config = AppConfig::load_from_path(file.path()).unwrap();
+        assert_eq!(config.server.port, 19091);
+        assert_eq!(
+            config.regions["jp"].upload.providers,
+            vec!["assets".to_string()]
+        );
+        assert_eq!(
+            config.storage.providers[0].options.get("bucket"),
+            Some(&"sekai-jp-assets".to_string())
+        );
+
+        restore_env("HARUKI__SERVER__PORT", old_port);
+        restore_env("HARUKI__REGIONS__JP__UPLOAD__PROVIDERS__0", old_provider);
+        restore_env("HARUKI__STORAGE__PROVIDERS__0__OPTIONS__BUCKET", old_bucket);
+    }
+
+    #[test]
+    fn load_from_path_errors_when_secret_env_reference_is_missing() {
+        std::env::remove_var("HARUKI_TEST_MISSING_AES_KEY");
+        let mut file = NamedTempFile::new().unwrap();
+        write!(
+            file,
+            r#"
+config_version: 3
+regions:
+  jp:
+    enabled: true
+    provider:
+      kind: colorful_palette
+      asset_info_url_template: "https://example.com/{{env}}/{{asset_version}}/{{asset_hash}}"
+      asset_bundle_url_template: "https://example.com/assets/{{bundle_path}}"
+      profile: production
+      profile_hashes:
+        production: abc123
+    crypto:
+      aes_key_hex: "${{env:HARUKI_TEST_MISSING_AES_KEY}}"
+      aes_iv_hex: "0102030405060708090a0b0c0d0e0f10"
+"#
+        )
+        .unwrap();
+
+        let err = AppConfig::load_from_path(file.path()).unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::MissingEnvironmentVariable { ref name, .. }
+            if name == "HARUKI_TEST_MISSING_AES_KEY"
+        ));
+    }
+}

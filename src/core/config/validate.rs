@@ -343,3 +343,152 @@ pub(super) fn validate_asset_studio_read_kind(field: &str, value: &str) -> Resul
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::core::errors::ConfigError;
+
+    #[test]
+    fn rejects_invalid_media_backend() {
+        let err = "sidecar"
+            .parse::<MediaBackend>()
+            .expect_err("invalid media backend should fail");
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { field, value, .. }
+                if field == "backends.media.backend" && value == "sidecar"
+        ));
+    }
+
+    #[test]
+    fn rejects_legacy_runtime_export_format_fields() {
+        assert!(yaml_serde::from_str::<ImageExportConfig>("convert_to_webp: true").is_err());
+        assert!(yaml_serde::from_str::<VideoExportConfig>("convert_to_mp4: true").is_err());
+        assert!(yaml_serde::from_str::<AudioExportConfig>("convert_to_mp3: true").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_image_backend_settings() {
+        let mut config = AppConfig::default();
+        config.backends.image.jpeg_quality = 0;
+
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { field, .. }
+                if field == "backends.image.jpeg_quality"
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_asset_studio_read_batch_size() {
+        let mut config = AppConfig::default();
+        config.backends.asset_studio.read_batch_size = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "backends.asset_studio.read_batch_size" && value == "0"
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_media_encode_concurrency() {
+        let mut config = AppConfig::default();
+        config.concurrency.media_encode = 0;
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "concurrency.media_encode" && value == "0"
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_split_media_encode_concurrency() {
+        for field in ["audio_encode", "video_encode"] {
+            let mut config = AppConfig::default();
+            match field {
+                "audio_encode" => config.concurrency.audio_encode = 0,
+                "video_encode" => config.concurrency.video_encode = 0,
+                _ => unreachable!(),
+            }
+            let err = config.validate().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidValue { field: ref actual, ref value, .. }
+                    if actual == &format!("concurrency.{field}") && value == "0"
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_asset_studio_image_format() {
+        let mut config = AppConfig::default();
+        config.backends.asset_studio.image_format = Some("gif".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "backends.asset_studio.image_format" && value == "gif"
+        ));
+    }
+
+    #[test]
+    fn accepts_raw_rgba_asset_studio_image_format() {
+        let mut config = AppConfig::default();
+        config.backends.asset_studio.image_format = Some("raw_rgba".to_string());
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_unimplemented_pjsk_read_kinds() {
+        // Model packages and motion clips flow through the haruki_3d raw-bundle
+        // pipeline. Accepting them here would silently drop every
+        // Animator/AnimationClip export.
+        for (asset_type, kind) in [
+            ("Animator", "pjsk_model_package"),
+            ("AnimationClip", "pjsk_animation_clip_decoded"),
+        ] {
+            let mut config = AppConfig::default();
+            config
+                .backends
+                .asset_studio
+                .read_kinds
+                .insert(asset_type.to_string(), kind.to_string());
+            config.validate().unwrap_err();
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_asset_studio_read_kind() {
+        let mut config = AppConfig::default();
+        config
+            .backends
+            .asset_studio
+            .read_kinds
+            .insert("Sprite".to_string(), "thumbnail".to_string());
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue { ref field, ref value, .. }
+                if field == "backends.asset_studio.read_kinds.Sprite" && value == "thumbnail"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_cpu_budget_ratio() {
+        for ratio in [0.0, -0.5, 1.5] {
+            let mut config = AppConfig::default();
+            config.resources.cpu.budget_ratio = ratio;
+            let err = config.validate().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidValue { ref field, .. }
+                    if field == "resources.cpu.budget_ratio"
+            ));
+        }
+    }
+}

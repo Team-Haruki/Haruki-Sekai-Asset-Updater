@@ -962,3 +962,214 @@ fn dedupe_audio_formats(formats: Vec<AudioOutputFormat>) -> Vec<AudioOutputForma
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asset_studio_and_media_defaults_are_valid() {
+        let config = AppConfig::default();
+        let asset_studio = &config.backends.asset_studio;
+        assert_eq!(default_asset_studio_export_types(), vec!["all"]);
+        assert_eq!(config.server.asset_http_version, AssetHttpVersion::Auto);
+        assert_eq!(MediaBackend::default(), MediaBackend::Ffi);
+        assert_eq!(config.backends.media.backend, MediaBackend::Ffi);
+        assert_eq!(config.backends.image.backend, ImageBackend::Rust);
+        assert_eq!(
+            config.backends.image.png_compression,
+            ImagePngCompression::Fast
+        );
+        assert!(config.backends.image.webp_lossless);
+        assert_eq!(config.backends.image.jpeg_quality, 95);
+        assert_eq!(asset_studio.read_batch_size, 64);
+        assert_eq!(asset_studio.image_format, None);
+        assert!(asset_studio.read_kinds.is_empty());
+        assert_eq!(config.concurrency.download, 32);
+        assert_eq!(config.concurrency.post_process, 16);
+        assert_eq!(config.concurrency.acb, 12);
+        assert_eq!(config.concurrency.usm, 6);
+        assert_eq!(config.concurrency.images, 12);
+        assert_eq!(config.concurrency.media_encode, 12);
+        assert_eq!(config.concurrency.audio_encode, 12);
+        assert_eq!(config.concurrency.video_encode, 4);
+        assert!(!config.concurrency.auto_tune);
+        assert!(config.resources.cpu.budget_auto);
+        assert_eq!(config.resources.cpu.budget_ratio, 1.0);
+        assert_eq!(config.resources.cpu.reserved, 0);
+        assert!(!config.resources.cpu.throttle.enabled);
+        assert_eq!(config.resources.cpu.throttle.sample_ms, 250);
+    }
+
+    #[test]
+    fn image_export_formats_default_to_png_and_dedupe() {
+        assert_eq!(
+            ImageExportConfig::default().output_formats(),
+            vec![ImageOutputFormat::Png]
+        );
+
+        let images = ImageExportConfig {
+            formats: vec![
+                ImageOutputFormat::Jpg,
+                ImageOutputFormat::Webp,
+                ImageOutputFormat::Jpg,
+            ],
+        };
+
+        assert_eq!(
+            images.output_formats(),
+            vec![ImageOutputFormat::Jpg, ImageOutputFormat::Webp]
+        );
+    }
+
+    #[test]
+    fn video_export_formats_default_to_mp4_and_dedupe() {
+        assert_eq!(
+            VideoExportConfig::default().output_formats(),
+            vec![VideoOutputFormat::Mp4]
+        );
+
+        let video = VideoExportConfig {
+            formats: vec![
+                VideoOutputFormat::M2v,
+                VideoOutputFormat::Mp4,
+                VideoOutputFormat::M2v,
+            ],
+            direct_mp4: true,
+        };
+        assert_eq!(
+            video.output_formats(),
+            vec![VideoOutputFormat::M2v, VideoOutputFormat::Mp4]
+        );
+        assert!(video.writes_m2v());
+        assert!(video.writes_mp4());
+    }
+
+    #[test]
+    fn audio_export_formats_default_to_mp3_and_dedupe() {
+        assert_eq!(
+            AudioExportConfig::default().output_formats(),
+            vec![AudioOutputFormat::Mp3]
+        );
+
+        let audio = AudioExportConfig {
+            formats: vec![
+                AudioOutputFormat::Wav,
+                AudioOutputFormat::Flac,
+                AudioOutputFormat::Wav,
+                AudioOutputFormat::Mp3,
+            ],
+        };
+        assert_eq!(
+            audio.output_formats(),
+            vec![
+                AudioOutputFormat::Wav,
+                AudioOutputFormat::Flac,
+                AudioOutputFormat::Mp3
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_configured_asset_studio_export_types() {
+        let yaml = r#"
+asset_studio_types:
+  - monoBehaviour
+  - textAsset
+  - font
+"#;
+
+        let export: RegionExportConfig = yaml_serde::from_str(yaml).unwrap();
+
+        assert_eq!(
+            export.asset_studio_types,
+            vec![
+                "monoBehaviour".to_string(),
+                "textAsset".to_string(),
+                "font".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_raw_bundle_export_config() {
+        let yaml = r#"
+raw_bundles:
+  output_dir: /data/assets/jp-assets/AssetBundles
+  include:
+    - ^live_pv/model/characterv2/
+  exclude:
+    - /debug/
+"#;
+
+        let export: RegionExportConfig = yaml_serde::from_str(yaml).unwrap();
+        let raw_bundles = export.raw_bundles.unwrap();
+
+        assert_eq!(
+            raw_bundles.output_dir.as_deref(),
+            Some("/data/assets/jp-assets/AssetBundles")
+        );
+        assert_eq!(
+            raw_bundles.include,
+            vec!["^live_pv/model/characterv2/".to_string()]
+        );
+        assert_eq!(raw_bundles.exclude, vec!["/debug/".to_string()]);
+    }
+
+    #[test]
+    fn parses_haruki_3d_export_config() {
+        let yaml = r#"
+haruki_3d:
+  enabled: true
+  exporter_path: /app/haruki-3d/exporter/Haruki-3D-Exporter
+  master_dir: /app/data/masterdata
+  work_dir: /app/data/3d-work
+  manifest_file: /app/data/3d-output/haruki-3d-export-manifest.json
+  output_dir: /app/data/3d-output
+  shared_content_store: /app/data/3d-output-cas
+  compiled_content_store: /app/data/3d-compiled-cache
+  process_concurrency: 16
+  convert_model_textures: true
+  role_character3d_ids:
+    - 5
+  include:
+    - ^live_pv/model/characterv2/
+  exclude:
+    - /debug/
+  cleanup_work_dir_after_success: true
+  cleanup_work_dir_after_failure: false
+"#;
+
+        let export: RegionExportConfig = yaml_serde::from_str(yaml).unwrap();
+
+        assert!(export.haruki_3d.enabled);
+        assert_eq!(
+            export.haruki_3d.exporter_path,
+            "/app/haruki-3d/exporter/Haruki-3D-Exporter"
+        );
+        assert_eq!(export.haruki_3d.work_dir, "/app/data/3d-work");
+        assert_eq!(
+            export.haruki_3d.manifest_file,
+            "/app/data/3d-output/haruki-3d-export-manifest.json"
+        );
+        assert_eq!(export.haruki_3d.output_dir, "/app/data/3d-output");
+        assert_eq!(
+            export.haruki_3d.shared_content_store,
+            "/app/data/3d-output-cas"
+        );
+        assert_eq!(
+            export.haruki_3d.compiled_content_store,
+            "/app/data/3d-compiled-cache"
+        );
+        assert_eq!(export.haruki_3d.process_concurrency, 16);
+        assert!(export.haruki_3d.convert_model_textures);
+        assert_eq!(export.haruki_3d.role_character3d_ids, vec![5]);
+        assert_eq!(
+            export.haruki_3d.include,
+            vec!["^live_pv/model/characterv2/".to_string()]
+        );
+        assert_eq!(export.haruki_3d.exclude, vec!["/debug/".to_string()]);
+        assert!(export.haruki_3d.cleanup_work_dir_after_success);
+        assert!(!export.haruki_3d.cleanup_work_dir_after_failure);
+    }
+}

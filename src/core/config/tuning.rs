@@ -123,3 +123,156 @@ pub(super) fn available_cpu_count() -> usize {
         .unwrap_or(4)
         .max(1)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_concurrency_auto_tune_respects_configured_caps() {
+        let config = ConcurrencyConfig {
+            auto_tune: true,
+            download: 999,
+            upload: 999,
+            post_process: 999,
+            acb: 999,
+            usm: 999,
+            hca: 999,
+            media_encode: 999,
+            audio_encode: 999,
+            video_encode: 999,
+            images: 999,
+        };
+
+        let effective = config.effective();
+
+        assert!(effective.auto_tune);
+        assert!(effective.download <= config.download);
+        assert!(effective.upload <= config.upload);
+        assert!(effective.post_process <= config.post_process);
+        assert!(effective.acb <= config.acb);
+        assert!(effective.usm <= config.usm);
+        assert!(effective.hca <= config.hca);
+        assert!(effective.media_encode <= config.media_encode);
+        assert!(effective.audio_encode <= config.audio_encode);
+        assert!(effective.video_encode <= config.video_encode);
+        assert!(effective.images <= config.images);
+        assert!(effective.download >= 1);
+        assert!(effective.post_process >= 1);
+        assert!(effective.media_encode >= 1);
+        assert!(effective.audio_encode >= 1);
+        assert!(effective.video_encode >= 1);
+    }
+
+    #[test]
+    fn effective_concurrency_widens_cpu_pools_on_wide_hosts() {
+        let config = ConcurrencyConfig {
+            auto_tune: true,
+            ..ConcurrencyConfig::default()
+        };
+
+        let effective = config.effective_for_cpus_with_budget(64, 64);
+
+        // The pools that measurably bound a rule on the 64-core host.
+        assert_eq!(effective.audio_encode, 64, "music was pinned at 12 cores");
+        assert_eq!(
+            effective.post_process, 64,
+            "audio and image work runs inside a post-process slot, so this pool \
+             caps every other CPU pool and must not be narrower than the budget"
+        );
+        assert_eq!(effective.video_encode, 16, "x264 is ~6 threads per encoder");
+        // The rest of the CPU-bound pools follow the budget.
+        assert_eq!(effective.images, 64);
+        assert_eq!(effective.acb, 64);
+        assert_eq!(effective.hca, 64);
+        assert_eq!(effective.media_encode, 64);
+        assert_eq!(effective.usm, 32);
+        // Network pools stay where the operator put them; the remote endpoint
+        // is their ceiling, not this host.
+        assert_eq!(effective.download, config.download);
+        assert_eq!(effective.upload, config.upload);
+    }
+
+    #[test]
+    fn effective_concurrency_unchanged_on_hosts_the_defaults_were_tuned_for() {
+        // The shipped defaults were hand-tuned on a 10-core host. Widening must
+        // be inert at and below that size, so this reproduces the cap-only
+        // formula that predates it and demands byte-identical output.
+        fn caps_only(
+            config: &ConcurrencyConfig,
+            cpus: usize,
+            cpu_budget: usize,
+        ) -> ConcurrencyConfig {
+            let cpus = cpus.max(1);
+            let cpu_budget = cpu_budget.max(1);
+            let oversubscribe = cpu_budget.saturating_mul(2).max(cpu_budget);
+            ConcurrencyConfig {
+                auto_tune: true,
+                download: config.download.min(cpus.saturating_mul(4).max(4)).max(1),
+                upload: config.upload.min(cpus.max(2)).max(1),
+                post_process: if config.post_process == 0 {
+                    0
+                } else {
+                    config
+                        .post_process
+                        .min(cpus.saturating_mul(2).max(2))
+                        .max(1)
+                },
+                acb: config.acb.min(oversubscribe).max(1),
+                usm: config.usm.min(cpus.max(2)).max(1),
+                hca: config
+                    .hca
+                    .min(cpus.saturating_mul(2).max(2))
+                    .min(oversubscribe)
+                    .max(1),
+                media_encode: config.media_encode.min(oversubscribe).max(1),
+                audio_encode: config.audio_encode.min(oversubscribe).max(1),
+                video_encode: config.video_encode.min(cpus.div_ceil(4).max(1)).max(1),
+                images: config.images.min(oversubscribe).max(1),
+            }
+        }
+
+        let config = ConcurrencyConfig {
+            auto_tune: true,
+            ..ConcurrencyConfig::default()
+        };
+
+        for cpus in 1..=12 {
+            let widened = config.effective_for_cpus_with_budget(cpus, cpus);
+            let previous = caps_only(&config, cpus, cpus);
+            assert_eq!(
+                format!("{widened:?}"),
+                format!("{previous:?}"),
+                "widening changed behaviour on a {cpus}-core host"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_concurrency_widening_respects_a_reduced_cpu_budget() {
+        // A half budget on a wide host is an explicit "use half this machine";
+        // widening must size to the budget, not to the core count.
+        let config = ConcurrencyConfig {
+            auto_tune: true,
+            ..ConcurrencyConfig::default()
+        };
+
+        let effective = config.effective_for_cpus_with_budget(64, 16);
+
+        assert_eq!(effective.audio_encode, 16);
+        assert_eq!(effective.images, 16);
+        assert_eq!(effective.media_encode, 16);
+        assert_eq!(effective.post_process, 16);
+    }
+
+    #[test]
+    fn effective_concurrency_preserves_zero_post_process_as_auto() {
+        let config = ConcurrencyConfig {
+            auto_tune: true,
+            post_process: 0,
+            ..ConcurrencyConfig::default()
+        };
+
+        assert_eq!(config.effective_for_cpus_with_budget(8, 8).post_process, 0);
+    }
+}
