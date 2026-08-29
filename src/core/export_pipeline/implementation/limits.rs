@@ -7,8 +7,8 @@ use std::process::Command as StdCommand;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::core::config::ResourcesConfig;
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::ResourceOptions as ResourcesConfig;
 
 pub(super) struct CpuBudgetAcquire {
     pub(super) permit: CpuBudgetPermit,

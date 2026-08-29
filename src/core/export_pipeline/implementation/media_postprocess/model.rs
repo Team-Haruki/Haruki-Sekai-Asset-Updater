@@ -5,7 +5,9 @@
 //! shapes.
 
 use super::super::types::NativeInMemoryMediaSource;
-use crate::core::config::{MediaBackend, RegionConfig};
+use sekai_asset_pipeline::{
+    MediaBackend, PipelineRegionOptions as RegionConfig, RetryOptions as RetryConfig,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -40,7 +42,7 @@ pub(super) struct OwnedAcbPostProcessOptions {
     pub(super) region: RegionConfig,
     pub(super) ffmpeg_path: String,
     pub(super) media_backend: MediaBackend,
-    pub(super) retry: crate::core::config::RetryConfig,
+    pub(super) retry: RetryConfig,
     pub(super) hca_concurrency: usize,
     pub(super) audio_encode_concurrency: usize,
     pub(super) cpu_budget: usize,
@@ -67,7 +69,7 @@ pub(super) struct AcbPostProcessOptions<'a> {
     pub(super) region: &'a RegionConfig,
     pub(super) ffmpeg_path: &'a str,
     pub(super) media_backend: MediaBackend,
-    pub(super) retry: &'a crate::core::config::RetryConfig,
+    pub(super) retry: &'a RetryConfig,
     pub(super) hca_concurrency: usize,
     pub(super) audio_encode_concurrency: usize,
     pub(super) cpu_budget: usize,
@@ -108,7 +110,7 @@ pub(super) struct HcaTrackProcessOptions<'a> {
     pub(super) region: &'a RegionConfig,
     pub(super) ffmpeg_path: &'a str,
     pub(super) media_backend: MediaBackend,
-    pub(super) retry: &'a crate::core::config::RetryConfig,
+    pub(super) retry: &'a RetryConfig,
     pub(super) audio_encode_concurrency: usize,
     pub(super) cpu_budget: usize,
 }

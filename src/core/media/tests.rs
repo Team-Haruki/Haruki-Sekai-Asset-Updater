@@ -10,8 +10,7 @@ use super::{
     convert_m2v_bytes_to_mp4_with_backend, convert_m2v_to_mp4_with_backend,
     convert_usm_to_mp4_with_backend, FrameRate,
 };
-use crate::core::config::MediaBackend;
-use crate::core::config::RetryConfig;
+use sekai_asset_pipeline::{MediaBackend, RetryOptions as RetryConfig};
 
 fn write_executable_script(path: &std::path::Path, script: impl AsRef<[u8]>) {
     let mut file = fs::File::create(path).unwrap();

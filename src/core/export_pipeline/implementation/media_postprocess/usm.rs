@@ -6,11 +6,13 @@ use std::time::Instant;
 
 use crate::core::cleanup::remove_file_if_exists;
 use crate::core::codec;
-use crate::core::config::{MediaBackend, RegionConfig};
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
     convert_m2v_bytes_to_mp4_with_backend, convert_m2v_to_mp4_with_backend,
     convert_usm_to_mp4_with_backend, FrameRate,
+};
+use sekai_asset_pipeline::{
+    MediaBackend, PipelineRegionOptions as RegionConfig, RetryOptions as RetryConfig,
 };
 
 use super::super::tasks::UsmProcessingInput;
@@ -27,7 +29,7 @@ pub(crate) async fn process_usm_file(
     region: &RegionConfig,
     ffmpeg_path: &str,
     media_backend: MediaBackend,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {
@@ -58,7 +60,7 @@ pub(crate) async fn process_usm_input_with_metrics(
     region: &RegionConfig,
     ffmpeg_path: &str,
     media_backend: MediaBackend,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
 ) -> Result<UsmPostProcessOutput, ExportPipelineError> {
@@ -174,7 +176,7 @@ pub(super) async fn process_direct_usm_path(
     region: &RegionConfig,
     ffmpeg_path: &str,
     media_backend: MediaBackend,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
     output: &mut UsmPostProcessOutput,
@@ -232,7 +234,7 @@ pub(super) async fn process_video_only_usm(
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     frame_rate: Option<FrameRate>,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
     output: &mut UsmPostProcessOutput,
@@ -281,7 +283,7 @@ pub(super) async fn process_memory_usm(
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     frame_rate: Option<FrameRate>,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
     output: &mut UsmPostProcessOutput,
@@ -339,7 +341,7 @@ pub(super) async fn process_path_usm(
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     frame_rate: Option<FrameRate>,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
     output: &mut UsmPostProcessOutput,
@@ -398,7 +400,7 @@ pub(super) async fn convert_usm_m2v_bytes(
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     frame_rate: Option<FrameRate>,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
     phase_ms: &mut HashMap<String, u64>,
@@ -434,7 +436,7 @@ pub(super) async fn convert_usm_m2v_path(
     ffmpeg_path: &str,
     media_backend: MediaBackend,
     frame_rate: Option<FrameRate>,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     video_encode_concurrency: usize,
     cpu_budget: usize,
     phase_ms: &mut HashMap<String, u64>,

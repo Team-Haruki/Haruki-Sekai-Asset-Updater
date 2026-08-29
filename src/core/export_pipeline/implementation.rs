@@ -3,11 +3,13 @@ use std::path::Path;
 
 use crate::core::config::{AppConfig, RegionConfig};
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::PipelineOptions;
 
 mod assetstudio;
 mod images;
 mod limits;
 mod media_postprocess;
+mod options;
 mod paths;
 mod payload;
 mod selectors;
@@ -16,6 +18,7 @@ mod types;
 
 use self::assetstudio::run_unity_rs_object_export;
 use self::limits::configure_cpu_budget_throttle;
+use self::options::pipeline_options;
 pub(crate) use self::payload::flat_pipeline_enabled;
 pub(crate) use self::types::NativeSemanticExportPathRegistry;
 
@@ -96,9 +99,9 @@ pub async fn export_unity_asset_bundle_payloads(
     category: &str,
 ) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
     let path_registry = NativeSemanticExportPathRegistry::default();
-    export_unity_asset_bundle_payloads_with_registry(
-        app_config,
-        region,
+    let options = pipeline_options(app_config, region);
+    export_unity_asset_bundle_payloads_with_options(
+        &options,
         asset_bundle_file,
         export_path,
         output_dir,
@@ -117,6 +120,27 @@ pub(crate) async fn export_unity_asset_bundle_payloads_with_registry(
     category: &str,
     path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
+    let options = pipeline_options(app_config, region);
+    export_unity_asset_bundle_payloads_with_options(
+        &options,
+        asset_bundle_file,
+        export_path,
+        output_dir,
+        category,
+        path_registry,
+    )
+    .await
+}
+
+async fn export_unity_asset_bundle_payloads_with_options(
+    app_config: &PipelineOptions,
+    asset_bundle_file: &Path,
+    export_path: &str,
+    output_dir: &Path,
+    category: &str,
+    path_registry: &NativeSemanticExportPathRegistry,
+) -> Result<UnityAssetBundlePayloadExport, ExportPipelineError> {
+    let region = &app_config.region;
     configure_cpu_budget_throttle(&app_config.resources, app_config.effective_cpu_budget());
     let exclude_path_prefix = if region.export.by_category {
         "assets/sekai/assetbundle/resources".to_string()

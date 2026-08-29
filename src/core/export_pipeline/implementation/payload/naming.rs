@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::config::{ImageOutputFormat, RegionConfig};
+use sekai_asset_pipeline::{
+    ImageFormat as ImageOutputFormat, PipelineRegionOptions as RegionConfig,
+};
 
 use super::super::paths::strip_container_prefix;
 use super::super::types::{

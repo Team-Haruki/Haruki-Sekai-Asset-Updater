@@ -7,10 +7,11 @@ use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::codecs::webp::WebPEncoder;
 use image::{ExtendedColorType, ImageEncoder, ImageReader};
 
-use crate::core::config::{
-    ImageBackendConfig, ImageOutputFormat, ImagePngCompression, RegionConfig,
-};
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::{
+    ImageEncodingOptions as ImageBackendConfig, ImageFormat as ImageOutputFormat,
+    PipelineRegionOptions as RegionConfig, PngCompression as ImagePngCompression,
+};
 
 use super::limits::acquire_cpu_budget_permit_blocking;
 use super::paths::image_output_file_for_format;

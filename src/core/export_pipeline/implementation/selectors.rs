@@ -1,10 +1,12 @@
 //! Mapping configured asset-type names onto the exporter that handles them.
 //!
-//! Pure string and list work over `RegionConfig`. It lived in `assetstudio`
+//! Pure string and list work over the projected region options. It lived in `assetstudio`
 //! and `tasks`, which `paths`, `payload` and each other then had to import --
 //! four module cycles for four functions that depend on nothing.
 
-use crate::core::config::{RegionConfig, DEFAULT_ASSET_STUDIO_EXPORT_TYPES};
+use sekai_asset_pipeline::PipelineRegionOptions as RegionConfig;
+
+const DEFAULT_ASSET_STUDIO_EXPORT_TYPES: &[&str] = &["all"];
 
 pub(super) fn assetstudio_export_type_selector(asset_type: &str) -> Option<&'static str> {
     match asset_type.trim().to_ascii_lowercase().as_str() {

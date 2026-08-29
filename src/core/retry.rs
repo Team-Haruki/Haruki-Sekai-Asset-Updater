@@ -8,8 +8,42 @@ use tracing::warn;
 
 use crate::core::config::RetryConfig;
 
-pub async fn retry_async<T, E, Op, Fut, ShouldRetry>(
-    config: &RetryConfig,
+pub trait RetryPolicy {
+    fn attempts(&self) -> usize;
+    fn initial_backoff_ms(&self) -> u64;
+    fn max_backoff_ms(&self) -> u64;
+}
+
+impl RetryPolicy for RetryConfig {
+    fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    fn initial_backoff_ms(&self) -> u64 {
+        self.initial_backoff_ms
+    }
+
+    fn max_backoff_ms(&self) -> u64 {
+        self.max_backoff_ms
+    }
+}
+
+impl RetryPolicy for sekai_asset_pipeline::RetryOptions {
+    fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    fn initial_backoff_ms(&self) -> u64 {
+        self.initial_backoff_ms
+    }
+
+    fn max_backoff_ms(&self) -> u64 {
+        self.max_backoff_ms
+    }
+}
+
+pub async fn retry_async<T, E, Op, Fut, ShouldRetry, Policy>(
+    config: &Policy,
     operation: &str,
     mut op: Op,
     should_retry: ShouldRetry,
@@ -19,8 +53,9 @@ where
     Op: FnMut(usize) -> Fut,
     Fut: Future<Output = Result<T, E>>,
     ShouldRetry: Fn(&E) -> bool,
+    Policy: RetryPolicy,
 {
-    let attempts = config.attempts.max(1);
+    let attempts = config.attempts().max(1);
     for attempt in 1..=attempts {
         match op(attempt).await {
             Ok(value) => return Ok(value),
@@ -43,8 +78,8 @@ where
     unreachable!("retry_async must return from within the attempt loop")
 }
 
-pub fn retry_sync<T, E, Op, ShouldRetry>(
-    config: &RetryConfig,
+pub fn retry_sync<T, E, Op, ShouldRetry, Policy>(
+    config: &Policy,
     operation: &str,
     mut op: Op,
     should_retry: ShouldRetry,
@@ -53,8 +88,9 @@ where
     E: Display,
     Op: FnMut(usize) -> Result<T, E>,
     ShouldRetry: Fn(&E) -> bool,
+    Policy: RetryPolicy,
 {
-    let attempts = config.attempts.max(1);
+    let attempts = config.attempts().max(1);
     for attempt in 1..=attempts {
         match op(attempt) {
             Ok(value) => return Ok(value),
@@ -77,9 +113,9 @@ where
     unreachable!("retry_sync must return from within the attempt loop")
 }
 
-fn backoff_delay(config: &RetryConfig, attempt: usize) -> Duration {
-    let base = config.initial_backoff_ms.max(1);
-    let max = config.max_backoff_ms.max(base);
+fn backoff_delay(config: &impl RetryPolicy, attempt: usize) -> Duration {
+    let base = config.initial_backoff_ms().max(1);
+    let max = config.max_backoff_ms().max(base);
     let multiplier = 1u64
         .checked_shl((attempt.saturating_sub(1)) as u32)
         .unwrap_or(u64::MAX);

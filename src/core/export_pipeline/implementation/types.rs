@@ -5,7 +5,10 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::core::config::{ImageBackendConfig, ImageOutputFormat, RegionConfig};
+use sekai_asset_pipeline::{
+    ImageEncodingOptions as ImageBackendConfig, ImageFormat as ImageOutputFormat,
+    PipelineRegionOptions as RegionConfig,
+};
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub(super) struct UnityAssetInfo {

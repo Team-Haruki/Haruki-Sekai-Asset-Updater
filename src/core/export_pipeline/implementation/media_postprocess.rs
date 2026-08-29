@@ -14,8 +14,11 @@ use std::time::Instant;
 
 use super::images::handle_png_conversion;
 
-use crate::core::config::{AppConfig, MediaBackend, RegionConfig};
+use crate::core::config::{AppConfig, RegionConfig};
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::{
+    MediaBackend, PipelineOptions, PipelineRegionOptions, RetryOptions as RetryConfig,
+};
 
 use self::acb::handle_acb_files_owned;
 use self::model::OwnedAcbPostProcessOptions;
@@ -23,6 +26,7 @@ use self::timing::{merge_raw_phase_ms, record_phase_ms};
 use self::usm::{process_usm_input_with_metrics, UsmPostProcessOutput};
 use super::images::convert_native_surrogate_images_to_png;
 use super::limits::configure_cpu_budget_throttle;
+use super::options::pipeline_options;
 use super::record_max_phase_ms;
 use super::tasks::{
     merge_usm_inputs, post_process_files_by_extension, prepare_usm_processing_inputs, run_tasks,
@@ -39,6 +43,34 @@ pub async fn post_process_exported_files(
     scoped_files: &[PathBuf],
     acb_sources: Vec<NativeInMemoryMediaSource>,
 ) -> Result<PostProcessSummary, ExportPipelineError> {
+    let options = pipeline_options(app_config, region);
+    let mut summary = post_process_exported_files_with_options(
+        &options,
+        export_path,
+        scoped_post_process,
+        scoped_files,
+        acb_sources,
+    )
+    .await?;
+
+    if region.upload.enabled {
+        summary.publishable_files = if scoped_post_process {
+            scoped_upload_files(scoped_files, &summary.generated_files)
+        } else {
+            scan_all_files(export_path)?
+        };
+    }
+    Ok(summary)
+}
+
+async fn post_process_exported_files_with_options(
+    app_config: &PipelineOptions,
+    export_path: &Path,
+    scoped_post_process: bool,
+    scoped_files: &[PathBuf],
+    acb_sources: Vec<NativeInMemoryMediaSource>,
+) -> Result<PostProcessSummary, ExportPipelineError> {
+    let region = &app_config.region;
     configure_cpu_budget_throttle(&app_config.resources, app_config.effective_cpu_budget());
     if !export_path.exists() {
         return Ok(PostProcessSummary {
@@ -191,17 +223,6 @@ pub async fn post_process_exported_files(
         phase_started,
     );
 
-    // Converting files and publishing them are different jobs. This one reports
-    // what it produced; whether any of it is uploaded is the caller's decision,
-    // so an upload failure is attributed to publishing rather than to export.
-    if region.upload.enabled {
-        summary.publishable_files = if scoped_post_process {
-            scoped_upload_files(scoped_files, &summary.generated_files)
-        } else {
-            scan_all_files(export_path)?
-        };
-    }
-
     Ok(summary)
 }
 
@@ -225,10 +246,10 @@ pub(super) fn scoped_upload_files(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_usm_files(
     export_path: &Path,
-    region: &RegionConfig,
+    region: &PipelineRegionOptions,
     ffmpeg_path: &str,
     media_backend: MediaBackend,
-    retry: &crate::core::config::RetryConfig,
+    retry: &RetryConfig,
     usm_concurrency: usize,
     video_encode_concurrency: usize,
     cpu_budget: usize,

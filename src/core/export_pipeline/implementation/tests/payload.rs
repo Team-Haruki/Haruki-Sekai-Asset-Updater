@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use sonic_rs::JsonValueTrait;
 use tempfile::tempdir;
 
-use crate::core::config::{ImageBackendConfig, ImageOutputFormat};
+use sekai_asset_pipeline::{
+    ImageEncodingOptions as ImageBackendConfig, ImageFormat as ImageOutputFormat,
+};
 
 use super::super::payload::bundle::{parse_payload_bundle, parse_payload_bundle_borrowed};
 use super::super::payload::dedup::payload_signature;
@@ -41,7 +43,7 @@ fn native_raw_rgba_payload_is_encoded_to_png() {
     payload.extend_from_slice(&0u32.to_le_bytes());
     payload.extend_from_slice(&[255, 0, 0, 255, 0, 255, 0, 128]);
 
-    let (_config, region) = processing_config();
+    let region = processing_pipeline_options().region;
     let written = write_native_image_payload_final_files(&target, &payload, &region).unwrap();
     assert_eq!(written, vec![target.clone()]);
     let decoded = image::ImageReader::open(&target).unwrap().decode().unwrap();
@@ -59,7 +61,7 @@ fn native_raw_rgba_payload_is_encoded_to_png() {
 #[test]
 fn decoded_surface_encodes_identically_to_the_serialised_round_trip() {
     let pixels: Vec<u8> = (0..4 * 3 * 4).map(|index| (index % 251) as u8).collect();
-    let (_config, region) = processing_config();
+    let region = processing_pipeline_options().region;
 
     let via_bytes = tempdir().unwrap();
     let bytes_target = via_bytes.path().join("image.png");
@@ -135,7 +137,7 @@ fn native_image_payload_writes_png_directly_without_bmp_surrogate() {
         .save_with_format(&source, image::ImageFormat::Bmp)
         .unwrap();
     let payload = fs::read(source).unwrap();
-    let (_config, region) = processing_config();
+    let region = processing_pipeline_options().region;
     let target = dir.path().join("normal.png");
 
     let written = write_native_image_payload_final_files(&target, &payload, &region).unwrap();
@@ -154,7 +156,7 @@ fn native_image_payload_writes_webp_from_memory_when_configured() {
         .save_with_format(&source, image::ImageFormat::Bmp)
         .unwrap();
     let payload = fs::read(source).unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.images.formats = vec![ImageOutputFormat::Webp];
     let target = dir.path().join("normal.png");
     let webp = dir.path().join("normal.webp");
@@ -175,7 +177,7 @@ fn native_raw_rgba_payload_writes_configured_image_formats_directly() {
         2,
         &[255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 7, 8, 9, 64],
     );
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.images.formats = vec![
         ImageOutputFormat::Png,
         ImageOutputFormat::Jpg,
@@ -202,7 +204,7 @@ fn native_raw_rgba_payload_writes_configured_image_formats_directly() {
 #[test]
 fn native_image_object_payload_is_encoded_and_written_during_export() {
     let dir = tempdir().unwrap();
-    let (_config, region) = processing_config();
+    let region = processing_pipeline_options().region;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
@@ -272,7 +274,7 @@ fn native_image_object_payload_is_encoded_and_written_during_export() {
 #[test]
 fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
@@ -332,7 +334,7 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
 #[test]
 fn music_score_text_asset_manifest_uses_public_txt_extension() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
@@ -399,7 +401,7 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
 #[test]
 fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     region.export.usm.export = true;
     region.export.usm.decode = true;
@@ -459,7 +461,7 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
 #[test]
 fn assetbundle_typetree_routes_to_container_bundle_record_path() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
@@ -526,7 +528,7 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
 #[test]
 fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
@@ -598,7 +600,7 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
 #[test]
 fn monoscript_typetree_routes_to_container_subasset_path() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
@@ -934,7 +936,7 @@ fn legacy_duplicate_cleanup_preserves_current_job_claims() {
 #[test]
 fn native_image_write_removes_byte_identical_legacy_duplicate() {
     let dir = tempdir().unwrap();
-    let (_config, region) = processing_config();
+    let region = processing_pipeline_options().region;
     let target = dir.path().join("normal.png");
     let duplicate = dir.path().join("normal__dup2.png");
     let payload = make_native_rgba_ir_payload(1, 1, &[255, 0, 0, 255]);
@@ -949,7 +951,7 @@ fn native_image_write_removes_byte_identical_legacy_duplicate() {
 #[test]
 fn playable_export_dedupes_identical_payloads_across_bundle_states() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
@@ -1021,7 +1023,7 @@ fn playable_export_dedupes_identical_payloads_across_bundle_states() {
 #[test]
 fn native_object_export_skips_byte_identical_semantic_duplicates() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {
@@ -1086,7 +1088,7 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
 #[test]
 fn native_object_export_keeps_distinct_semantic_duplicates() {
     let dir = tempdir().unwrap();
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
     let read_kinds = BTreeMap::new();
     let options = NativeObjectExportOptions {

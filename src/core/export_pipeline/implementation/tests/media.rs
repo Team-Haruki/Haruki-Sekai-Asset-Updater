@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use crate::core::config::{MediaBackend, RetryConfig};
+use sekai_asset_pipeline::{
+    MediaBackend, RetryOptions as RetryConfig, VideoFormat as VideoOutputFormat,
+};
 
 use super::super::media_postprocess::acb::{share_acb_waveforms, should_keep_music_long_hca_track};
 use super::super::media_postprocess::encode_slots::{acquire_media_encode_permit, MediaEncodeKind};
@@ -20,7 +22,7 @@ fn usm_post_process_skips_non_crid_inputs() {
     let usm = dir.path().join("not_really_usm.usm");
     fs::write(&usm, b"not-crid").unwrap();
 
-    let (_, region) = processing_config();
+    let region = processing_pipeline_options().region;
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let output = runtime
         .block_on(process_usm_input_with_metrics(
@@ -152,8 +154,8 @@ fn direct_usm_to_mp4_uses_input_stem_for_output_name() {
                     fs::set_permissions(&script_path, perms).unwrap();
                 }
 
-                let (_config, mut region) = processing_config();
-                region.export.video.formats = vec![crate::core::config::VideoOutputFormat::Mp4];
+                let mut region = processing_pipeline_options().region;
+                region.export.video.formats = vec![VideoOutputFormat::Mp4];
                 region.export.video.direct_mp4 = true;
 
                 let runtime = tokio::runtime::Runtime::new().unwrap();

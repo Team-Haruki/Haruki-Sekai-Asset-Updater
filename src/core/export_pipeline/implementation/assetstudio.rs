@@ -22,8 +22,8 @@ use unity_rs_core::texture_array::{
     TEXTURE_2D_ARRAY_CLASS_ID,
 };
 
-use crate::core::config::{AppConfig, RegionConfig};
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::{PipelineOptions as AppConfig, PipelineRegionOptions as RegionConfig};
 
 use super::merge_phase_ms;
 use super::payload::playable::{is_playable_mono_typetree, write_assetstudio_playable_payloads};

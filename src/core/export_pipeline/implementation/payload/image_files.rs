@@ -7,8 +7,10 @@ use std::time::Instant;
 
 use image::ImageReader;
 
-use crate::core::config::{ImageBackendConfig, RegionConfig};
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::{
+    ImageEncodingOptions as ImageBackendConfig, PipelineRegionOptions as RegionConfig,
+};
 
 use super::super::images::{
     decode_image_payload_bytes, encode_dynamic_image, encode_native_rgba_ir,

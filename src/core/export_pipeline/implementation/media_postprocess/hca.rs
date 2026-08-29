@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::core::codec;
-use crate::core::config::AudioOutputFormat;
 use crate::core::errors::ExportPipelineError;
 use crate::core::media::{
     convert_hca_bytes_to_flac_with_backend, convert_hca_bytes_to_mp3_with_backend,
     convert_wav_bytes_to_flac_with_backend, convert_wav_bytes_to_mp3_with_backend,
 };
+use sekai_asset_pipeline::AudioFormat as AudioOutputFormat;
 
 use super::super::limits::acquire_cpu_budget_permit_blocking;
 use super::super::tasks::panic_message;

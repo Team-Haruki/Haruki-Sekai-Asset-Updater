@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use tempfile::tempdir;
 
-use crate::core::config::{MediaBackend, RetryConfig};
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::{MediaBackend, RetryOptions as RetryConfig};
 
 use super::super::assetstudio::{
     assetstudio_object_mode_supported_type, native_read_batch_size_for_assets,
@@ -157,7 +157,7 @@ fn segmented_usm_post_process_uses_memory_without_merged_file() {
             ));
             assert!(!dir.path().join("sample.usm").exists());
 
-            let (_, region) = processing_config();
+            let region = processing_pipeline_options().region;
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let output = runtime
                 .block_on(process_usm_input_with_metrics(

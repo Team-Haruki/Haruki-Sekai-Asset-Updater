@@ -2,7 +2,9 @@
 
 use tempfile::tempdir;
 
-use crate::core::config::{ImageBackendConfig, ImageOutputFormat};
+use sekai_asset_pipeline::{
+    ImageEncodingOptions as ImageBackendConfig, ImageFormat as ImageOutputFormat,
+};
 
 use super::super::images::{convert_native_surrogate_images_to_png, handle_png_conversion};
 use super::super::types::{
@@ -18,7 +20,7 @@ fn png_to_webp_uses_pure_rust_encoder() {
     let image = image::RgbaImage::from_pixel(2, 3, image::Rgba([255, 0, 0, 255]));
     image.save(&png).unwrap();
 
-    let (_config, mut region) = processing_config();
+    let mut region = processing_pipeline_options().region;
     region.export.images.formats = vec![ImageOutputFormat::Webp];
 
     let runtime = tokio::runtime::Runtime::new().unwrap();

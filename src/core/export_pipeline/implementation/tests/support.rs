@@ -81,6 +81,11 @@ pub(super) fn processing_config() -> (AppConfig, RegionConfig) {
     (config, region)
 }
 
+pub(super) fn processing_pipeline_options() -> sekai_asset_pipeline::PipelineOptions {
+    let (app_config, region) = processing_config();
+    super::super::options::pipeline_options(&app_config, &region)
+}
+
 pub(super) fn make_native_rgba_ir_payload(width: u32, height: u32, pixels: &[u8]) -> Vec<u8> {
     let stride = width * 4;
     let mut payload = Vec::new();

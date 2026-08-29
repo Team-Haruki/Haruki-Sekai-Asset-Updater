@@ -4,9 +4,9 @@ use std::path::Path;
 use tokio::process::Command;
 
 use crate::core::cleanup::remove_file_if_exists;
-use crate::core::config::{MediaBackend, RetryConfig};
 use crate::core::errors::ExportPipelineError;
 use crate::core::retry::{retry_async, retry_sync};
+use sekai_asset_pipeline::{MediaBackend, RetryOptions as RetryConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameRate {

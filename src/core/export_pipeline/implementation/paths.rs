@@ -5,7 +5,7 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 use crate::core::errors::ExportPipelineError;
 
-use crate::core::config::ImageOutputFormat;
+use sekai_asset_pipeline::ImageFormat as ImageOutputFormat;
 
 use super::selectors::normalize_assetstudio_type_name;
 use super::types::{

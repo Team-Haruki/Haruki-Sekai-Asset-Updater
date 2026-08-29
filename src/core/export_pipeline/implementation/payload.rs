@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use tracing::debug;
 
-use crate::core::config::RegionConfig;
 use crate::core::errors::ExportPipelineError;
+use sekai_asset_pipeline::PipelineRegionOptions as RegionConfig;
 
 use self::bundle::write_payload_bundle;
 use self::dedup::remove_byte_identical_semantic_duplicates;
