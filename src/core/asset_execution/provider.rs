@@ -272,3 +272,352 @@ impl AssetExecutionContext {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::header::{COOKIE, SET_COOKIE};
+    use axum::http::HeaderMap;
+    use axum::routing::{get, post};
+    use axum::Router;
+    use tempfile::tempdir;
+
+    use crate::core::config::{
+        AppConfig, ChartHashConfig, GitSyncConfig, RawBundleExportConfig, RegionConfig,
+        RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
+    };
+
+    use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
+
+    use super::super::model::{
+        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
+    };
+
+    use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
+
+    #[tokio::test]
+    async fn required_cookies_are_forwarded_and_nuverse_uses_resolved_version() {
+        let temp = tempdir().unwrap();
+        let record_file = temp.path().join("downloaded_assets.json");
+        let save_dir = temp.path().join("exports");
+
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([(
+                "ond/a".to_string(),
+                AssetBundleDetail {
+                    bundle_name: "ond/a".to_string(),
+                    cache_file_name: "a".to_string(),
+                    cache_directory_name: "d".to_string(),
+                    hash: "hash-a".to_string(),
+                    category: AssetCategory::OnDemand,
+                    crc: 888,
+                    file_size: 1,
+                    dependencies: Vec::new(),
+                    paths: Vec::new(),
+                    is_builtin: false,
+                    is_relocate: None,
+                    md5_hash: None,
+                    download_path: Some("download-root".to_string()),
+                },
+            )]),
+        };
+        let encrypted = encrypt_asset_info(&info);
+        let cookie_seen = Arc::new(AtomicBool::new(false));
+        let version_hits = Arc::new(AtomicUsize::new(0));
+
+        let app = Router::new()
+            .route(
+                "/version/5.2.0",
+                get({
+                    let version_hits = version_hits.clone();
+                    move || {
+                        let version_hits = version_hits.clone();
+                        async move {
+                            version_hits.fetch_add(1, Ordering::SeqCst);
+                            "20250321"
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/info/5.2.0/20250321",
+                get({
+                    let encrypted = encrypted.clone();
+                    move || async move {
+                        (
+                            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                            encrypted.clone(),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/bundle/download-root/ond/a",
+                get({
+                    let cookie_seen = cookie_seen.clone();
+                    move |headers: HeaderMap| {
+                        let cookie_seen = cookie_seen.clone();
+                        async move {
+                            if headers
+                                .get(COOKIE)
+                                .and_then(|value| value.to_str().ok())
+                                .is_some_and(|value| value.contains("session=abc"))
+                            {
+                                cookie_seen.store(true, Ordering::SeqCst);
+                            }
+                            (
+                                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                                Body::from(vec![0x20, 0x00, 0x00, 0x00, b'B', b'U', b'N']),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/signature",
+                post(|| async move { ([(SET_COOKIE.as_str(), "session=abc; Path=/")], "ok") }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let region = RegionConfig {
+            enabled: true,
+            provider: RegionProviderConfig::Nuverse {
+                asset_version_url: format!("http://{addr}/version/{{app_version}}"),
+                app_version: "5.2.0".to_string(),
+                asset_info_url_template: format!(
+                    "http://{addr}/info/{{app_version}}/{{asset_version}}"
+                ),
+                asset_bundle_url_template: format!("http://{addr}/bundle/{{bundle_path}}"),
+                required_cookies: true,
+                cookie_bootstrap_url: Some(format!("http://{addr}/signature")),
+            },
+            crypto: crate::core::config::CryptoConfig {
+                aes_key_hex: Some(TEST_AES_KEY_HEX.to_string()),
+                aes_iv_hex: Some(TEST_AES_IV_HEX.to_string()),
+            },
+            runtime: RegionRuntimeConfig {
+                unity_version: "2022.3.21f1".to_string(),
+            },
+            paths: RegionPathsConfig {
+                asset_save_dir: Some(save_dir.to_string_lossy().into_owned()),
+                downloaded_asset_record_file: Some(record_file.to_string_lossy().into_owned()),
+            },
+            filters: crate::core::config::RegionFiltersConfig {
+                start_app: Vec::new(),
+                on_demand: vec!["^ond/".to_string()],
+                skip: Vec::new(),
+                priority: vec!["^ond/".to_string()],
+            },
+            export: crate::core::config::RegionExportConfig {
+                raw_bundles: Some(RawBundleExportConfig {
+                    output_dir: None,
+                    include: vec!["^ond/".to_string()],
+                    exclude: Vec::new(),
+                }),
+                haruki_3d: crate::core::config::Haruki3dExportConfig {
+                    enabled: true,
+                    ..crate::core::config::Haruki3dExportConfig::default()
+                },
+                ..crate::core::config::RegionExportConfig::default()
+            },
+            ..RegionConfig::default()
+        };
+
+        let mut regions = BTreeMap::new();
+        regions.insert("cn".to_string(), region.clone());
+        let config = AppConfig {
+            regions,
+            backends: crate::core::config::BackendsConfig {
+                media: crate::core::config::MediaBackendConfig {
+                    ffmpeg_path: "ffmpeg".to_string(),
+                    ..crate::core::config::MediaBackendConfig::default()
+                },
+                ..crate::core::config::BackendsConfig::default()
+            },
+            git_sync: GitSyncConfig {
+                chart_hashes: ChartHashConfig::default(),
+            },
+            concurrency: crate::core::config::ConcurrencyConfig {
+                download: 2,
+                ..crate::core::config::ConcurrencyConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "cn".to_string(),
+            asset_version: None,
+            asset_hash: None,
+            dry_run: false,
+            mode: AssetUpdateMode::PrefetchRawBundles,
+        };
+
+        let executor = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        let summary = executor
+            .prefetch_asset_bundles(&config, None, None)
+            .await
+            .unwrap();
+        assert_eq!(summary.completed_downloads, 1);
+        assert_eq!(version_hits.load(Ordering::SeqCst), 1);
+        assert!(cookie_seen.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn http_fetch_retries_on_503_then_succeeds() {
+        let temp = tempdir().unwrap();
+        let record_file = temp.path().join("downloaded_assets.json");
+        let save_dir = temp.path().join("exports");
+
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([(
+                "start/a".to_string(),
+                AssetBundleDetail {
+                    bundle_name: "start/a".to_string(),
+                    cache_file_name: "a".to_string(),
+                    cache_directory_name: "d".to_string(),
+                    hash: "hash-a".to_string(),
+                    category: AssetCategory::StartApp,
+                    crc: 123,
+                    file_size: 1,
+                    dependencies: Vec::new(),
+                    paths: Vec::new(),
+                    is_builtin: false,
+                    is_relocate: None,
+                    md5_hash: None,
+                    download_path: None,
+                },
+            )]),
+        };
+        let encrypted = encrypt_asset_info(&info);
+        let info_hits = Arc::new(AtomicUsize::new(0));
+
+        let app = Router::new()
+            .route(
+                "/info/production/abc/1/hash",
+                get({
+                    let encrypted = encrypted.clone();
+                    let info_hits = info_hits.clone();
+                    move || {
+                        let encrypted = encrypted.clone();
+                        let info_hits = info_hits.clone();
+                        async move {
+                            let attempt = info_hits.fetch_add(1, Ordering::SeqCst);
+                            if attempt < 2 {
+                                (
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                    Body::from("retry"),
+                                )
+                            } else {
+                                (axum::http::StatusCode::OK, Body::from(encrypted.clone()))
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/bundle/start/a",
+                get(|| async move {
+                    (
+                        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                        Body::from(vec![0x20, 0x00, 0x00, 0x00, b'B', b'U', b'N']),
+                    )
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut profile_hashes = BTreeMap::new();
+        profile_hashes.insert("production".to_string(), "abc".to_string());
+        let region = RegionConfig {
+            enabled: true,
+            provider: RegionProviderConfig::ColorfulPalette {
+                asset_info_url_template: format!(
+                    "http://{addr}/info/{{env}}/{{hash}}/{{asset_version}}/{{asset_hash}}"
+                ),
+                asset_bundle_url_template: format!("http://{addr}/bundle/{{bundle_path}}"),
+                profile: "production".to_string(),
+                profile_hashes,
+                required_cookies: false,
+                cookie_bootstrap_url: None,
+            },
+            crypto: crate::core::config::CryptoConfig {
+                aes_key_hex: Some(TEST_AES_KEY_HEX.to_string()),
+                aes_iv_hex: Some(TEST_AES_IV_HEX.to_string()),
+            },
+            runtime: RegionRuntimeConfig {
+                unity_version: "2022.3.21f1".to_string(),
+            },
+            paths: RegionPathsConfig {
+                asset_save_dir: Some(save_dir.to_string_lossy().into_owned()),
+                downloaded_asset_record_file: Some(record_file.to_string_lossy().into_owned()),
+            },
+            filters: crate::core::config::RegionFiltersConfig {
+                start_app: vec!["^start/".to_string()],
+                on_demand: Vec::new(),
+                skip: Vec::new(),
+                priority: vec!["^start/".to_string()],
+            },
+            export: crate::core::config::RegionExportConfig {
+                raw_bundles: Some(RawBundleExportConfig {
+                    output_dir: None,
+                    include: vec!["^start/".to_string()],
+                    exclude: Vec::new(),
+                }),
+                haruki_3d: crate::core::config::Haruki3dExportConfig {
+                    enabled: true,
+                    ..crate::core::config::Haruki3dExportConfig::default()
+                },
+                ..crate::core::config::RegionExportConfig::default()
+            },
+            ..RegionConfig::default()
+        };
+
+        let mut regions = BTreeMap::new();
+        regions.insert("jp".to_string(), region.clone());
+        let config = AppConfig {
+            regions,
+            execution: crate::core::config::ExecutionConfig {
+                retry: crate::core::config::RetryConfig {
+                    attempts: 3,
+                    initial_backoff_ms: 1,
+                    max_backoff_ms: 1,
+                },
+                ..crate::core::config::ExecutionConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::PrefetchRawBundles,
+        };
+
+        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let summary = executor
+            .prefetch_asset_bundles(&config, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.completed_downloads, 1);
+        assert_eq!(info_hits.load(Ordering::SeqCst), 3);
+    }
+}

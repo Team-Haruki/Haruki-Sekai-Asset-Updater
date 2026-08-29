@@ -203,3 +203,232 @@ impl AssetExecutionContext {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+
+    use axum::routing::get;
+    use axum::Router;
+    use tempfile::tempdir;
+
+    use crate::core::config::{AppConfig, RegionProviderConfig};
+    use crate::core::download_records::DownloadRecord;
+    use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
+
+    use super::super::cache::{bundle_cache_metadata_path, bundle_hash_index_key};
+
+    use super::super::model::{
+        AssetCategory, AssetExecutionContext, BundleCacheEntryStatus, DownloadTask,
+    };
+
+    use super::super::test_support::test_region;
+
+    #[tokio::test]
+    async fn bundle_cache_status_validates_sidecar_before_loading_body() {
+        let temp = tempdir().unwrap();
+        let cache_file = temp.path().join("bundle-cache/cn/start/a");
+        tokio::fs::create_dir_all(cache_file.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&cache_file, b"UnityFS cache body")
+            .await
+            .unwrap();
+        let task = DownloadTask {
+            download_path: "start/a".to_string(),
+            bundle_path: "start/a".to_string(),
+            bundle_hash: "expected-hash".to_string(),
+            category: AssetCategory::StartApp,
+            file_size: 22,
+            priority: 0,
+            export_payloads: true,
+            stage_haruki_3d: false,
+        };
+
+        tokio::fs::write(bundle_cache_metadata_path(&cache_file), "stale-hash")
+            .await
+            .unwrap();
+        assert_eq!(
+            AssetExecutionContext::bundle_cache_entry_status(&cache_file, &task).await,
+            BundleCacheEntryStatus::Stale
+        );
+
+        tokio::fs::write(bundle_cache_metadata_path(&cache_file), &task.bundle_hash)
+            .await
+            .unwrap();
+        assert_eq!(
+            AssetExecutionContext::bundle_cache_entry_status(&cache_file, &task).await,
+            BundleCacheEntryStatus::Current
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_cache_downloads_once_then_avoids_network() {
+        let temp = tempdir().unwrap();
+        let cache_root = temp.path().join("bundle-cache");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let network_body = [
+            &[0x20, 0x00, 0x00, 0x00],
+            b"UnityFS cached test bundle".as_slice(),
+        ]
+        .concat();
+        let app = Router::new().route(
+            "/bundle/ond/a",
+            get({
+                let request_count = request_count.clone();
+                let network_body = network_body.clone();
+                move || {
+                    let request_count = request_count.clone();
+                    let network_body = network_body.clone();
+                    async move {
+                        request_count.fetch_add(1, Ordering::SeqCst);
+                        Body::from(network_body)
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: String::new(),
+            asset_bundle_url_template: format!("http://{addr}/bundle/{{bundle_path}}"),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::from([("production".to_string(), "abc".to_string())]),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let mut config = AppConfig::default();
+        config.execution.asset_bundle_cache_dir = Some(cache_root.to_string_lossy().into_owned());
+        let request = AssetUpdateRequest {
+            region: "cn".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let context = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        let task = DownloadTask {
+            download_path: "ond/a".to_string(),
+            bundle_path: "ond/a".to_string(),
+            bundle_hash: "hash-a".to_string(),
+            category: AssetCategory::OnDemand,
+            file_size: network_body.len() as i64,
+            priority: 0,
+            export_payloads: true,
+            stage_haruki_3d: false,
+        };
+        let url = format!("http://{addr}/bundle/ond/a");
+
+        let first = context
+            .fetch_deobfuscated_bundle(&config, &url, &task)
+            .await
+            .unwrap();
+        let second = context
+            .fetch_deobfuscated_bundle(&config, &url, &task)
+            .await
+            .unwrap();
+
+        assert_eq!(first.source.as_str(), "cache_miss");
+        assert_eq!(second.source.as_str(), "cache_hit");
+        assert_eq!(first.body, b"UnityFS cached test bundle");
+        assert_eq!(second.body, first.body);
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        let cache_file = cache_root.join("cn/ond/a");
+        assert_eq!(tokio::fs::read(&cache_file).await.unwrap(), first.body);
+        assert_eq!(
+            tokio::fs::read_to_string(bundle_cache_metadata_path(&cache_file))
+                .await
+                .unwrap(),
+            "hash-a"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_deobfuscated_bundle_cache_is_reused_without_network() {
+        let temp = tempdir().unwrap();
+        let cache_root = temp.path().join("bundle-cache");
+        let cache_file = cache_root.join("cn/start/a");
+        let cached_body = b"UnityFS legacy cached bundle";
+        tokio::fs::create_dir_all(cache_file.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&cache_file, cached_body).await.unwrap();
+
+        let region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: String::new(),
+            asset_bundle_url_template: "http://127.0.0.1:1/{bundle_path}".to_string(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::from([("production".to_string(), "abc".to_string())]),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let mut config = AppConfig::default();
+        config.execution.asset_bundle_cache_dir = Some(cache_root.to_string_lossy().into_owned());
+        let request = AssetUpdateRequest {
+            region: "cn".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let context = AssetExecutionContext::new(&config, "cn", &region, &request).unwrap();
+        let task = DownloadTask {
+            download_path: "start/a".to_string(),
+            bundle_path: "start/a".to_string(),
+            bundle_hash: "hash-a".to_string(),
+            category: AssetCategory::StartApp,
+            file_size: (cached_body.len() + 4) as i64,
+            priority: 0,
+            export_payloads: true,
+            stage_haruki_3d: false,
+        };
+
+        let fetch = context
+            .fetch_deobfuscated_bundle(&config, "http://127.0.0.1:1/never", &task)
+            .await
+            .unwrap();
+
+        assert_eq!(fetch.source.as_str(), "cache_hit");
+        assert_eq!(fetch.body, cached_body);
+    }
+
+    #[test]
+    fn bundle_hash_index_uses_exporter_relative_bundle_path() {
+        assert_eq!(
+            bundle_hash_index_key("live_pv/model/characterv2/body/01/0001").unwrap(),
+            "live_pv/model/characterv2/body/01/0001.bundle"
+        );
+        assert_eq!(
+            bundle_hash_index_key("character/motion/01.bundle").unwrap(),
+            "character/motion/01.bundle"
+        );
+    }
+
+    #[tokio::test]
+    async fn bundle_hash_index_checkpoint_is_durable() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("bundle-hashes.json");
+        let index = Arc::new(std::sync::Mutex::new(DownloadRecord::from([(
+            "live_pv/model/body.bundle".to_string(),
+            "ab".repeat(32),
+        )])));
+
+        AssetExecutionContext::save_bundle_hash_index_checkpoint(Some(&path), Some(&index))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            crate::core::download_records::load_download_record(&path).unwrap(),
+            index.lock().unwrap().clone()
+        );
+    }
+}

@@ -723,3 +723,390 @@ impl AssetExecutionContext {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::Path;
+
+    use tempfile::tempdir;
+
+    use crate::core::config::{AppConfig, RegionProviderConfig};
+    use crate::core::download_records::DownloadRecord;
+    use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
+
+    use super::super::haruki_3d::{
+        bundle_dependency_closure, exporter_metric_lines, missing_haruki_3d_bundle_paths,
+    };
+    use super::super::model::{
+        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
+    };
+
+    use super::super::test_support::test_region;
+
+    #[test]
+    fn haruki_3d_work_root_is_disabled_by_default() {
+        let region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: "https://example.com/info".to_string(),
+            asset_bundle_url_template: "https://example.com/{bundle_path}".to_string(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::new(),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let mut regions = BTreeMap::new();
+        regions.insert("jp".to_string(), region.clone());
+        let config = AppConfig {
+            regions,
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+
+        assert!(executor.haruki_3d_work_asset_root().is_none());
+    }
+
+    #[test]
+    fn haruki_3d_export_tasks_include_unrecorded_candidates() {
+        let temp = tempdir().unwrap();
+        let mut region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: "https://example.com/info".to_string(),
+            asset_bundle_url_template: "https://example.com/{bundle_path}".to_string(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::new(),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        region.export.haruki_3d = crate::core::config::Haruki3dExportConfig {
+            enabled: true,
+            exporter_path: "/bin/true".to_string(),
+            master_dir: "/data/master".to_string(),
+            work_dir: temp.path().join("3d-work").to_string_lossy().into_owned(),
+            manifest_file: temp
+                .path()
+                .join("manifest.json")
+                .to_string_lossy()
+                .into_owned(),
+            output_dir: temp.path().join("out").to_string_lossy().into_owned(),
+            include: vec!["^live_pv/model/characterv2/".to_string()],
+            exclude: Vec::new(),
+            ..crate::core::config::Haruki3dExportConfig::default()
+        };
+        let mut regions = BTreeMap::new();
+        regions.insert("jp".to_string(), region.clone());
+        let config = AppConfig {
+            regions,
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("6.0.9".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let executor = AssetExecutionContext::new(&config, "jp", &region, &request).unwrap();
+        let matched = "live_pv/model/characterv2/body/01_0001.bundle".to_string();
+        let missing_from_record = "live_pv/model/characterv2/body/02_0001.bundle".to_string();
+        let dependency = "common/materials/character.bundle".to_string();
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([
+                (
+                    matched.clone(),
+                    AssetBundleDetail {
+                        bundle_name: matched.clone(),
+                        cache_file_name: String::new(),
+                        cache_directory_name: String::new(),
+                        hash: "new-hash".to_string(),
+                        category: AssetCategory::OnDemand,
+                        crc: 0,
+                        file_size: 1,
+                        dependencies: vec![dependency.clone()],
+                        paths: Vec::new(),
+                        is_builtin: false,
+                        is_relocate: None,
+                        md5_hash: None,
+                        download_path: None,
+                    },
+                ),
+                (
+                    missing_from_record.clone(),
+                    AssetBundleDetail {
+                        bundle_name: missing_from_record.clone(),
+                        cache_file_name: String::new(),
+                        cache_directory_name: String::new(),
+                        hash: "missing-from-record".to_string(),
+                        category: AssetCategory::OnDemand,
+                        crc: 0,
+                        file_size: 1,
+                        dependencies: Vec::new(),
+                        paths: Vec::new(),
+                        is_builtin: false,
+                        is_relocate: None,
+                        md5_hash: None,
+                        download_path: None,
+                    },
+                ),
+                (
+                    dependency.clone(),
+                    AssetBundleDetail {
+                        bundle_name: dependency.clone(),
+                        cache_file_name: String::new(),
+                        cache_directory_name: String::new(),
+                        hash: "dependency-hash".to_string(),
+                        category: AssetCategory::OnDemand,
+                        crc: 0,
+                        file_size: 1,
+                        dependencies: Vec::new(),
+                        paths: Vec::new(),
+                        is_builtin: false,
+                        is_relocate: None,
+                        md5_hash: None,
+                        download_path: None,
+                    },
+                ),
+            ]),
+        };
+        let tasks = executor.build_haruki_3d_tasks(&info);
+
+        assert_eq!(tasks.len(), 3);
+        assert!(tasks.iter().any(|task| task.bundle_path == matched));
+        assert!(tasks
+            .iter()
+            .any(|task| task.bundle_path == missing_from_record));
+        assert!(tasks.iter().any(|task| task.bundle_path == dependency));
+        assert_eq!(
+            executor.haruki_3d_work_asset_root().unwrap(),
+            temp.path()
+                .join("3d-work")
+                .join("jp")
+                .join("6.0.9")
+                .join("AssetBundles")
+        );
+        assert_eq!(
+            executor.haruki_3d_download_record_path().unwrap(),
+            temp.path()
+                .join("3d-work")
+                .join("jp")
+                .join("downloaded_assets.json")
+        );
+        assert_eq!(
+            executor.haruki_3d_bundle_hash_index_path().unwrap(),
+            temp.path()
+                .join("3d-work")
+                .join("jp")
+                .join("bundle_sha256.json")
+        );
+    }
+
+    #[test]
+    fn haruki_3d_background_export_publishes_registry_after_runtime_packages() {
+        let config = crate::core::config::Haruki3dExportConfig {
+            master_dir: "/master".to_string(),
+            output_dir: "/runtime".to_string(),
+            manifest_file: "/runtime/manifest.json".to_string(),
+            shared_content_store: "/runtime-cas".to_string(),
+            compiled_content_store: "/runtime-compiled".to_string(),
+            process_concurrency: 16,
+            role_character3d_ids: vec![5, 7],
+            ..crate::core::config::Haruki3dExportConfig::default()
+        };
+        let commands = AssetExecutionContext::build_haruki_3d_exporter_commands(
+            &config,
+            Path::new("/work/AssetBundles"),
+            Path::new("/work/bundle_sha256.json"),
+            Path::new("/work/bundle_dependencies.json"),
+        );
+        assert_eq!(
+            AssetExecutionContext::build_haruki_3d_runtime_catalog_command(&config),
+            vec![
+                "--emit-runtime-role-catalog",
+                "--master",
+                "/master",
+                "--out",
+                "/runtime",
+            ]
+        );
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0][0], "--emit-part-packages");
+        assert_eq!(commands[1][0], "--emit-role-runtimes");
+        assert_eq!(commands[2][0], "--emit-costume-registries");
+        for command in &commands {
+            assert!(
+                !command.iter().any(|arg| arg == "--runtime-json-output"),
+                "Haruki 3D exporter command should use the exporter's fixed msgpack-br runtime format: {command:?}"
+            );
+            assert!(
+                command
+                    .windows(2)
+                    .any(|pair| pair == ["--convert-model-textures", "false"]),
+                "Haruki 3D exporter command should disable redundant model texture conversion: {command:?}"
+            );
+        }
+        assert!(
+            commands[0]
+                .windows(2)
+                .any(|pair| pair == ["--part-package-process-concurrency", "16"]),
+            "part package command should pass haruki_3d.process_concurrency"
+        );
+        assert!(commands[0]
+            .windows(2)
+            .any(|pair| pair == ["--shared-content-store", "/runtime-cas"]));
+        assert!(commands[0]
+            .windows(2)
+            .any(|pair| pair == ["--compiled-content-store", "/runtime-compiled"]));
+        assert!(commands[0]
+            .windows(2)
+            .any(|pair| pair == ["--bundle-hash-index", "/work/bundle_sha256.json"]));
+        assert!(commands[0].windows(2).any(|pair| pair
+            == [
+                "--bundle-dependency-index",
+                "/work/bundle_dependencies.json"
+            ]));
+        assert!(
+            commands[1]
+                .windows(2)
+                .any(|pair| pair == ["--part-package-process-concurrency", "16"]),
+            "role runtime command should pass haruki_3d.process_concurrency"
+        );
+        assert_eq!(
+            commands[1]
+                .iter()
+                .filter(|value| value.as_str() == "--role-character3d-id")
+                .count(),
+            2
+        );
+        assert!(commands[1].contains(&"5".to_string()));
+        assert!(commands[1].contains(&"7".to_string()));
+    }
+
+    #[test]
+    fn haruki_3d_background_export_runs_role_runtimes_without_role_id_filter() {
+        let config = crate::core::config::Haruki3dExportConfig {
+            master_dir: "/master".to_string(),
+            output_dir: "/runtime".to_string(),
+            manifest_file: "/runtime/manifest.json".to_string(),
+            process_concurrency: 48,
+            role_character3d_ids: Vec::new(),
+            ..crate::core::config::Haruki3dExportConfig::default()
+        };
+        let commands = AssetExecutionContext::build_haruki_3d_exporter_commands(
+            &config,
+            Path::new("/work/AssetBundles"),
+            Path::new("/work/bundle_sha256.json"),
+            Path::new("/work/bundle_dependencies.json"),
+        );
+
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[1][0], "--emit-role-runtimes");
+        assert!(
+            commands[1]
+                .windows(2)
+                .any(|pair| pair == ["--part-package-process-concurrency", "48"]),
+            "role runtime command should still pass haruki_3d.process_concurrency"
+        );
+        assert_eq!(
+            commands[1]
+                .iter()
+                .filter(|value| value.as_str() == "--role-character3d-id")
+                .count(),
+            0,
+            "empty role_character3d_ids should let the exporter choose its default role set"
+        );
+    }
+
+    #[tokio::test]
+    async fn three_d_only_completion_does_not_pollute_standard_download_record() {
+        let mut record = DownloadRecord::new();
+        let mut completed = 0;
+        let mut completed_standard = 0;
+        let mut pending_save_count = 0;
+
+        AssetExecutionContext::record_completed_bundle(
+            &None,
+            "/unused/downloaded_assets.json",
+            &mut record,
+            &mut completed,
+            &mut completed_standard,
+            &mut pending_save_count,
+            0,
+            "jp",
+            None,
+            None,
+            "live_pv/model/characterv2/body/01".to_string(),
+            "3d-hash".to_string(),
+            false,
+        )
+        .await;
+
+        assert_eq!(completed, 1);
+        assert_eq!(completed_standard, 0);
+        assert!(record.is_empty());
+    }
+
+    #[test]
+    fn bundle_dependency_closure_is_recursive_and_cycle_safe() {
+        let detail = |name: &str, dependencies: &[&str]| AssetBundleDetail {
+            bundle_name: name.to_string(),
+            cache_file_name: String::new(),
+            cache_directory_name: String::new(),
+            hash: String::new(),
+            category: AssetCategory::OnDemand,
+            crc: 0,
+            file_size: 0,
+            dependencies: dependencies.iter().map(|value| value.to_string()).collect(),
+            paths: Vec::new(),
+            is_builtin: false,
+            is_relocate: None,
+            md5_hash: None,
+            download_path: None,
+        };
+        let info = AssetBundleInfo {
+            version: None,
+            os: None,
+            bundles: HashMap::from([
+                ("body".to_string(), detail("body", &["material", "shared"])),
+                ("material".to_string(), detail("material", &["texture"])),
+                ("texture".to_string(), detail("texture", &["body"])),
+                ("shared".to_string(), detail("shared", &[])),
+            ]),
+        };
+
+        assert_eq!(
+            bundle_dependency_closure(&info, "body"),
+            vec![
+                "material".to_string(),
+                "shared".to_string(),
+                "texture".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn exporter_metrics_keep_summary_lines_only() {
+        let stdout = b"Started worker\nPart export metrics: built=3, restored=7\nnoise\nPart export parent metrics: totalMs=42\n";
+        assert_eq!(
+            exporter_metric_lines(stdout),
+            "Part export metrics: built=3, restored=7 | Part export parent metrics: totalMs=42"
+        );
+    }
+
+    #[test]
+    fn sparse_recovery_parses_only_safe_missing_bundle_markers() {
+        let stderr = "failure\nHARUKI_3D_MISSING_BUNDLE=live_pv/model/body/0001\n\
+HARUKI_3D_MISSING_BUNDLE=../escape\nHARUKI_3D_MISSING_BUNDLE=live_pv/model/body/0001\n";
+        assert_eq!(
+            missing_haruki_3d_bundle_paths(stderr),
+            vec!["live_pv/model/body/0001".to_string()]
+        );
+    }
+}

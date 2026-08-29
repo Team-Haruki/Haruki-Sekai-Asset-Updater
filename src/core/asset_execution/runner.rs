@@ -867,3 +867,42 @@ impl AssetExecutionContext {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use tempfile::tempdir;
+
+    use crate::core::download_records::DownloadRecord;
+
+    use super::super::model::AssetExecutionContext;
+
+    use super::super::runner::post_process_backlog_capacity;
+
+    #[tokio::test]
+    async fn blocking_record_save_returns_the_original_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("downloaded_assets.json");
+        let mut record = DownloadRecord::from([("bundle".to_string(), "hash".to_string())]);
+
+        AssetExecutionContext::save_download_record_on_blocking_thread(
+            path.to_string_lossy().into_owned(),
+            &mut record,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(record.get("bundle").map(String::as_str), Some("hash"));
+        assert_eq!(
+            crate::core::download_records::load_download_record(&path).unwrap(),
+            record
+        );
+    }
+
+    #[test]
+    fn post_process_backlog_capacity_tracks_post_process_pressure() {
+        assert_eq!(post_process_backlog_capacity(0, 0), 1);
+        assert_eq!(post_process_backlog_capacity(8, 2), 4);
+        assert_eq!(post_process_backlog_capacity(4, 12), 24);
+    }
+}
