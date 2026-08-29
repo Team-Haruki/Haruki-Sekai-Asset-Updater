@@ -18,7 +18,6 @@ use super::model::{
 use super::planning::{raw_bundle_output_path, validate_relative_bundle_path};
 use super::progress::ExecutionProgressUpdate;
 use super::runner::BundleMemoryLimiter;
-use crate::core::cleanup::remove_file_if_exists;
 use crate::core::config::AppConfig;
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
@@ -26,6 +25,7 @@ use crate::core::export_pipeline::{
     export_unity_asset_bundle_payloads_with_registry, NativeSemanticExportPathRegistry,
 };
 use crate::core::models::{ExecutionSummary, JobPhase};
+use sekai_asset_pipeline::remove_file_if_exists;
 
 impl AssetExecutionContext {
     pub async fn prefetch_asset_bundles(

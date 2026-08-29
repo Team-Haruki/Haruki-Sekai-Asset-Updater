@@ -9,7 +9,7 @@ use crate::core::config::{AppConfig, RegionProviderConfig};
 use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::models::AssetUpdateRequest;
 use crate::core::pipeline::prepare_asset_run;
-use crate::core::retry::retry_async;
+use sekai_asset_pipeline::retry_async;
 use sekai_asset_pipeline::{ProviderEndpoint, ResolvedRelease};
 
 pub(super) fn time_arg_jst() -> String {

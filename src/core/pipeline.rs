@@ -1,9 +1,9 @@
-use crate::core::codec::CODEC_BACKEND;
 use crate::core::config::{AppConfig, RegionConfig};
 use crate::core::errors::PlanningError;
 use crate::core::models::{AssetUpdateRequest, ExecutionPlan};
 use crate::core::regions::{build_url_preview, select_region};
 use crate::core::storage::plan_storage_targets;
+use sekai_asset_pipeline::CODEC_BACKEND;
 
 /// Describes what a request would do, for the dry-run response and the job
 /// snapshot.

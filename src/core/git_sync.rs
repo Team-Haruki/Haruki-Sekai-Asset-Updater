@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::core::config::{ChartHashConfig, GitSigningFormat, RetryConfig};
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::GitSyncError;
-use crate::core::retry::retry_sync;
+use sekai_asset_pipeline::retry_sync;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChartHashSyncResult {
