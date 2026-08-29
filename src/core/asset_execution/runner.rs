@@ -309,7 +309,7 @@ impl AssetExecutionContext {
                 {
                     return (
                         task.bundle_path.clone(),
-                        task.bundle_hash.clone(),
+                        task.revision.clone(),
                         task.export_payloads,
                         Err(AssetExecutionError::Cancelled),
                     );
@@ -325,7 +325,7 @@ impl AssetExecutionContext {
                     },
                 );
                 let bundle_path = task.bundle_path.clone();
-                let bundle_hash = task.bundle_hash.clone();
+                let bundle_hash = task.revision.clone();
                 let record_standard = task.export_payloads;
                 let result = match ctx
                     .download_and_export_bundle_payloads(

@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::super::model::{AssetBundleInfo, AssetExecutionContext, DownloadTask};
+use super::super::model::{AssetBundleInfo, AssetExecutionContext, DownloadTask, ResolvedBundle};
 use super::super::planning::download_path_for_region;
 use crate::core::config::RegionProviderConfig;
 use crate::core::download_records::DownloadRecord;
@@ -93,7 +93,7 @@ impl AssetExecutionContext {
             let has_current_record = can_reuse_download_record
                 && downloaded_assets
                     .get(&task.bundle_path)
-                    .is_some_and(|existing| existing == &task.bundle_hash);
+                    .is_some_and(|existing| existing == &task.revision);
             if !has_current_record {
                 tasks.push(DownloadTask {
                     stage_haruki_3d: true,
@@ -145,11 +145,17 @@ impl AssetExecutionContext {
                 RegionProviderConfig::ColorfulPalette { .. } => detail.hash.clone(),
             };
             tasks.push(DownloadTask {
-                download_path: download_path_for_region(&self.region.provider, bundle_name, detail),
-                bundle_path: bundle_name.clone(),
-                bundle_hash,
-                category: detail.category.clone(),
-                file_size: detail.file_size,
+                bundle: ResolvedBundle {
+                    download_path: download_path_for_region(
+                        &self.region.provider,
+                        bundle_name,
+                        detail,
+                    ),
+                    bundle_path: bundle_name.clone(),
+                    revision: bundle_hash,
+                    category: detail.category.clone(),
+                    file_size: detail.file_size,
+                },
                 priority: usize::MAX,
                 export_payloads: false,
                 stage_haruki_3d: true,

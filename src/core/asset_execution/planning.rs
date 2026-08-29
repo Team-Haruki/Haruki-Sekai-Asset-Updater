@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::model::{
     AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext, DownloadTask,
+    ResolvedBundle,
 };
 use crate::core::config::{RegionConfig, RegionProviderConfig};
 use crate::core::download_records::DownloadRecord;
@@ -115,11 +116,17 @@ impl AssetExecutionContext {
 
             let priority = first_match_index(&priority_patterns, bundle_name).unwrap_or(usize::MAX);
             tasks.push(DownloadTask {
-                download_path: download_path_for_region(&self.region.provider, bundle_name, detail),
-                bundle_path: bundle_name.clone(),
-                bundle_hash,
-                category: detail.category.clone(),
-                file_size: detail.file_size,
+                bundle: ResolvedBundle {
+                    download_path: download_path_for_region(
+                        &self.region.provider,
+                        bundle_name,
+                        detail,
+                    ),
+                    bundle_path: bundle_name.clone(),
+                    revision: bundle_hash,
+                    category: detail.category.clone(),
+                    file_size: detail.file_size,
+                },
                 priority,
                 export_payloads: true,
                 stage_haruki_3d: false,
@@ -174,11 +181,17 @@ impl AssetExecutionContext {
                 RegionProviderConfig::ColorfulPalette { .. } => detail.hash.clone(),
             };
             tasks.push(DownloadTask {
-                download_path: download_path_for_region(&self.region.provider, bundle_name, detail),
-                bundle_path: bundle_name.clone(),
-                bundle_hash,
-                category: detail.category.clone(),
-                file_size: detail.file_size,
+                bundle: ResolvedBundle {
+                    download_path: download_path_for_region(
+                        &self.region.provider,
+                        bundle_name,
+                        detail,
+                    ),
+                    bundle_path: bundle_name.clone(),
+                    revision: bundle_hash,
+                    category: detail.category.clone(),
+                    file_size: detail.file_size,
+                },
                 priority: usize::MAX,
                 export_payloads: false,
                 stage_haruki_3d: false,

@@ -49,7 +49,7 @@ impl AssetExecutionContext {
                 !can_reuse
                     || downloaded_assets
                         .get(&task.bundle_path)
-                        .is_none_or(|hash| hash != &task.bundle_hash)
+                        .is_none_or(|hash| hash != &task.revision)
             })
             .cloned()
             .collect()

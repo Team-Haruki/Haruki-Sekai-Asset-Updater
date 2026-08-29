@@ -101,7 +101,7 @@ impl AssetExecutionContext {
 
         let network_body = self.get_with_retry(bundle_url).await?;
         let body = deobfuscate_owned(network_body);
-        Self::write_bundle_cache_entry(&cache_file, &task.bundle_hash, &body).await?;
+        Self::write_bundle_cache_entry(&cache_file, &task.revision, &body).await?;
         Ok(BundleFetch {
             body,
             source: BundleFetchSource::CacheMiss,
@@ -115,7 +115,7 @@ impl AssetExecutionContext {
         let metadata_path = bundle_cache_metadata_path(cache_file);
         match tokio::fs::read_to_string(&metadata_path).await {
             Ok(cached_hash) => {
-                if cached_hash.trim() != task.bundle_hash {
+                if cached_hash.trim() != task.revision {
                     return if tokio::fs::metadata(cache_file).await.is_ok() {
                         BundleCacheEntryStatus::Stale
                     } else {
@@ -225,7 +225,7 @@ mod tests {
     use super::super::cache::{bundle_cache_metadata_path, bundle_hash_index_key};
 
     use super::super::model::{
-        AssetCategory, AssetExecutionContext, BundleCacheEntryStatus, DownloadTask,
+        AssetCategory, AssetExecutionContext, BundleCacheEntryStatus, DownloadTask, ResolvedBundle,
     };
 
     use super::super::test_support::test_region;
@@ -241,11 +241,13 @@ mod tests {
             .await
             .unwrap();
         let task = DownloadTask {
-            download_path: "start/a".to_string(),
-            bundle_path: "start/a".to_string(),
-            bundle_hash: "expected-hash".to_string(),
-            category: AssetCategory::StartApp,
-            file_size: 22,
+            bundle: ResolvedBundle {
+                download_path: "start/a".to_string(),
+                bundle_path: "start/a".to_string(),
+                revision: "expected-hash".to_string(),
+                category: AssetCategory::StartApp,
+                file_size: 22,
+            },
             priority: 0,
             export_payloads: true,
             stage_haruki_3d: false,
@@ -259,7 +261,7 @@ mod tests {
             BundleCacheEntryStatus::Stale
         );
 
-        tokio::fs::write(bundle_cache_metadata_path(&cache_file), &task.bundle_hash)
+        tokio::fs::write(bundle_cache_metadata_path(&cache_file), &task.revision)
             .await
             .unwrap();
         assert_eq!(
@@ -324,11 +326,13 @@ mod tests {
         )
         .unwrap();
         let task = DownloadTask {
-            download_path: "ond/a".to_string(),
-            bundle_path: "ond/a".to_string(),
-            bundle_hash: "hash-a".to_string(),
-            category: AssetCategory::OnDemand,
-            file_size: network_body.len() as i64,
+            bundle: ResolvedBundle {
+                download_path: "ond/a".to_string(),
+                bundle_path: "ond/a".to_string(),
+                revision: "hash-a".to_string(),
+                category: AssetCategory::OnDemand,
+                file_size: network_body.len() as i64,
+            },
             priority: 0,
             export_payloads: true,
             stage_haruki_3d: false,
@@ -395,11 +399,13 @@ mod tests {
         )
         .unwrap();
         let task = DownloadTask {
-            download_path: "start/a".to_string(),
-            bundle_path: "start/a".to_string(),
-            bundle_hash: "hash-a".to_string(),
-            category: AssetCategory::StartApp,
-            file_size: (cached_body.len() + 4) as i64,
+            bundle: ResolvedBundle {
+                download_path: "start/a".to_string(),
+                bundle_path: "start/a".to_string(),
+                revision: "hash-a".to_string(),
+                category: AssetCategory::StartApp,
+                file_size: (cached_body.len() + 4) as i64,
+            },
             priority: 0,
             export_payloads: true,
             stage_haruki_3d: false,

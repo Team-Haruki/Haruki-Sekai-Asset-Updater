@@ -375,7 +375,7 @@ impl AssetExecutionContext {
         let _ = remove_file_if_exists(temp_file);
         Ok(Some(NativeBundlePostProcessJob {
             bundle_path: task.bundle_path.clone(),
-            bundle_hash: task.bundle_hash.clone(),
+            bundle_hash: task.revision.clone(),
             export_started,
             payload_export: payload_export?,
             backlog_wait_ms: 0,

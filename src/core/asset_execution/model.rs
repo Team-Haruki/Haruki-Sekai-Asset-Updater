@@ -1,6 +1,7 @@
 //! The types the execution path moves around.
 
 use std::collections::HashSet;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,7 +14,7 @@ use crate::core::export_pipeline::UnityAssetBundlePayloadExport;
 use crate::core::models::AssetUpdateRequest;
 
 pub use sekai_asset_pipeline::{
-    asset_category_name, AssetBundleDetail, AssetBundleInfo, AssetCategory,
+    asset_category_name, AssetBundleDetail, AssetBundleInfo, AssetCategory, ResolvedBundle,
 };
 
 #[cfg(test)]
@@ -107,12 +108,16 @@ pub(super) struct BundleWritePlan {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DownloadTask {
-    pub(crate) download_path: String,
-    pub(crate) bundle_path: String,
-    pub(crate) bundle_hash: String,
-    pub(crate) category: AssetCategory,
-    pub(crate) file_size: i64,
+    pub(crate) bundle: ResolvedBundle,
     pub(crate) priority: usize,
     pub(crate) export_payloads: bool,
     pub(crate) stage_haruki_3d: bool,
+}
+
+impl Deref for DownloadTask {
+    type Target = ResolvedBundle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bundle
+    }
 }

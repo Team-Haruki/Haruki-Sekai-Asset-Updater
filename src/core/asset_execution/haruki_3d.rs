@@ -148,7 +148,7 @@ impl AssetExecutionContext {
         let completed_record = plan
             .tasks
             .iter()
-            .map(|task| (task.bundle_path.clone(), task.bundle_hash.clone()))
+            .map(|task| (task.bundle_path.clone(), task.revision.clone()))
             .collect();
         save_download_record(&plan.record_path, &completed_record)?;
         if plan.config.cleanup_work_dir_after_success {

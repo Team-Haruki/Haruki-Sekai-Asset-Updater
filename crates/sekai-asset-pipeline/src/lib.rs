@@ -4,11 +4,13 @@
 //! download records, publishing, and Git synchronization deliberately stay in
 //! the consuming application.
 
+mod bundle;
 mod crypto;
 mod error;
 mod manifest;
 mod path;
 
+pub use bundle::ResolvedBundle;
 pub use crypto::{decrypt_asset_bundle_info, deobfuscate, deobfuscate_owned};
 pub use error::PipelineError;
 pub use manifest::{asset_category_name, AssetBundleDetail, AssetBundleInfo, AssetCategory};
