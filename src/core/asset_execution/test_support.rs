@@ -10,7 +10,7 @@ use crate::core::config::{
     RegionConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
 };
 
-use super::model::AssetBundleInfo;
+use sekai_asset_pipeline::AssetBundleInfo;
 
 pub(super) type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 pub(super) const TEST_AES_KEY_HEX: &str = "00112233445566778899aabbccddeeff";

@@ -3,14 +3,14 @@
 use chrono::FixedOffset;
 use reqwest::header::{COOKIE, SET_COOKIE};
 
-use super::crypto::decrypt_asset_bundle_info;
-use super::model::{AssetBundleInfo, AssetExecutionContext, DownloadTask};
+use super::model::{AssetExecutionContext, DownloadTask};
 use crate::core::config::{AppConfig, RegionProviderConfig};
 use crate::core::errors::{format_reqwest_error_chain, AssetExecutionError};
 use crate::core::models::AssetUpdateRequest;
 use crate::core::pipeline::prepare_asset_run;
-use sekai_asset_pipeline::retry_async;
-use sekai_asset_pipeline::{ProviderEndpoint, ResolvedRelease};
+use sekai_asset_pipeline::{
+    decrypt_asset_bundle_info, retry_async, AssetBundleInfo, ProviderEndpoint, ResolvedRelease,
+};
 
 pub(super) fn time_arg_jst() -> String {
     let tz = FixedOffset::east_opt(9 * 3600).unwrap();
@@ -105,7 +105,7 @@ impl AssetExecutionContext {
     ) -> Result<AssetBundleInfo, AssetExecutionError> {
         let url = self.render_asset_info_url().await?;
         let body = self.get_with_retry(&url).await?;
-        decrypt_asset_bundle_info(
+        Ok(decrypt_asset_bundle_info(
             self.region.crypto.aes_key_hex.as_deref().ok_or_else(|| {
                 AssetExecutionError::MissingCryptoConfig {
                     region: self.region_name.clone(),
@@ -117,7 +117,7 @@ impl AssetExecutionContext {
                 }
             })?,
             &body,
-        )
+        )?)
     }
 
     pub(super) async fn render_asset_info_url(&mut self) -> Result<String, AssetExecutionError> {
@@ -326,11 +326,10 @@ mod tests {
 
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
-    use super::super::model::{
-        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
-    };
+    use super::super::model::AssetExecutionContext;
 
     use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
+    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
 
     #[tokio::test]
     async fn required_cookies_are_forwarded_and_nuverse_uses_resolved_version() {

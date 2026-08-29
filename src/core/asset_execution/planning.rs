@@ -2,14 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use super::model::{
-    AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext, DownloadTask,
-    ResolvedBundle,
-};
+use super::model::{AssetExecutionContext, DownloadTask};
 use crate::core::config::{RegionConfig, RegionProviderConfig};
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
 use crate::core::regions::{compile_patterns, first_match_index, matches_any};
+use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory, ResolvedBundle};
 
 pub(super) fn download_path_for_region(
     provider: &RegionProviderConfig,
@@ -213,12 +211,11 @@ mod tests {
     use crate::core::download_records::DownloadRecord;
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
-    use super::super::model::{
-        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
-    };
+    use super::super::model::AssetExecutionContext;
     use super::super::planning::{raw_bundle_output_path, should_download_bundle};
 
     use super::super::test_support::test_region;
+    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
 
     #[test]
     fn raw_bundle_filters_are_independent_of_haruki_3d() {

@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use super::crypto::deobfuscate_owned;
 use super::model::{
     AssetExecutionContext, BundleCacheEntryStatus, BundleFetch, BundleFetchSource, DownloadTask,
 };
@@ -14,6 +13,7 @@ use super::planning::{raw_bundle_output_path, validate_relative_bundle_path};
 use crate::core::config::AppConfig;
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
+use sekai_asset_pipeline::deobfuscate_owned;
 
 pub(super) fn bundle_hash_index_key(bundle_path: &str) -> Result<String, AssetExecutionError> {
     Ok(raw_bundle_output_path(Path::new(""), bundle_path)?
@@ -224,9 +224,8 @@ mod tests {
 
     use super::super::cache::{bundle_cache_metadata_path, bundle_hash_index_key};
 
-    use super::super::model::{
-        AssetCategory, AssetExecutionContext, BundleCacheEntryStatus, DownloadTask, ResolvedBundle,
-    };
+    use super::super::model::{AssetExecutionContext, BundleCacheEntryStatus, DownloadTask};
+    use sekai_asset_pipeline::{AssetCategory, ResolvedBundle};
 
     use super::super::test_support::test_region;
 

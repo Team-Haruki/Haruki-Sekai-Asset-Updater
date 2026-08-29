@@ -170,13 +170,12 @@ mod tests {
     use crate::core::download_records::DownloadRecord;
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
-    use super::super::model::{
-        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
-    };
+    use super::super::model::AssetExecutionContext;
     use super::exporter::{exporter_metric_lines, missing_haruki_3d_bundle_paths};
     use super::tasks::bundle_dependency_closure;
 
     use super::super::test_support::test_region;
+    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
 
     #[test]
     fn haruki_3d_work_root_is_disabled_by_default() {

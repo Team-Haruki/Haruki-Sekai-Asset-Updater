@@ -912,11 +912,10 @@ mod tests {
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
     use crate::core::pipeline::prepare_asset_run;
 
-    use super::super::model::{
-        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
-    };
+    use super::super::model::AssetExecutionContext;
     use super::super::runner::post_process_backlog_capacity;
     use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
+    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
 
     #[tokio::test]
     async fn blocking_record_save_returns_the_original_record() {

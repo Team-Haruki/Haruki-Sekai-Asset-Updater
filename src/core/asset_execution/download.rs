@@ -10,10 +10,9 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::cache::{bundle_hash_index_key, configured_asset_bundle_cache_dir};
-use super::crypto::deobfuscate_owned;
 use super::model::{
-    asset_category_name, AssetExecutionContext, BundleFetch, BundleFetchSource, BundleWritePlan,
-    DownloadTask, NativeBundlePostProcessJob,
+    AssetExecutionContext, BundleFetch, BundleFetchSource, BundleWritePlan, DownloadTask,
+    NativeBundlePostProcessJob,
 };
 use super::planning::{raw_bundle_output_path, validate_relative_bundle_path};
 use super::progress::ExecutionProgressUpdate;
@@ -25,7 +24,7 @@ use crate::core::export_pipeline::{
     export_unity_asset_bundle_payloads_with_registry, NativeSemanticExportPathRegistry,
 };
 use crate::core::models::{ExecutionSummary, JobPhase};
-use sekai_asset_pipeline::remove_file_if_exists;
+use sekai_asset_pipeline::{asset_category_name, deobfuscate_owned, remove_file_if_exists};
 
 impl AssetExecutionContext {
     pub async fn prefetch_asset_bundles(
@@ -479,11 +478,10 @@ mod tests {
 
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
-    use super::super::model::{
-        AssetBundleDetail, AssetBundleInfo, AssetCategory, AssetExecutionContext,
-    };
+    use super::super::model::AssetExecutionContext;
 
     use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
+    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
 
     #[tokio::test]
     async fn prefetch_can_fetch_asset_info_and_download_bundle() {

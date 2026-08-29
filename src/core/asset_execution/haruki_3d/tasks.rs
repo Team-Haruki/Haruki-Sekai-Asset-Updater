@@ -5,12 +5,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::super::model::{AssetBundleInfo, AssetExecutionContext, DownloadTask, ResolvedBundle};
+use super::super::model::{AssetExecutionContext, DownloadTask};
 use super::super::planning::download_path_for_region;
 use crate::core::config::RegionProviderConfig;
 use crate::core::download_records::DownloadRecord;
 use crate::core::errors::AssetExecutionError;
 use crate::core::regions::{compile_patterns, matches_any};
+use sekai_asset_pipeline::{AssetBundleInfo, ResolvedBundle};
 
 pub(super) fn bundle_dependency_closure(info: &AssetBundleInfo, bundle_name: &str) -> Vec<String> {
     let mut closure = HashSet::new();
