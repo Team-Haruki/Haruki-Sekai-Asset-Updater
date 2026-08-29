@@ -17,7 +17,6 @@ use crate::core::media::{
     convert_usm_to_mp4_with_backend, convert_wav_bytes_to_flac_with_backend,
     convert_wav_bytes_to_mp3_with_backend, FrameRate,
 };
-use crate::core::storage::{upload_to_all_storages, StorageUploadOptions};
 
 use super::images::convert_native_surrogate_images_to_png;
 use super::limits::{
@@ -34,10 +33,8 @@ use super::types::{NativeInMemoryMediaSource, PostProcessSummary};
 #[allow(clippy::too_many_arguments)]
 pub async fn post_process_exported_files(
     app_config: &AppConfig,
-    region_name: &str,
     region: &RegionConfig,
     export_path: &Path,
-    upload_root: &Path,
     scoped_post_process: bool,
     scoped_files: &[PathBuf],
     acb_sources: Vec<NativeInMemoryMediaSource>,
@@ -194,34 +191,15 @@ pub async fn post_process_exported_files(
         phase_started,
     );
 
+    // Converting files and publishing them are different jobs. This one reports
+    // what it produced; whether any of it is uploaded is the caller's decision,
+    // so an upload failure is attributed to publishing rather than to export.
     if region.upload.enabled {
-        let phase_started = Instant::now();
-        let files = if scoped_post_process {
+        summary.publishable_files = if scoped_post_process {
             scoped_upload_files(scoped_files, &summary.generated_files)
         } else {
             scan_all_files(export_path)?
         };
-        upload_to_all_storages(
-            &app_config.storage,
-            region_name,
-            upload_root,
-            &files,
-            StorageUploadOptions {
-                selected_providers: &region.upload.providers,
-                public_read_include: &region.upload.public_read.include,
-                public_read_exclude: &region.upload.public_read.exclude,
-                remove_local: region.upload.remove_local_after_upload,
-                concurrency: concurrency.upload,
-                retry: &app_config.execution.retry,
-            },
-        )
-        .await?;
-        summary.uploaded_files = files;
-        record_phase_ms(
-            &mut summary.post_process_phase_ms,
-            "post_process.upload",
-            phase_started,
-        );
     }
 
     Ok(summary)

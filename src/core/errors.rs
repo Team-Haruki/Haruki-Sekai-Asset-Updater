@@ -287,6 +287,10 @@ pub enum AssetExecutionError {
     DownloadRecord(#[from] DownloadRecordError),
     #[error(transparent)]
     ExportPipeline(#[from] ExportPipelineError),
+    // Publishing is its own stage now, so an upload failure arrives here as a
+    // storage failure rather than wearing the export pipeline's error.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
     #[error(transparent)]
     GitSync(#[from] GitSyncError),
     #[error("http request failed: {}", format_reqwest_error_chain(.0))]

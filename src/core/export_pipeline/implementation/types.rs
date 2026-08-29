@@ -150,7 +150,10 @@ pub(super) static ASSETSTUDIO_MANIFEST_APPEND_LOCKS: OnceLock<Vec<Mutex<()>>> = 
 pub struct PostProcessSummary {
     pub export_root: PathBuf,
     pub generated_files: Vec<PathBuf>,
-    pub uploaded_files: Vec<PathBuf>,
+    /// What post-processing produced that the region's upload settings would
+    /// publish. Empty when uploads are disabled. Publishing is the caller's
+    /// job, so this is a list of candidates, not a record of what was sent.
+    pub publishable_files: Vec<PathBuf>,
     pub unity_rs_export_phase_ms: HashMap<String, u64>,
     pub post_process_phase_ms: HashMap<String, u64>,
     pub unity_rs_skipped_object_reads: Vec<NativeSkippedObjectRead>,

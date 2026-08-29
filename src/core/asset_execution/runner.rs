@@ -24,6 +24,7 @@ use crate::core::errors::AssetExecutionError;
 use crate::core::export_pipeline::{post_process_exported_files, NativeSemanticExportPathRegistry};
 use crate::core::git_sync::sync_chart_hashes;
 use crate::core::models::{AssetUpdateRequest, ExecutionSummary, JobPhase};
+use crate::core::storage::{upload_to_all_storages, StorageUploadOptions};
 
 pub(super) fn post_process_backlog_capacity(
     download_concurrency: usize,
@@ -803,10 +804,8 @@ impl AssetExecutionContext {
     ) -> Result<(), AssetExecutionError> {
         let post_process_summary = post_process_exported_files(
             app_config,
-            region_name,
             region,
             &job.payload_export.export_path,
-            &job.payload_export.export_root,
             job.payload_export.native_scoped_post_process,
             &job.payload_export.native_written_files,
             job.payload_export.native_acb_sources,
@@ -815,6 +814,34 @@ impl AssetExecutionContext {
 
         let mut phase_ms = job.payload_export.unity_rs_export_phase_ms;
         phase_ms.extend(post_process_summary.post_process_phase_ms);
+
+        // Publishing is separate from converting, so an upload failure is
+        // reported as an upload failure rather than as a broken export.
+        if !post_process_summary.publishable_files.is_empty() {
+            let upload_started = Instant::now();
+            upload_to_all_storages(
+                &app_config.storage,
+                region_name,
+                &job.payload_export.export_root,
+                &post_process_summary.publishable_files,
+                StorageUploadOptions {
+                    selected_providers: &region.upload.providers,
+                    public_read_include: &region.upload.public_read.include,
+                    public_read_exclude: &region.upload.public_read.exclude,
+                    remove_local: region.upload.remove_local_after_upload,
+                    concurrency: app_config.effective_concurrency().upload,
+                    retry: &app_config.execution.retry,
+                },
+            )
+            .await?;
+            phase_ms.insert(
+                "post_process.upload".to_string(),
+                upload_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
+        }
         phase_ms.insert(
             "post_process.queue_wait".to_string(),
             queue_wait_ms.min(u128::from(u64::MAX)) as u64,

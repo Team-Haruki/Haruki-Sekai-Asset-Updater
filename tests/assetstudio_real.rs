@@ -114,7 +114,6 @@ fn run_real_assetstudio_export(bundle_path: String) {
     let summary = runtime
         .block_on(extract_unity_asset_bundle(
             &config,
-            "jp",
             &region,
             Path::new(&bundle_path),
             &export_path,

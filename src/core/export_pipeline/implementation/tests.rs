@@ -393,9 +393,7 @@ fn post_process_sample_files_without_transcoding_if_present() {
             let summary = runtime
                 .block_on(post_process_exported_files(
                     &config,
-                    "jp",
                     &region,
-                    dir.path(),
                     dir.path(),
                     false,
                     &[],
@@ -447,7 +445,6 @@ fn linked_unity_rs_backend_handles_an_empty_object_set() {
     let summary = runtime
         .block_on(extract_unity_asset_bundle(
             &config,
-            "jp",
             &region,
             &fake_bundle,
             "event_story/foo",
@@ -794,6 +791,53 @@ fn decoded_surfaces_sign_by_pixels_and_dimensions() {
         "the same bytes at different dimensions must sign differently"
     );
     assert_ne!(red, empty, "a surface must not sign like an empty payload");
+}
+
+/// Post-processing converts; it does not publish. With uploads enabled it
+/// reports what a caller could publish and touches no storage provider; with
+/// them disabled it reports nothing. Both directions matter: a list that is
+/// always populated would have the caller uploading from a region that asked
+/// not to be.
+#[test]
+fn post_processing_reports_publishable_files_without_uploading() {
+    let dir = tempdir().unwrap();
+    let png = dir.path().join("sample.png");
+    fs::write(&png, b"not really a png").unwrap();
+
+    let (config, mut region) = processing_config();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+
+    region.upload.enabled = true;
+    let enabled = runtime
+        .block_on(post_process_exported_files(
+            &config,
+            &region,
+            dir.path(),
+            false,
+            &[],
+            Vec::new(),
+        ))
+        .unwrap();
+    assert!(
+        enabled.publishable_files.contains(&png),
+        "an enabled region must report its files as publishable"
+    );
+
+    region.upload.enabled = false;
+    let disabled = runtime
+        .block_on(post_process_exported_files(
+            &config,
+            &region,
+            dir.path(),
+            false,
+            &[],
+            Vec::new(),
+        ))
+        .unwrap();
+    assert!(
+        disabled.publishable_files.is_empty(),
+        "a region with uploads off must publish nothing"
+    );
 }
 
 #[test]

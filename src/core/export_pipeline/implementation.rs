@@ -50,9 +50,13 @@ pub fn get_export_group(export_path: &str) -> &'static str {
     "container"
 }
 
+/// Exports one bundle and post-processes it, without publishing.
+///
+/// No production path uses this -- the service goes through
+/// `export_unity_asset_bundle_payloads` and post-processes on its own
+/// schedule -- but the tests drive a whole bundle through it.
 pub async fn extract_unity_asset_bundle(
     app_config: &AppConfig,
-    region_name: &str,
     region: &RegionConfig,
     asset_bundle_file: &Path,
     export_path: &str,
@@ -70,10 +74,8 @@ pub async fn extract_unity_asset_bundle(
     .await?;
     let mut summary = post_process_exported_files(
         app_config,
-        region_name,
         region,
         &payload_export.export_path,
-        output_dir,
         payload_export.native_scoped_post_process,
         &payload_export.native_written_files,
         payload_export.native_acb_sources,
