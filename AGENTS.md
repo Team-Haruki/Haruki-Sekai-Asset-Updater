@@ -104,6 +104,15 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+Sonar/覆盖率相关变更还应运行：
+
+```bash
+cargo llvm-cov --locked --workspace --lcov --output-path lcov.info --fail-under-lines 90
+```
+
+Pull Request 的变更代码覆盖率同样不得低于 90%。CI 使用 `diff-cover`
+对 `lcov.info` 和 `origin/main` 的差异执行该门槛。
+
 如果改动涉及以下内容，还需要额外关注：
 
 - 配置解析：
@@ -186,6 +195,7 @@ Use the standardized workflow layout in `.github/workflows`:
 
 - `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
 - Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, then `cargo test --locked --workspace`. A separate CI job repeats clippy/test with the `media-ffi` feature enabled.
+- `sonar.yml` generates workspace LCOV, enforces at least 90% overall line coverage, runs the SonarQube scan, and enforces at least 90% coverage on pull-request changes.
 - `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
 - `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
 

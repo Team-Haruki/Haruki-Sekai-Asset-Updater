@@ -13,13 +13,21 @@
 
 请默认理解为：
 
-- 根 crate：`Cargo.toml`
-- 服务代码：`src/`
-- 核心逻辑：`src/core/`
+- Cargo workspace：根 `Cargo.toml`
+- 单 bundle 执行内核：`crates/sekai-asset-pipeline/`
+- provider HTTP 客户端：`crates/sekai-asset-client/`
+- 主服务应用：`src/`
+- 应用核心逻辑：`src/core/`
 - HTTP / 任务 / 日志：`src/service/`
-- CLI：`src/bin/`
 - 集成测试：`tests/`
-- 测试样本：`tests/files/`
+
+共享边界必须保持：
+
+- `sekai-asset-pipeline` 持有 provider/manifest 数据结构、crypto、安全路径、
+  `unity-rs-core`、`cridecoder`、可选 `rsmpeg` 和确定性产物清单。
+- `sekai-asset-client` 持有版本、Cookie、manifest HTTP 和有界原子下载。
+- Axum、JobManager、批量调度、下载记录、OpenDAL 发布、Haruki 3D 和 Git
+  同步只属于主服务；共享 crate 不得反向依赖这些能力。
 
 不要再生成以下旧结构：
 
@@ -40,14 +48,18 @@
 - 序列化模型：使用 `serde`
 - HTTP：沿用 `axum`
 - 异步运行时：沿用 `tokio`
-- git：沿用 `git2`
+- git：沿用 Git CLI，不要重新引入 `git2`
 - codec：沿用 `cridecoder`
+- 资产引擎：沿用 crates.io 的 `unity-rs-core`，并仅由
+  `sekai-asset-pipeline` 直接依赖
+- 图片转换：沿用纯 Rust 路径
 
 不要重新引入：
 
 - `serde_json`
 - `serde_yaml`
 - Go FFI / CGO 桥接
+- 其他资产引擎运行时或跨语言资产解包绑定
 - 多余的 JSON/YAML 替代实现
 
 ## 4. 配置与环境变量
@@ -68,6 +80,7 @@
 - `HARUKI_CONFIG_PATH`
 - `HARUKI_CONFIG_URI`
 - `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE`
+- `HARUKI_MEDIA_BACKEND`
 - `HARUKI_SHARED_AES_KEY_HEX`
 - `HARUKI_SHARED_AES_IV_HEX`
 - `HARUKI_EN_AES_KEY_HEX`
@@ -78,14 +91,12 @@
 
 ## 5. 测试样本规则
 
-测试样本固定放在：
+大体积 codec 样本不提交到仓库。真实样本 baseline 通过外部目录启用：
 
-- `tests/files/0703.usm`
-- `tests/files/se_0126_01.acb`
-- `tests/files/unityasset_long`
-- `tests/files/jacket_s_712`
+- 设置 `HARUKI_CODEC_SAMPLE_DIR=/path/to/codec-samples`
+- 该目录可包含 `0703.usm` 和 `se_0126_01.acb`
 
-如果需要引用样本，请从 `tests/files/` 读取，不要再假定样本在仓库根目录。
+不要把一次性 smoke 配置、临时导出目录或真实样本写入仓库。
 
 ## 6. 接口与行为约定
 
@@ -93,6 +104,7 @@
 
 - `GET /healthz`
 - `POST /v2/assets/update`
+- `GET /v2/jobs`
 - `GET /v2/jobs/{id}`
 - `POST /v2/jobs/{id}/cancel`
 
@@ -106,19 +118,26 @@
 - 在 async 请求路径里尽量避免同步阻塞文件系统操作。
 - 新测试优先写稳定的轮询/等待逻辑，不要依赖很脆弱的固定 sleep。
 
-## 9. 提交前必须满足
+## 8. 提交前必须满足
 
 如果 Copilot 给出”完成版”代码，默认应满足：
 
 ```bash
 cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
 ```
 
 如果做不到，应明确指出是哪里还没过，而不是假设可用。
 
-## 10. 文档更新要求
+Sonar/覆盖率相关变更还应生成 workspace LCOV，并同时保持整体与变更代码
+行覆盖率不低于 90%：
+
+```bash
+cargo llvm-cov --locked --workspace --lcov --output-path lcov.info --fail-under-lines 90
+```
+
+## 9. 文档更新要求
 
 以下情况要同步更新文档：
 
@@ -134,6 +153,8 @@ cargo test
 - `.env.example`
 - `CLAUDE.md`
 - `AGENTS.md`
+- `crates/sekai-asset-client/README.md`
+- `crates/sekai-asset-pipeline/README.md`
 - 本文件
 
 ## Git commits
@@ -160,7 +181,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude: `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 5`, `Claude Sonnet 5`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
@@ -178,7 +199,8 @@ Examples from this repo's history:
 Use the standardized workflow layout in `.github/workflows`:
 
 - `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
-- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, then `cargo test --locked --workspace`. A separate CI job repeats clippy/test with the `media-ffi` feature enabled.
+- `sonar.yml` generates workspace LCOV, enforces at least 90% overall line coverage, runs the SonarQube scan, and enforces at least 90% coverage on pull-request changes.
 - `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
 - `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
 

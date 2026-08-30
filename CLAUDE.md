@@ -26,9 +26,12 @@ cargo test --test codec_smoke
 cargo test --test api
 
 # Pre-commit checks (must all pass)
-cargo fmt
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
+
+# Coverage gate used by SonarQube CI
+cargo llvm-cov --locked --workspace --lcov --output-path lcov.info --fail-under-lines 90
 
 # Docker
 docker compose up --build
@@ -172,7 +175,8 @@ Examples from this repo's history:
 Use the standardized workflow layout in `.github/workflows`:
 
 - `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
-- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, then `cargo test --locked --workspace`.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, then `cargo test --locked --workspace`. A separate job repeats Clippy and tests with `media-ffi` enabled.
+- `sonar.yml` generates workspace LCOV, rejects overall line coverage below 90%, runs SonarQube, and rejects pull-request changed-code coverage below 90%.
 - `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
 - `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
 

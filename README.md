@@ -325,7 +325,21 @@ repository; the tables above are the published form of them.
 
 ## Verification
 
-- Run the Rust test suite with `cargo test --workspace`.
+- Run formatting, lint, and the Rust test suite before submitting changes:
+
+  ```bash
+  cargo fmt --all -- --check
+  cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+  cargo test --locked --workspace
+  ```
+
+- SonarQube CI consumes workspace LCOV and enforces 90% line coverage both
+  overall and on pull-request changes. Reproduce the overall gate with:
+
+  ```bash
+  cargo llvm-cov --locked --workspace --lcov --output-path lcov.info --fail-under-lines 90
+  ```
+
 - Real codec sample baselines are opt-in. Put `0703.usm` and
   `se_0126_01.acb` in an external directory and run with
   `HARUKI_CODEC_SAMPLE_DIR=/path/to/codec-samples`; otherwise those sample
