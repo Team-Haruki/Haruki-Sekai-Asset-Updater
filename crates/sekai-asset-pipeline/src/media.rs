@@ -503,16 +503,7 @@ fn ffmpeg_quiet_args() -> [&'static str; 3] {
 
 fn is_retryable_command_error(err: &ExportPipelineError) -> bool {
     match err {
-        ExportPipelineError::Spawn { source, .. } => matches!(
-            source.kind(),
-            std::io::ErrorKind::Interrupted
-                | std::io::ErrorKind::TimedOut
-                | std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::BrokenPipe
-                | std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionAborted
-                | std::io::ErrorKind::ConnectionRefused
-        ),
+        ExportPipelineError::Spawn { source, .. } => is_retryable_spawn_error(source),
         // Only retry a non-zero ffmpeg exit when the output hints at a transient/resource problem.
         // Deterministic failures (corrupt/unsupported input, bad codec, invalid args) would fail
         // identically on every attempt, so retrying just wastes the encode slot and wall-clock.
@@ -521,6 +512,26 @@ fn is_retryable_command_error(err: &ExportPipelineError) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_retryable_spawn_error(source: &std::io::Error) -> bool {
+    let retryable_kind = matches!(
+        source.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionRefused
+    );
+
+    #[cfg(unix)]
+    let executable_busy = source.raw_os_error() == Some(libc::ETXTBSY);
+    #[cfg(not(unix))]
+    let executable_busy = false;
+
+    retryable_kind || executable_busy
 }
 
 fn is_transient_command_failure(status: &str, stderr: &str) -> bool {

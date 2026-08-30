@@ -9,9 +9,9 @@ use super::{
     convert_m2v_bytes_to_mp4_with_backend, convert_m2v_to_mp4_with_backend,
     convert_usm_to_mp4_with_backend, convert_wav_bytes_to_flac_with_backend,
     convert_wav_bytes_to_mp3_with_backend, convert_wav_to_flac_with_backend,
-    convert_wav_to_mp3_with_backend, FrameRate,
+    convert_wav_to_mp3_with_backend, is_retryable_command_error, FrameRate,
 };
-use crate::{MediaBackend, RetryOptions as RetryConfig};
+use crate::{ExportPipelineError, MediaBackend, RetryOptions as RetryConfig};
 
 fn write_executable_script(path: &std::path::Path, script: impl AsRef<[u8]>) {
     let mut file = fs::File::create(path).unwrap();
@@ -68,9 +68,9 @@ fn convert_usm_to_mp4_builds_ffmpeg_command() {
             &script_path.to_string_lossy(),
             MediaBackend::Cli,
             &RetryConfig {
-                attempts: 1,
-                initial_backoff_ms: 1,
-                max_backoff_ms: 1,
+                attempts: 4,
+                initial_backoff_ms: 5,
+                max_backoff_ms: 20,
             },
         ))
         .unwrap();
@@ -103,9 +103,9 @@ fn convert_m2v_to_mp4_removes_original_when_requested() {
                 denominator: 1001,
             }),
             &RetryConfig {
-                attempts: 1,
-                initial_backoff_ms: 1,
-                max_backoff_ms: 1,
+                attempts: 4,
+                initial_backoff_ms: 5,
+                max_backoff_ms: 20,
             },
         ))
         .unwrap();
@@ -138,15 +138,26 @@ fn convert_usm_to_mp4_retries_after_command_failure() {
             &script_path.to_string_lossy(),
             MediaBackend::Cli,
             &RetryConfig {
-                attempts: 2,
+                attempts: 4,
                 initial_backoff_ms: 1,
-                max_backoff_ms: 1,
+                max_backoff_ms: 5,
             },
         ))
         .unwrap();
 
     assert!(marker_path.exists());
     assert!(output.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn executable_file_busy_spawn_errors_are_retryable() {
+    let error = ExportPipelineError::Spawn {
+        program: "ffmpeg".to_string(),
+        source: std::io::Error::from_raw_os_error(libc::ETXTBSY),
+    };
+
+    assert!(is_retryable_command_error(&error));
 }
 
 #[test]
@@ -206,9 +217,9 @@ fn auto_backend_falls_back_to_cli() {
             &script_path.to_string_lossy(),
             MediaBackend::Auto,
             &RetryConfig {
-                attempts: 1,
-                initial_backoff_ms: 1,
-                max_backoff_ms: 1,
+                attempts: 4,
+                initial_backoff_ms: 5,
+                max_backoff_ms: 20,
             },
         ))
         .unwrap();
@@ -228,9 +239,9 @@ fn cli_audio_backends_cover_files_bytes_and_hca_inputs() {
         "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\n: > \"$out\"\n",
     );
     let retry = RetryConfig {
-        attempts: 1,
-        initial_backoff_ms: 1,
-        max_backoff_ms: 1,
+        attempts: 4,
+        initial_backoff_ms: 5,
+        max_backoff_ms: 20,
     };
     let ffmpeg = ffmpeg.to_string_lossy();
 
@@ -429,22 +440,13 @@ fn cli_bytes_input_uses_system_temp_dir() {
     let output = output_dir.join("sample.mp4");
     let script_path = dir.path().join("fake_ffmpeg.sh");
     let input_log = dir.path().join("input_path.txt");
-    fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\nset -eu\ninput=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-i\" ]; then input=\"$arg\"; fi\n  out=\"$arg\"\n  prev=\"$arg\"\ndone\nprintf '%s' \"$input\" > \"{}\"\n: > \"$out\"\n",
-                input_log.display()
-            ),
-        )
-        .unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&script_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&script_path, perms).unwrap();
-    }
+    write_executable_script(
+        &script_path,
+        format!(
+            "#!/bin/sh\nset -eu\ninput=\"\"\nout=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"-i\" ]; then input=\"$arg\"; fi\n  out=\"$arg\"\n  prev=\"$arg\"\ndone\nprintf '%s' \"$input\" > \"{}\"\n: > \"$out\"\n",
+            input_log.display()
+        ),
+    );
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime
@@ -455,9 +457,9 @@ fn cli_bytes_input_uses_system_temp_dir() {
             MediaBackend::Cli,
             None,
             &RetryConfig {
-                attempts: 1,
-                initial_backoff_ms: 1,
-                max_backoff_ms: 1,
+                attempts: 4,
+                initial_backoff_ms: 5,
+                max_backoff_ms: 20,
             },
         ))
         .unwrap();
