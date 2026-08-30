@@ -322,7 +322,10 @@ mod tests {
         RetryOptions, SekaiAssetClient,
     };
 
-    use super::{PrefixDecoder, SIMPLE_HEADER, XOR_HEADER, XOR_PATTERN};
+    use super::{
+        create_temp_file, validate_manifest_size, write_all, PrefixDecoder, SIMPLE_HEADER,
+        XOR_HEADER, XOR_PATTERN,
+    };
 
     fn request(file_size: i64) -> BundleRequest {
         BundleRequest {
@@ -629,5 +632,91 @@ mod tests {
         };
         assert!(transient.is_retryable());
         assert_eq!(permanent.category(), ClientErrorCategory::PermanentHttp);
+    }
+
+    #[tokio::test]
+    async fn download_rejects_provider_mismatch_and_destination_filesystem_errors() {
+        let app = Router::new().route(
+            "/bundle/music/a",
+            get(|| async { Body::from(b"payload".as_slice()) }),
+        );
+        let client = client_for(app, ClientLimits::default()).await;
+        let temp = tempdir().unwrap();
+
+        let mut mismatch = request(7);
+        mismatch.provider = ProviderKind::Nuverse;
+        assert!(matches!(
+            client
+                .download_bundle_to_file(&mismatch, &temp.path().join("mismatch"))
+                .await,
+            Err(ClientError::ProviderMismatch { .. })
+        ));
+
+        let parent_file = temp.path().join("parent-file");
+        std::fs::write(&parent_file, b"file").unwrap();
+        assert!(matches!(
+            client
+                .download_bundle_to_file(&request(7), &parent_file.join("bundle"))
+                .await,
+            Err(ClientError::CreateDirectory { .. })
+        ));
+
+        let destination_dir = temp.path().join("destination-dir");
+        std::fs::create_dir(&destination_dir).unwrap();
+        std::fs::write(destination_dir.join("keep"), b"keep").unwrap();
+        assert!(matches!(
+            client
+                .download_bundle_to_file(&request(7), &destination_dir)
+                .await,
+            Err(ClientError::RenameFile { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn low_level_file_helpers_report_open_write_and_legacy_size_paths() {
+        let temp = tempdir().unwrap();
+        assert!(create_temp_file(&temp.path().join("missing/target"))
+            .await
+            .is_err());
+
+        let read_only_path = temp.path().join("read-only");
+        std::fs::write(&read_only_path, b"body").unwrap();
+        let mut read_only = tokio::fs::File::open(&read_only_path).await.unwrap();
+        let write_result = write_all(&mut read_only, &read_only_path, b"write").await;
+        let flush_result = read_only.flush().await;
+        assert!(write_result.is_err() || flush_result.is_err());
+
+        assert!(validate_manifest_size(&request(-1), 10, 6).is_ok());
+        assert!(validate_manifest_size(&request(0), 10, 6).is_ok());
+        assert!(validate_manifest_size(&request(10), 10, 6).is_ok());
+        assert!(validate_manifest_size(&request(6), 10, 6).is_ok());
+    }
+
+    #[tokio::test]
+    async fn durable_download_flushes_payload_before_returning() {
+        let app = Router::new().route(
+            "/bundle/music/a",
+            get(|| async { Body::from(b"durable".as_slice()) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut config = ClientConfig::new(
+            ProviderEndpoint::ColorfulPalette {
+                asset_info_url_template: format!("http://{address}/manifest"),
+                asset_bundle_url_template: format!("http://{address}/bundle/{{bundle_path}}"),
+                profile: "production".to_string(),
+                profile_hash: "profile".to_string(),
+            },
+            "2022.3.21f1",
+        );
+        config.durable_downloads = true;
+        let client = SekaiAssetClient::new(config).unwrap();
+        let temp = tempdir().unwrap();
+        let downloaded = client
+            .download_bundle_to_file(&request(7), &temp.path().join("bundle"))
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(downloaded.path).await.unwrap(), b"durable");
     }
 }

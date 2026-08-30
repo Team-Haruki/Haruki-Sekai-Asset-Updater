@@ -381,7 +381,7 @@ mod tests {
 
     use crate::core::config::{ChartHashConfig, RetryConfig};
 
-    use super::{chart_hash_output_path, collect_chart_hashes, sync_chart_hashes};
+    use super::*;
 
     fn run(args: &[&str], cwd: &Path) {
         let output = Command::new("git")
@@ -496,5 +496,235 @@ mod tests {
         assert!(remote_head.status.success());
         assert_eq!(String::from_utf8_lossy(&remote_head.stdout).trim(), oid);
         assert!(repo_dir.join("jp_chart_hashes.json").exists());
+    }
+
+    #[test]
+    fn sync_short_circuits_and_reports_repository_state_errors() {
+        let record = BTreeMap::from([("music/music_score_001".to_string(), "hash".to_string())]);
+        assert!(sync_chart_hashes(
+            &ChartHashConfig::default(),
+            "jp",
+            &record,
+            None,
+            &RetryConfig::default(),
+            false,
+        )
+        .unwrap()
+        .is_none());
+
+        let enabled = ChartHashConfig {
+            enabled: true,
+            ..ChartHashConfig::default()
+        };
+        assert!(matches!(
+            sync_chart_hashes(
+                &enabled,
+                "jp",
+                &record,
+                None,
+                &RetryConfig::default(),
+                false,
+            ),
+            Err(GitSyncError::MissingRepositoryDir)
+        ));
+
+        let temp = tempdir().unwrap();
+        let config = ChartHashConfig {
+            repository_dir: Some(temp.path().to_string_lossy().into_owned()),
+            ..enabled
+        };
+        assert!(sync_chart_hashes(
+            &config,
+            "jp",
+            &BTreeMap::new(),
+            None,
+            &RetryConfig::default(),
+            false,
+        )
+        .unwrap()
+        .is_none());
+        assert!(matches!(
+            sync_chart_hashes(&config, "jp", &record, None, &RetryConfig::default(), false,),
+            Err(GitSyncError::MissingBranch)
+        ));
+    }
+
+    #[test]
+    fn git_url_credentials_and_retry_classification_are_explicit() {
+        assert_eq!(
+            inject_credentials("https://old@example.com/repo", "a b", "p/@").unwrap(),
+            "https://a%20b:p%2F%40@example.com/repo"
+        );
+        assert_eq!(
+            inject_credentials("http://example.com/repo", "user", "pass").unwrap(),
+            "http://user:pass@example.com/repo"
+        );
+        assert!(inject_credentials("ssh://example.com/repo", "u", "p").is_err());
+
+        let transient = GitSyncError::GitCommand {
+            action: "push".to_string(),
+            message: "Connection reset by peer".to_string(),
+        };
+        let permanent = GitSyncError::GitCommand {
+            action: "commit".to_string(),
+            message: "Connection reset by peer".to_string(),
+        };
+        assert!(is_retryable_git_error(&transient));
+        assert!(!is_retryable_git_error(&permanent));
+    }
+
+    #[test]
+    fn unchanged_repo_skips_commit_and_missing_origin_is_reported() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        run(&["init", "--initial-branch=main"], &repo);
+        run(&["config", "user.name", "tester"], &repo);
+        run(&["config", "user.email", "tester@example.com"], &repo);
+        run(&["config", "commit.gpgsign", "false"], &repo);
+        let record = BTreeMap::from([("music/music_score_001".to_string(), "hash".to_string())]);
+        fs::write(
+            repo.join("jp_chart_hashes.json"),
+            sonic_rs::to_vec_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        run(&["add", "."], &repo);
+        run(&["commit", "-m", "initial"], &repo);
+        let config = ChartHashConfig {
+            enabled: true,
+            repository_dir: Some(repo.to_string_lossy().into_owned()),
+            ..ChartHashConfig::default()
+        };
+        let unchanged =
+            sync_chart_hashes(&config, "jp", &record, None, &RetryConfig::default(), false)
+                .unwrap()
+                .unwrap();
+        assert!(!unchanged.pushed);
+        assert!(unchanged.commit_oid.is_none());
+
+        let changed =
+            BTreeMap::from([("music/music_score_001".to_string(), "new-hash".to_string())]);
+        assert!(matches!(
+            sync_chart_hashes(
+                &config,
+                "jp",
+                &changed,
+                None,
+                &RetryConfig::default(),
+                false,
+            ),
+            Err(GitSyncError::MissingOrigin)
+        ));
+    }
+
+    #[test]
+    fn git_command_helpers_report_status_and_cover_signed_commit_options() {
+        let temp = tempdir().unwrap();
+        let not_a_repo = temp.path().join("not-a-repo");
+        fs::create_dir(&not_a_repo).unwrap();
+        assert!(path_has_changes(&not_a_repo, Path::new("file")).is_err());
+        assert!(stage_path(&not_a_repo, Path::new("file")).is_err());
+
+        for signing_format in [GitSigningFormat::Gpg, GitSigningFormat::Ssh] {
+            let config = ChartHashConfig {
+                sign_commits: true,
+                signing_format,
+                signing_program: Some("signer".to_string()),
+                signing_key: Some("key".to_string()),
+                ..ChartHashConfig::default()
+            };
+            assert!(commit(
+                &not_a_repo,
+                &config,
+                "message",
+                "Test User",
+                "test@example.com"
+            )
+            .is_err());
+        }
+
+        let status = Command::new("git")
+            .args(["-C", not_a_repo.to_str().unwrap(), "status"])
+            .output()
+            .unwrap();
+        assert!(!status.status.success());
+        assert!(!command_failure_message(&status).is_empty());
+    }
+
+    #[test]
+    fn sync_reports_directory_and_output_write_failures() {
+        let temp = tempdir().unwrap();
+        let blocking_file = temp.path().join("blocking-file");
+        fs::write(&blocking_file, b"file").unwrap();
+        let record = BTreeMap::from([("music/music_score_001".to_string(), "hash".to_string())]);
+        let config = ChartHashConfig {
+            enabled: true,
+            repository_dir: Some(blocking_file.join("repo").to_string_lossy().into_owned()),
+            ..ChartHashConfig::default()
+        };
+        assert!(matches!(
+            sync_chart_hashes(&config, "jp", &record, None, &RetryConfig::default(), false),
+            Err(GitSyncError::Io { .. })
+        ));
+
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        run(&["init", "--initial-branch=main"], &repo);
+        fs::create_dir(repo.join("jp_chart_hashes.json")).unwrap();
+        let config = ChartHashConfig {
+            enabled: true,
+            repository_dir: Some(repo.to_string_lossy().into_owned()),
+            ..ChartHashConfig::default()
+        };
+        assert!(matches!(
+            sync_chart_hashes(&config, "jp", &record, None, &RetryConfig::default(), false),
+            Err(GitSyncError::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn push_failure_covers_credentials_proxy_and_non_origin_errors() {
+        let (_temp, repo, _) = create_repo_with_remote();
+        run(
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "http://127.0.0.1:9/repository",
+            ],
+            &repo,
+        );
+        let config = ChartHashConfig {
+            username: Some("user name".to_string()),
+            password: Some("password".to_string()),
+            ..ChartHashConfig::default()
+        };
+        let retry = RetryConfig {
+            attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        };
+        assert!(matches!(
+            push_origin(
+                &repo,
+                "refs/heads/master:refs/heads/master",
+                &config,
+                Some("http://127.0.0.1:9"),
+                &retry,
+            ),
+            Err(GitSyncError::GitCommand { .. })
+        ));
+
+        let not_a_repo = tempdir().unwrap();
+        assert!(matches!(
+            push_origin(
+                not_a_repo.path(),
+                "refs/heads/main:refs/heads/main",
+                &ChartHashConfig::default(),
+                None,
+                &retry,
+            ),
+            Err(GitSyncError::GitCommand { .. })
+        ));
     }
 }

@@ -4,8 +4,8 @@
 
 pub(super) mod acb;
 pub(super) mod encode_slots;
-mod hca;
-mod model;
+pub(super) mod hca;
+pub(super) mod model;
 mod timing;
 pub(super) mod usm;
 

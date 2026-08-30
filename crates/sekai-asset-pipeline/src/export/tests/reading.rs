@@ -12,7 +12,10 @@ use std::time::Duration;
 
 use tempfile::tempdir;
 
-use crate::test_support::empty_unity_fs_bundle;
+use crate::test_support::{
+    empty_unity_fs_bundle, raw_objects_unity_fs_bundle, rgba_texture_unity_fs_bundle,
+    text_asset_unity_fs_bundle,
+};
 use crate::{ExportPipelineError, MediaBackend, RetryOptions as RetryConfig};
 
 use super::super::extract_unity_asset_bundle;
@@ -21,8 +24,9 @@ use super::super::limits::{
 };
 use super::super::media_postprocess::usm::process_usm_input_with_metrics;
 use super::super::tasks::{
-    prepare_usm_processing_inputs, run_path_tasks, scan_all_files, usm_segment_key,
-    UsmProcessingInput,
+    find_files_by_extension, merge_usm_inputs, panic_message, post_process_files_by_extension,
+    prepare_usm_processing_inputs, read_usm_segment_files_to_memory, run_path_tasks, run_tasks,
+    scan_all_files, usm_segment_key, UsmProcessingInput,
 };
 use super::super::types::{NativeObjectExportSummary, UnityAssetInfo};
 use super::super::unity::{
@@ -204,6 +208,81 @@ fn scan_all_files_finds_nested_files() {
 }
 
 #[test]
+fn task_and_usm_helpers_cover_empty_single_merge_and_invalid_paths() {
+    assert!(run_tasks::<PathBuf, PathBuf, _>(vec![], 0, Ok)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        run_tasks(vec![PathBuf::from("one")], 0, Ok).unwrap(),
+        vec![PathBuf::from("one")]
+    );
+    assert_eq!(panic_message(Box::new("borrowed")), "borrowed");
+    assert_eq!(panic_message(Box::new("owned".to_string())), "owned");
+    assert_eq!(panic_message(Box::new(1_u8)), "unknown worker panic");
+
+    for name in [
+        "plain.usm",
+        "-001.usm",
+        "clip-0.usm",
+        "clip-x.usm",
+        "clip-001__dupx.usm",
+    ] {
+        assert_eq!(usm_segment_key(PathBuf::from(name).as_path()), None);
+    }
+    assert!(prepare_usm_processing_inputs(vec![])
+        .unwrap()
+        .files
+        .is_empty());
+
+    let dir = tempdir().unwrap();
+    let first = dir.path().join("first.usm");
+    let second = dir.path().join("second.usm");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+    let memory =
+        read_usm_segment_files_to_memory(dir.path(), "joined", &[first.clone(), second.clone()])
+            .unwrap();
+    let bytes_source = dir.path().join("bytes-source.usm");
+    fs::write(&bytes_source, b"source").unwrap();
+    let merged = merge_usm_inputs(
+        dir.path(),
+        vec![
+            UsmProcessingInput::Path(first.clone()),
+            UsmProcessingInput::Bytes {
+                output_dir: dir.path().to_path_buf(),
+                output_name: "bytes".to_string(),
+                fallback_name: "bytes.usm".to_string(),
+                data: b"bytes".to_vec(),
+                source_files: vec![bytes_source.clone()],
+            },
+            memory,
+        ],
+    )
+    .unwrap();
+    assert_eq!(fs::read(&merged).unwrap(), b"firstbytesfirstsecond");
+    assert!(!first.exists());
+    assert!(!bytes_source.exists());
+
+    let upper = dir.path().join("UPPER.PNG");
+    fs::write(&upper, b"png").unwrap();
+    assert_eq!(
+        find_files_by_extension(dir.path(), "png").unwrap(),
+        vec![upper.clone()]
+    );
+    assert_eq!(
+        post_process_files_by_extension(
+            dir.path(),
+            true,
+            &[upper.clone(), dir.path().join("missing.png")],
+            "PNG"
+        )
+        .unwrap(),
+        vec![upper]
+    );
+    assert!(scan_all_files(&dir.path().join("missing")).is_err());
+}
+
+#[test]
 fn linked_unity_rs_backend_rejects_an_unrecognized_input() {
     let dir = tempdir().unwrap();
     let fake_bundle = dir.path().join("bundle.bin");
@@ -250,6 +329,141 @@ fn linked_unity_rs_backend_handles_a_valid_empty_container() {
         .unwrap();
 
     assert!(summary.unity_rs_object_read_plan.is_empty());
+}
+
+#[test]
+fn linked_unity_rs_backend_exports_a_synthetic_text_asset() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("text.bundle");
+    fs::write(
+        &bundle,
+        text_asset_unity_fs_bundle("greeting", b"hello from synthetic unity"),
+    )
+    .unwrap();
+    let output_dir = dir.path().join("out");
+    let options = processing_pipeline_options();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let summary = runtime
+        .block_on(extract_unity_asset_bundle(
+            &options,
+            &bundle,
+            "event_story/synthetic",
+            &output_dir,
+            "StartApp",
+        ))
+        .unwrap();
+
+    assert_eq!(summary.unity_rs_object_read_plan.inspected_objects, 1);
+    assert_eq!(summary.unity_rs_object_read_plan.successful_reads, 1);
+    assert_eq!(summary.unity_rs_object_read_plan.failed_reads, 0);
+    let files = scan_all_files(&summary.export_root).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(fs::read(&files[0]).unwrap(), b"hello from synthetic unity");
+}
+
+#[test]
+fn linked_unity_rs_backend_decodes_and_encodes_a_synthetic_texture() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("texture.bundle");
+    let pixels = [
+        255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 255, 0,
+    ];
+    fs::write(
+        &bundle,
+        rgba_texture_unity_fs_bundle("colours", 2, 2, &pixels),
+    )
+    .unwrap();
+    let output_dir = dir.path().join("out");
+    let options = processing_pipeline_options();
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let summary = runtime
+        .block_on(extract_unity_asset_bundle(
+            &options,
+            &bundle,
+            "texture/synthetic",
+            &output_dir,
+            "StartApp",
+        ))
+        .unwrap();
+
+    assert_eq!(summary.unity_rs_object_read_plan.successful_reads, 1);
+    let files = scan_all_files(&summary.export_root).unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0].extension().and_then(|value| value.to_str()),
+        Some("png")
+    );
+    assert!(fs::read(&files[0])
+        .unwrap()
+        .starts_with(b"\x89PNG\r\n\x1a\n"));
+}
+
+#[test]
+fn linked_unity_rs_backend_reads_many_class_ids_as_raw_in_multiple_batches() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("raw.bundle");
+    let class_ids = [900, 901, 902, 903, 904, 905, 906, 907, 908, 909];
+    fs::write(&bundle, raw_objects_unity_fs_bundle(&class_ids)).unwrap();
+    let output_dir = dir.path().join("out");
+    let mut options = processing_pipeline_options();
+    options.backends.asset_studio.read_batch_size = 3;
+    options
+        .backends
+        .asset_studio
+        .read_kinds
+        .insert("all".to_string(), "raw".to_string());
+
+    let summary = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(extract_unity_asset_bundle(
+            &options,
+            &bundle,
+            "raw/synthetic",
+            &output_dir,
+            "StartApp",
+        ))
+        .unwrap();
+
+    assert_eq!(
+        summary.unity_rs_object_read_plan.inspected_objects,
+        class_ids.len()
+    );
+    assert_eq!(
+        summary.unity_rs_object_read_plan.successful_reads,
+        class_ids.len()
+    );
+    assert!(summary.unity_rs_object_read_plan.batch_count > 1);
+    assert_eq!(
+        scan_all_files(&summary.export_root).unwrap().len(),
+        class_ids.len()
+    );
+}
+
+#[test]
+fn linked_unity_rs_backend_records_unsupported_requested_kinds_as_failed_reads() {
+    let dir = tempdir().unwrap();
+    let bundle = dir.path().join("bad-kind.bundle");
+    fs::write(&bundle, raw_objects_unity_fs_bundle(&[49])).unwrap();
+    let mut options = processing_pipeline_options();
+    options
+        .backends
+        .asset_studio
+        .read_kinds
+        .insert("all".to_string(), "unsupported".to_string());
+    let summary = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(extract_unity_asset_bundle(
+            &options,
+            &bundle,
+            "raw/failure",
+            &dir.path().join("out"),
+            "StartApp",
+        ))
+        .unwrap();
+    assert_eq!(summary.unity_rs_object_read_plan.failed_reads, 1);
+    assert_eq!(summary.unity_rs_skipped_object_reads.len(), 1);
 }
 
 #[test]

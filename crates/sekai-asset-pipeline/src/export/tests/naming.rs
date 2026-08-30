@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 
 use super::super::get_export_group;
 use super::super::paths::{
-    assetstudio_fix_file_name, native_object_output_extension, native_object_output_path,
-    safe_payload_bundle_path,
+    assetstudio_fix_file_name, assetstudio_semantic_file_stem, default_extension_for_asset,
+    native_object_output_extension, native_object_output_path, normalize_semantic_path_component,
+    safe_payload_bundle_path, semantic_assetstudio_object_output_path,
+    static_known_payload_extension, strip_container_prefix,
 };
 use super::super::selectors::{
     assetstudio_export_type_selector, assetstudio_type_selector_matches,
@@ -471,4 +473,111 @@ fn native_payload_bundle_paths_are_relative_and_safe() {
         PathBuf::from("abs.bin")
     );
     assert_eq!(safe_payload_bundle_path(".."), PathBuf::from("payload.bin"));
+}
+
+#[test]
+fn path_helpers_cover_every_semantic_directory_and_extension_family() {
+    let base = PathBuf::from("/tmp/container.bin");
+    for (asset_type, expected_dir) in [
+        ("Sprite", "sprite"),
+        ("Mesh", "mesh"),
+        ("Animator", "animator"),
+        ("MonoBehaviour", "monobehaviour"),
+        ("Texture2DArray", "texture2d_array"),
+        ("MonoScript", "monoscript"),
+        ("GameObject", "gameobject"),
+        ("Material", "material"),
+        ("Transform", "transform"),
+        ("RectTransform", "recttransform"),
+        ("ParticleSystem", "particle_system"),
+        ("ParticleSystemRenderer", "particle_system_renderer"),
+        ("SpriteRenderer", "sprite_renderer"),
+        ("SpriteMask", "sprite_mask"),
+        ("MeshFilter", "mesh_filter"),
+        ("MeshRenderer", "mesh_renderer"),
+        ("SkinnedMeshRenderer", "skinned_mesh_renderer"),
+        ("PlayableDirector", "playable_director"),
+        ("Canvas", "canvas"),
+        ("CanvasRenderer", "canvas_renderer"),
+        ("Camera", "camera"),
+        ("Avatar", "avatar"),
+        ("AudioListener", "audio_listener"),
+        ("Animation", "animation"),
+        ("AnimationClip", "animation_clip"),
+        ("TextMesh", "text_mesh"),
+        ("SortingGroup", "sorting_group"),
+        ("Cubemap", "cubemap"),
+        ("Texture3D", "texture3d"),
+        ("Shader", "shader"),
+    ] {
+        let asset = UnityAssetInfo {
+            index: 0,
+            name: Some("named".to_string()),
+            container: None,
+            asset_type: Some(asset_type.to_string()),
+            type_id: 0,
+            path_id: 1,
+            unique_id: None,
+            size: 1,
+            source_file: None,
+        };
+        let path = semantic_assetstudio_object_output_path(base.clone(), &asset);
+        assert!(
+            path.to_string_lossy().contains(expected_dir),
+            "{asset_type}: {path:?}"
+        );
+    }
+
+    let mut asset = UnityAssetInfo {
+        index: 0,
+        name: None,
+        container: None,
+        asset_type: None,
+        type_id: 0,
+        path_id: 1,
+        unique_id: Some("unique".to_string()),
+        size: 1,
+        source_file: None,
+    };
+    assert_eq!(assetstudio_semantic_file_stem(&asset), "unique");
+    asset.unique_id = None;
+    assert_eq!(assetstudio_semantic_file_stem(&asset), "asset");
+    assert_eq!(default_extension_for_asset(&asset), "dat");
+    assert_eq!(normalize_semantic_path_component(" A-b_c "), "abc");
+    assert_eq!(
+        strip_container_prefix("../../safe/file", ""),
+        PathBuf::from("safe/file")
+    );
+
+    for extension in [
+        ".bytes", "DAT", "json", "lua", "txt", "bmp", "png", "tga", "jpeg", "webp", "wav", "mp3",
+        "flac", "ogg", "ttf", "otf", "shader", "obj", "fbx", "bin",
+    ] {
+        assert!(
+            static_known_payload_extension(extension).is_some(),
+            "{extension}"
+        );
+    }
+    assert!(static_known_payload_extension("unknown").is_none());
+
+    for payload_kind in [
+        "raw",
+        "typetree_json",
+        "text_bytes",
+        "image_bmp",
+        "image_raw_rgba",
+        "image_png",
+        "image_tga",
+        "image_jpeg",
+        "image_webp",
+        "image_array_bundle_raw_rgba",
+        "audio_raw",
+        "video_raw",
+        "movie_ogv",
+        "font",
+        "shader_text",
+        "mesh_obj",
+    ] {
+        let _ = native_object_output_extension(&asset, Some(payload_kind), Some(".txt"));
+    }
 }

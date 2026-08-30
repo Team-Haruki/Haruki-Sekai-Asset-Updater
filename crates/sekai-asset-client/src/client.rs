@@ -350,8 +350,8 @@ mod tests {
     use cbc::cipher::{block_padding::Pkcs7, BlockModeEncrypt, KeyIvInit};
     use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
 
-    use super::{ManifestCrypto, RequestedRelease, SekaiAssetClient};
-    use crate::{ClientConfig, ClientErrorCategory, ClientLimits, ProviderEndpoint, RetryOptions};
+    use super::*;
+    use crate::{ClientErrorCategory, ClientLimits};
 
     const KEY_HEX: &str = "00112233445566778899aabbccddeeff";
     const IV_HEX: &str = "0102030405060708090a0b0c0d0e0f10";
@@ -555,5 +555,92 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.category(), ClientErrorCategory::SizeExceeded);
+    }
+
+    #[test]
+    fn client_construction_covers_debug_http1_proxy_and_invalid_headers() {
+        let endpoint = ProviderEndpoint::ColorfulPalette {
+            asset_info_url_template: "https://example.com/{asset_version}/{asset_hash}".to_string(),
+            asset_bundle_url_template: "https://example.com/{bundle_path}".to_string(),
+            profile: "production".to_string(),
+            profile_hash: "profile".to_string(),
+        };
+        let mut config = ClientConfig::new(endpoint.clone(), "2022.3.21f1");
+        config.http_version = HttpVersion::Http1;
+        config.proxy = Some("http://127.0.0.1:8080".to_string());
+        config.durable_downloads = true;
+        let client = SekaiAssetClient::new(config).unwrap();
+        assert_eq!(client.provider_kind(), ProviderKind::ColorfulPalette);
+        let debug = format!("{client:?}");
+        assert!(debug.contains("SekaiAssetClient"));
+        assert!(debug.contains("durable_downloads: true"));
+
+        let invalid_header = ClientConfig::new(endpoint.clone(), "invalid\nversion");
+        assert!(SekaiAssetClient::new(invalid_header).is_err());
+
+        let mut invalid_proxy = ClientConfig::new(endpoint, "2022.3.21f1");
+        invalid_proxy.proxy = Some("://invalid".to_string());
+        assert!(SekaiAssetClient::new(invalid_proxy).is_err());
+    }
+
+    #[tokio::test]
+    async fn release_and_cookie_validation_cover_missing_and_malformed_inputs() {
+        let endpoint = ProviderEndpoint::ColorfulPalette {
+            asset_info_url_template: String::new(),
+            asset_bundle_url_template: String::new(),
+            profile: "production".to_string(),
+            profile_hash: "profile".to_string(),
+        };
+        let mut client = SekaiAssetClient::new(ClientConfig::new(endpoint, "2022.3.21f1")).unwrap();
+        for requested in [
+            RequestedRelease::default(),
+            RequestedRelease {
+                asset_version: Some("1".to_string()),
+                asset_hash: Some("  ".to_string()),
+            },
+        ] {
+            assert!(matches!(
+                client.resolve_release(&requested).await,
+                Err(ClientError::MissingReleaseInput)
+            ));
+        }
+        assert!(client.bootstrap_cookie(Some("://invalid")).await.is_err());
+
+        let empty = HeaderMap::new();
+        assert!(collect_cookie_header(&empty).unwrap().is_none());
+
+        let mut missing_equals = HeaderMap::new();
+        missing_equals.insert(SET_COOKIE, HeaderValue::from_static("session"));
+        assert!(collect_cookie_header(&missing_equals).is_err());
+
+        let mut empty_name = HeaderMap::new();
+        empty_name.insert(SET_COOKIE, HeaderValue::from_static("=value; Path=/"));
+        assert!(collect_cookie_header(&empty_name).is_err());
+
+        let mut non_text = HeaderMap::new();
+        non_text.insert(SET_COOKIE, HeaderValue::from_bytes(&[0xff]).unwrap());
+        assert!(collect_cookie_header(&non_text).is_err());
+    }
+
+    #[tokio::test]
+    async fn nuverse_rejects_an_empty_release_response() {
+        let app = Router::new().route("/version", get(|| async { "   " }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = ClientConfig::new(
+            ProviderEndpoint::Nuverse {
+                asset_version_url_template: format!("http://{address}/version"),
+                asset_info_url_template: String::new(),
+                asset_bundle_url_template: String::new(),
+                app_version: "5.2.0".to_string(),
+            },
+            "2022.3.21f1",
+        );
+        let client = SekaiAssetClient::new(config).unwrap();
+        assert!(matches!(
+            client.resolve_release(&RequestedRelease::default()).await,
+            Err(ClientError::InvalidReleaseResponse { .. })
+        ));
     }
 }

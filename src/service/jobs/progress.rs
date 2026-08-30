@@ -243,3 +243,124 @@ pub(super) fn push_progress_event(job: &mut JobSnapshot, phase: JobPhase, messag
         job.progress.recent_events.drain(0..overflow);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sekai_asset_pipeline::NativeObjectReadPlanStats;
+
+    use super::super::test_support::queued_job;
+
+    #[tokio::test]
+    async fn consumer_applies_every_progress_update_shape() {
+        let mut job = queued_job("jp");
+        let id = job.id;
+        job.status = JobStatus::Running;
+        let jobs = Arc::new(RwLock::new(HashMap::from([(id, job)])));
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let consumer = tokio::spawn(progress_consumer(jobs.clone(), id, receiver));
+        let plan = NativeObjectReadPlanStats {
+            planned_objects: 4,
+            successful_reads: 3,
+            skipped_reads: 1,
+            batch_count: 2,
+            payload_bundle_bytes: 128,
+            ..NativeObjectReadPlanStats::default()
+        };
+        let updates = vec![
+            ExecutionProgressUpdate::Phase {
+                phase: JobPhase::FetchingAssetInfo,
+                message: "fetching".to_string(),
+            },
+            ExecutionProgressUpdate::DownloadsPlanned { total: 2 },
+            ExecutionProgressUpdate::BundleStarted {
+                bundle: "a".to_string(),
+            },
+            ExecutionProgressUpdate::BundleDownloaded {
+                bundle: "a".to_string(),
+                bytes: 64,
+                elapsed_ms: 3,
+            },
+            ExecutionProgressUpdate::BundleExported {
+                bundle: "a".to_string(),
+                elapsed_ms: 4,
+            },
+            ExecutionProgressUpdate::BundleUnityRsExportPhases {
+                bundle: "a".to_string(),
+                phase_ms: HashMap::from([("read".to_string(), 2), ("export".to_string(), 1)]),
+            },
+            ExecutionProgressUpdate::BundleUnityRsSkippedObjectReads {
+                bundle: "a".to_string(),
+                count: 1,
+            },
+            ExecutionProgressUpdate::BundleUnityRsObjectReadPlan {
+                bundle: "a".to_string(),
+                plan,
+            },
+            ExecutionProgressUpdate::SchedulerTelemetry {
+                bundle: Some("a".to_string()),
+                phase_ms: HashMap::from([("wait".to_string(), 1)]),
+            },
+            ExecutionProgressUpdate::BundleCompleted {
+                bundle: "a".to_string(),
+            },
+            ExecutionProgressUpdate::BundleFailed {
+                bundle: "b".to_string(),
+                error: "broken".to_string(),
+            },
+            ExecutionProgressUpdate::RecordSaved { entries: 2 },
+            ExecutionProgressUpdate::ChartHashSyncFinished { performed: false },
+            ExecutionProgressUpdate::ChartHashSyncFinished { performed: true },
+        ];
+        for update in updates {
+            sender.send(update).unwrap();
+        }
+        drop(sender);
+        consumer.await.unwrap();
+
+        let jobs = jobs.read().await;
+        let job = &jobs[&id];
+        assert_eq!(job.progress.total_downloads, 2);
+        assert_eq!(job.progress.completed_downloads, 1);
+        assert_eq!(job.progress.failed_downloads, 1);
+        assert_eq!(job.progress.phase, JobPhase::SyncingChartHashes);
+        assert_eq!(job.progress.current_step, "chart hash sync completed");
+        assert!(job.progress.recent_events.iter().any(|event| {
+            event.message == "unity-rs export phases for `a`: export=1ms, read=2ms"
+        }));
+    }
+
+    #[tokio::test]
+    async fn consumer_ignores_updates_for_cancelled_or_missing_jobs() {
+        let mut cancelled = queued_job("en");
+        cancelled.status = JobStatus::Cancelled;
+        let id = cancelled.id;
+        let jobs = Arc::new(RwLock::new(HashMap::from([(id, cancelled)])));
+        for target in [id, Uuid::new_v4()] {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            sender
+                .send(ExecutionProgressUpdate::DownloadsPlanned { total: 99 })
+                .unwrap();
+            drop(sender);
+            progress_consumer(jobs.clone(), target, receiver).await;
+        }
+        assert_eq!(jobs.read().await[&id].progress.total_downloads, 0);
+    }
+
+    #[test]
+    fn recent_progress_is_bounded_and_phase_formatting_is_stable() {
+        let mut job = queued_job("tw");
+        for index in 0..25 {
+            push_progress_event(&mut job, JobPhase::Planning, format!("event {index}"));
+        }
+        assert_eq!(job.progress.recent_events.len(), 20);
+        assert_eq!(job.progress.recent_events[0].message, "event 5");
+        assert_eq!(
+            format_unity_rs_export_phases(&HashMap::from([
+                ("z".to_string(), 2),
+                ("a".to_string(), 1),
+            ])),
+            "a=1ms, z=2ms"
+        );
+    }
+}

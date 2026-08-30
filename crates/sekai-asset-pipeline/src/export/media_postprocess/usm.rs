@@ -167,7 +167,7 @@ pub(super) fn skip_invalid_usm_input(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn process_direct_usm_path(
+pub(in crate::export) async fn process_direct_usm_path(
     usm_input: &UsmProcessingInput,
     export_path: &Path,
     output_name: &str,
@@ -210,7 +210,7 @@ pub(super) async fn process_direct_usm_path(
     Ok(true)
 }
 
-pub(super) fn usm_frame_rate(usm_input: &UsmProcessingInput) -> Option<FrameRate> {
+pub(in crate::export) fn usm_frame_rate(usm_input: &UsmProcessingInput) -> Option<FrameRate> {
     let UsmProcessingInput::Path(usm_file) = usm_input else {
         return None;
     };
@@ -385,14 +385,14 @@ pub(super) async fn process_path_usm(
     Ok(())
 }
 
-pub(super) fn has_extension(path: &Path, extension: &str) -> bool {
+pub(in crate::export) fn has_extension(path: &Path, extension: &str) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn convert_usm_m2v_bytes(
+pub(in crate::export) async fn convert_usm_m2v_bytes(
     video: &[u8],
     mp4: &Path,
     ffmpeg_path: &str,
@@ -427,7 +427,7 @@ pub(super) async fn convert_usm_m2v_bytes(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn convert_usm_m2v_path(
+pub(in crate::export) async fn convert_usm_m2v_path(
     m2v: &Path,
     mp4: &Path,
     remove_source: bool,
@@ -463,7 +463,7 @@ pub(super) async fn convert_usm_m2v_path(
     Ok(())
 }
 
-pub(super) fn usm_input_has_crid_magic(
+pub(in crate::export) fn usm_input_has_crid_magic(
     usm_input: &UsmProcessingInput,
 ) -> Result<bool, ExportPipelineError> {
     match usm_input {
@@ -501,7 +501,7 @@ pub(super) fn export_usm_input_to_memory(
     }
 }
 
-pub(super) fn write_usm_streams(
+pub(in crate::export) fn write_usm_streams(
     export_path: &Path,
     streams: &[cridecoder::ExtractedUsmStream],
 ) -> Result<Vec<PathBuf>, ExportPipelineError> {

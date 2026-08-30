@@ -260,3 +260,303 @@ pub(super) async fn finish_successful_execution(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    use super::super::test_support::{queued_job, request};
+    use crate::core::config::{CryptoConfig, RegionPathsConfig, RegionProviderConfig};
+    use crate::core::models::UrlPreview;
+
+    fn context_with_jobs(jobs: HashMap<Uuid, JobSnapshot>) -> PlanningContext {
+        PlanningContext {
+            jobs: Arc::new(RwLock::new(jobs)),
+            config: Arc::new(AppConfig::default()),
+            cancel_flags: Arc::new(RwLock::new(HashMap::new())),
+            job_semaphore: None,
+            region_locks: Arc::new(RwLock::new(HashMap::new())),
+            haruki_3d_active: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    fn executable_context(job: JobSnapshot) -> (PlanningContext, AssetUpdateRequest) {
+        let region = RegionConfig {
+            enabled: true,
+            provider: RegionProviderConfig::ColorfulPalette {
+                asset_info_url_template:
+                    "http://127.0.0.1/info/{env}/{hash}/{asset_version}/{asset_hash}".to_string(),
+                asset_bundle_url_template: "http://127.0.0.1/bundle/{bundle_path}".to_string(),
+                profile: "production".to_string(),
+                profile_hashes: std::collections::BTreeMap::from([(
+                    "production".to_string(),
+                    "profile".to_string(),
+                )]),
+                required_cookies: false,
+                cookie_bootstrap_url: None,
+            },
+            crypto: CryptoConfig {
+                aes_key_hex: Some("00112233445566778899aabbccddeeff".to_string()),
+                aes_iv_hex: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+            },
+            paths: RegionPathsConfig {
+                asset_save_dir: Some("assets".to_string()),
+                downloaded_asset_record_file: Some("record.json".to_string()),
+            },
+            ..RegionConfig::default()
+        };
+        let config = AppConfig {
+            regions: std::collections::BTreeMap::from([("jp".to_string(), region)]),
+            ..AppConfig::default()
+        };
+        let mut request = request("jp");
+        request.asset_version = Some("1".to_string());
+        request.asset_hash = Some("hash".to_string());
+        let mut context = context_with_jobs(HashMap::from([(job.id, job)]));
+        context.config = Arc::new(config);
+        (context, request)
+    }
+
+    fn plan(dry_run: bool) -> ExecutionPlan {
+        ExecutionPlan {
+            region: "jp".to_string(),
+            dry_run,
+            codec_backend: "test".to_string(),
+            url_preview: UrlPreview {
+                provider_kind: "test".to_string(),
+                asset_info_url: None,
+                asset_version_lookup_url: None,
+                asset_bundle_url_template: "https://example.com/{bundle_path}".to_string(),
+                notes: vec![],
+            },
+            download_record_file: "record.json".to_string(),
+            upload_targets: vec![],
+            chart_hash_sync: None,
+            pending_steps: vec![],
+        }
+    }
+
+    fn summary(completed: usize, failed: usize) -> ExecutionSummary {
+        ExecutionSummary {
+            discovered_bundles: completed + failed,
+            queued_downloads: completed + failed,
+            completed_downloads: completed,
+            failed_downloads: failed,
+            updated_record_entries: completed,
+            chart_hash_sync_performed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn planning_transitions_cover_missing_cancelled_dry_and_execute_jobs() {
+        let jobs = Arc::new(RwLock::new(HashMap::new()));
+        assert!(!begin_planning(&jobs, Uuid::new_v4()).await);
+
+        let mut cancelled = queued_job("jp");
+        cancelled.status = JobStatus::Cancelled;
+        let cancelled_id = cancelled.id;
+        jobs.write().await.insert(cancelled_id, cancelled);
+        assert!(!begin_planning(&jobs, cancelled_id).await);
+
+        let queued = queued_job("jp");
+        let queued_id = queued.id;
+        jobs.write().await.insert(queued_id, queued);
+        assert!(begin_planning(&jobs, queued_id).await);
+        assert_eq!(jobs.read().await[&queued_id].status, JobStatus::Planning);
+
+        assert!(matches!(
+            apply_execution_plan(&jobs, Uuid::new_v4(), &request("jp"), plan(false)).await,
+            PlanningDisposition::Stop
+        ));
+        assert!(matches!(
+            apply_execution_plan(&jobs, cancelled_id, &request("jp"), plan(false)).await,
+            PlanningDisposition::Stop
+        ));
+
+        let mut dry_request = request("jp");
+        dry_request.dry_run = true;
+        let dry = queued_job("jp");
+        let dry_id = dry.id;
+        jobs.write().await.insert(dry_id, dry);
+        assert!(matches!(
+            apply_execution_plan(&jobs, dry_id, &dry_request, plan(true)).await,
+            PlanningDisposition::Stop
+        ));
+        assert_eq!(jobs.read().await[&dry_id].status, JobStatus::Completed);
+
+        let execute = queued_job("jp");
+        let execute_id = execute.id;
+        jobs.write().await.insert(execute_id, execute);
+        assert!(matches!(
+            apply_execution_plan(&jobs, execute_id, &request("jp"), plan(false)).await,
+            PlanningDisposition::Execute
+        ));
+        assert_eq!(jobs.read().await[&execute_id].status, JobStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn permits_and_execution_results_cover_every_terminal_shape() {
+        assert!(acquire_job_permit(&None).await.is_none());
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = acquire_job_permit(&Some(semaphore.clone())).await;
+        assert!(permit.is_some());
+        drop(permit);
+        semaphore.close();
+        assert!(acquire_job_permit(&Some(semaphore)).await.is_none());
+
+        let job = queued_job("jp");
+        let id = job.id;
+        let context = context_with_jobs(HashMap::from([(id, job)]));
+        let request = request("jp");
+        let region = RegionConfig::default();
+
+        handle_asset_execution_result(
+            &context,
+            id,
+            &request,
+            &region,
+            None,
+            Ok(Err(AssetExecutionError::Cancelled)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(context.jobs.read().await[&id].status, JobStatus::Cancelled);
+
+        let error = handle_asset_execution_result(
+            &context,
+            id,
+            &request,
+            &region,
+            None,
+            Ok(Err(AssetExecutionError::BlockingTask("broken".to_string()))),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("broken"));
+
+        let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        let timeout_error =
+            handle_asset_execution_result(&context, id, &request, &region, None, Err(elapsed))
+                .await
+                .unwrap_err();
+        assert!(timeout_error.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn successful_execution_honours_flags_and_updates_the_snapshot() {
+        let running = queued_job("jp");
+        let id = running.id;
+        let context = context_with_jobs(HashMap::from([(id, running)]));
+        let jp_request = request("jp");
+        let region = RegionConfig::default();
+        finish_successful_execution(&context, id, &jp_request, &region, &None, summary(1, 0))
+            .await
+            .unwrap();
+        assert_eq!(context.jobs.read().await[&id].status, JobStatus::Completed);
+
+        let cancelled = queued_job("en");
+        let cancelled_id = cancelled.id;
+        context.jobs.write().await.insert(cancelled_id, cancelled);
+        let flag = Arc::new(AtomicBool::new(true));
+        finish_successful_execution(
+            &context,
+            cancelled_id,
+            &request("en"),
+            &region,
+            &Some(flag.clone()),
+            summary(1, 0),
+        )
+        .await
+        .unwrap();
+        assert!(flag.load(Ordering::SeqCst));
+        assert_eq!(
+            context.jobs.read().await[&cancelled_id].status,
+            JobStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn planning_entry_cleans_flags_when_the_job_is_missing_or_pre_cancelled() {
+        let id = Uuid::new_v4();
+        let context = context_with_jobs(HashMap::new());
+        context
+            .cancel_flags
+            .write()
+            .await
+            .insert(id, Arc::new(AtomicBool::new(false)));
+        run_planning(context.clone(), id, request("jp")).await;
+        assert!(!context.cancel_flags.read().await.contains_key(&id));
+
+        let mut cancelled = queued_job("jp");
+        cancelled.status = JobStatus::Cancelled;
+        let cancelled_id = cancelled.id;
+        context.jobs.write().await.insert(cancelled_id, cancelled);
+        context
+            .cancel_flags
+            .write()
+            .await
+            .insert(cancelled_id, Arc::new(AtomicBool::new(true)));
+        run_planning(context.clone(), cancelled_id, request("jp")).await;
+        assert!(!context
+            .cancel_flags
+            .read()
+            .await
+            .contains_key(&cancelled_id));
+    }
+
+    #[tokio::test]
+    async fn planning_entry_handles_cancellation_and_invalid_requests() {
+        let job = queued_job("jp");
+        let id = job.id;
+        let context = context_with_jobs(HashMap::from([(id, job)]));
+        context
+            .cancel_flags
+            .write()
+            .await
+            .insert(id, Arc::new(AtomicBool::new(true)));
+        run_planning(context.clone(), id, request("jp")).await;
+        assert_eq!(context.jobs.read().await[&id].status, JobStatus::Cancelled);
+        assert!(!context.cancel_flags.read().await.contains_key(&id));
+
+        let invalid = queued_job("missing");
+        let invalid_id = invalid.id;
+        let invalid_context = context_with_jobs(HashMap::from([(invalid_id, invalid)]));
+        run_planning(invalid_context.clone(), invalid_id, request("missing")).await;
+        assert_eq!(
+            invalid_context.jobs.read().await[&invalid_id].status,
+            JobStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn planned_dry_run_and_both_execution_modes_use_the_shared_dispatch() {
+        let job = queued_job("jp");
+        let id = job.id;
+        let (context, mut request) = executable_context(job);
+        request.dry_run = true;
+        run_planned_job(&context, id, &request, None).await.unwrap();
+        assert_eq!(context.jobs.read().await[&id].status, JobStatus::Completed);
+
+        let flag = Some(Arc::new(AtomicBool::new(true)));
+        for mode in [AssetUpdateMode::Update, AssetUpdateMode::PrefetchRawBundles] {
+            let prepared = prepare_asset_run(&context.config, &request).unwrap();
+            let executor =
+                AssetExecutionContext::new(&context.config, &prepared, &request).unwrap();
+            let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
+            assert!(matches!(
+                run_asset_update(
+                    executor,
+                    context.config.clone(),
+                    mode,
+                    progress_tx,
+                    flag.clone(),
+                )
+                .await,
+                Err(AssetExecutionError::Cancelled)
+            ));
+        }
+    }
+}

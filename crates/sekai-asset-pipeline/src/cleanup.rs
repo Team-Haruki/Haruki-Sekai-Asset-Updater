@@ -40,3 +40,35 @@ fn is_retryable_remove_error(err: &io::Error) -> bool {
             | io::ErrorKind::Other
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn removal_helpers_cover_existing_missing_and_non_file_targets() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"data").unwrap();
+        remove_file_with_retries(&file).unwrap();
+        assert!(!file.exists());
+        remove_file_with_retries(&file).unwrap();
+        remove_file_if_exists(&file).unwrap();
+
+        assert!(remove_file_with_retries(dir.path()).is_err());
+        assert!(remove_file_if_exists(dir.path()).is_err());
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::Other,
+        ] {
+            assert!(is_retryable_remove_error(&io::Error::from(kind)));
+        }
+        assert!(!is_retryable_remove_error(&io::Error::from(
+            io::ErrorKind::InvalidInput
+        )));
+    }
+}

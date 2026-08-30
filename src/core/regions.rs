@@ -167,10 +167,20 @@ pub fn download_priority_compiled(priority_patterns: &[Regex], bundle_name: &str
 mod tests {
     use std::collections::BTreeMap;
 
-    use crate::core::config::{RegionConfig, RegionFiltersConfig, RegionProviderConfig};
-    use crate::core::models::AssetUpdateRequest;
+    use crate::core::config::{AppConfig, RegionConfig, RegionFiltersConfig, RegionProviderConfig};
+    use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
-    use super::{build_url_preview, download_priority, should_skip_bundle};
+    use super::{build_url_preview, download_priority, select_region, should_skip_bundle};
+
+    fn empty_request() -> AssetUpdateRequest {
+        AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: None,
+            asset_hash: None,
+            dry_run: true,
+            mode: AssetUpdateMode::Update,
+        }
+    }
 
     #[test]
     fn colorful_palette_preview_uses_profile_hash_and_request_values() {
@@ -223,5 +233,68 @@ mod tests {
         assert_eq!(download_priority(&filters, "music/long/test"), Some(0));
         assert_eq!(download_priority(&filters, "event/live"), Some(1));
         assert_eq!(download_priority(&filters, "other/path"), None);
+    }
+
+    #[test]
+    fn region_selection_and_incomplete_colorful_preview_cover_error_paths() {
+        let mut config = AppConfig::default();
+        config.regions.insert(
+            "jp".to_string(),
+            RegionConfig {
+                enabled: true,
+                ..RegionConfig::default()
+            },
+        );
+        assert!(select_region(&config, "JP").is_ok());
+        config.regions.get_mut("jp").unwrap().enabled = false;
+        assert!(select_region(&config, "jp")
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
+        assert!(select_region(&config, "en")
+            .unwrap_err()
+            .to_string()
+            .contains("not found"));
+
+        let region = RegionConfig {
+            provider: RegionProviderConfig::ColorfulPalette {
+                asset_info_url_template: "https://info/{hash}/{asset_version}/{asset_hash}".into(),
+                asset_bundle_url_template: "https://bundle/{bundle_path}".into(),
+                profile: "missing".into(),
+                profile_hashes: BTreeMap::new(),
+                required_cookies: false,
+                cookie_bootstrap_url: None,
+            },
+            ..RegionConfig::default()
+        };
+        let preview = build_url_preview(&region, &empty_request());
+        assert!(preview.asset_info_url.is_none());
+        assert_eq!(preview.notes.len(), 2);
+    }
+
+    #[test]
+    fn nuverse_preview_describes_runtime_release_resolution() {
+        let region = RegionConfig {
+            provider: RegionProviderConfig::Nuverse {
+                asset_version_url: "https://version/{app_version}".into(),
+                app_version: "4.2.0".into(),
+                asset_info_url_template: "https://info/{asset_version}".into(),
+                asset_bundle_url_template: "https://bundle/{asset_version}/{bundle_path}".into(),
+                required_cookies: true,
+                cookie_bootstrap_url: None,
+            },
+            ..RegionConfig::default()
+        };
+        let preview = build_url_preview(&region, &empty_request());
+        assert_eq!(preview.provider_kind, "nuverse");
+        assert_eq!(
+            preview.asset_version_lookup_url.as_deref(),
+            Some("https://version/4.2.0")
+        );
+        assert!(preview
+            .asset_info_url
+            .unwrap()
+            .contains("resolved-at-runtime"));
+        assert_eq!(preview.notes.len(), 2);
     }
 }

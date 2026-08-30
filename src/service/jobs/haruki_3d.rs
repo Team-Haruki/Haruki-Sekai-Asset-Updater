@@ -135,3 +135,126 @@ pub(super) async fn spawn_haruki_3d_child_job(
         remove_cancel_flag(&cancel_flags, child_id).await;
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use super::super::test_support::request;
+    use crate::core::config::RegionConfig;
+
+    async fn wait_for_child(jobs: &Arc<RwLock<HashMap<Uuid, JobSnapshot>>>) -> JobSnapshot {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(job) = jobs
+                    .read()
+                    .await
+                    .values()
+                    .next()
+                    .filter(|job| {
+                        matches!(
+                            job.status,
+                            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                        )
+                    })
+                    .cloned()
+                {
+                    return job;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    type JobStore = Arc<RwLock<HashMap<Uuid, JobSnapshot>>>;
+    type CancelFlagStore = Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>;
+    type ActiveRegionStore = Arc<RwLock<HashSet<String>>>;
+
+    fn stores() -> (JobStore, CancelFlagStore, ActiveRegionStore) {
+        (
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashSet::new())),
+        )
+    }
+
+    #[tokio::test]
+    async fn child_job_reports_unknown_region_and_removes_its_cancel_flag() {
+        let (jobs, flags, active) = stores();
+        spawn_haruki_3d_child_job(
+            jobs.clone(),
+            flags.clone(),
+            active,
+            Arc::new(AppConfig::default()),
+            Uuid::new_v4(),
+            request("missing"),
+        )
+        .await;
+        let child = wait_for_child(&jobs).await;
+        assert_eq!(child.status, JobStatus::Failed);
+        assert_eq!(child.kind, "haruki_3d_export");
+        assert!(child.parent_job_id.is_some());
+        assert!(!flags.read().await.contains_key(&child.id));
+    }
+
+    #[tokio::test]
+    async fn child_job_skips_an_already_active_work_tree() {
+        let (jobs, flags, active) = stores();
+        let mut region = RegionConfig {
+            enabled: true,
+            ..RegionConfig::default()
+        };
+        region.export.haruki_3d.enabled = true;
+        region.export.haruki_3d.staging_dir = "shared-work".to_string();
+        active.write().await.insert("jp:shared-work".to_string());
+        let config = AppConfig {
+            regions: BTreeMap::from([("jp".to_string(), region)]),
+            ..AppConfig::default()
+        };
+        spawn_haruki_3d_child_job(
+            jobs.clone(),
+            flags.clone(),
+            active.clone(),
+            Arc::new(config),
+            Uuid::new_v4(),
+            request("jp"),
+        )
+        .await;
+        let child = wait_for_child(&jobs).await;
+        assert_eq!(child.status, JobStatus::Completed);
+        assert!(child.message.contains("already running"));
+        assert!(!flags.read().await.contains_key(&child.id));
+        assert!(active.read().await.contains("jp:shared-work"));
+    }
+
+    #[tokio::test]
+    async fn child_job_cleans_active_state_after_pipeline_setup_failure() {
+        let (jobs, flags, active) = stores();
+        let mut region = RegionConfig {
+            enabled: true,
+            ..RegionConfig::default()
+        };
+        region.export.haruki_3d.enabled = true;
+        region.export.haruki_3d.staging_dir = "failing-work".to_string();
+        let config = AppConfig {
+            regions: BTreeMap::from([("jp".to_string(), region)]),
+            ..AppConfig::default()
+        };
+        spawn_haruki_3d_child_job(
+            jobs.clone(),
+            flags.clone(),
+            active.clone(),
+            Arc::new(config),
+            Uuid::new_v4(),
+            request("jp"),
+        )
+        .await;
+        let child = wait_for_child(&jobs).await;
+        assert_eq!(child.status, JobStatus::Failed);
+        assert!(active.read().await.is_empty());
+        assert!(!flags.read().await.contains_key(&child.id));
+    }
+}

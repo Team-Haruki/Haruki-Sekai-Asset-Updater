@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 use tempfile::tempdir;
 
-#[cfg(feature = "media-ffi")]
-use super::convert_wav_bytes_to_mp3_with_backend;
 use super::{
+    convert_hca_bytes_to_flac_with_backend, convert_hca_bytes_to_mp3_with_backend,
     convert_m2v_bytes_to_mp4_with_backend, convert_m2v_to_mp4_with_backend,
-    convert_usm_to_mp4_with_backend, FrameRate,
+    convert_usm_to_mp4_with_backend, convert_wav_bytes_to_flac_with_backend,
+    convert_wav_bytes_to_mp3_with_backend, convert_wav_to_flac_with_backend,
+    convert_wav_to_mp3_with_backend, FrameRate,
 };
 use crate::{MediaBackend, RetryOptions as RetryConfig};
 
@@ -215,6 +216,177 @@ fn auto_backend_falls_back_to_cli() {
     assert!(output.exists());
 }
 
+#[test]
+fn cli_audio_backends_cover_files_bytes_and_hca_inputs() {
+    let dir = tempdir().unwrap();
+    let wav = test_wav_bytes();
+    let wav_file = dir.path().join("input.wav");
+    fs::write(&wav_file, &wav).unwrap();
+    let ffmpeg = dir.path().join("fake_ffmpeg.sh");
+    write_executable_script(
+        &ffmpeg,
+        "#!/bin/sh\nset -eu\nout=\"\"\nfor arg in \"$@\"; do out=\"$arg\"; done\n: > \"$out\"\n",
+    );
+    let retry = RetryConfig {
+        attempts: 1,
+        initial_backoff_ms: 1,
+        max_backoff_ms: 1,
+    };
+    let ffmpeg = ffmpeg.to_string_lossy();
+
+    convert_wav_to_mp3_with_backend(
+        &wav_file,
+        &dir.path().join("file.mp3"),
+        &ffmpeg,
+        MediaBackend::Cli,
+        &retry,
+    )
+    .unwrap();
+    convert_wav_bytes_to_mp3_with_backend(
+        &wav,
+        &dir.path().join("bytes.mp3"),
+        &ffmpeg,
+        MediaBackend::Cli,
+        &retry,
+    )
+    .unwrap();
+    convert_wav_to_flac_with_backend(
+        &wav_file,
+        &dir.path().join("file.flac"),
+        &ffmpeg,
+        MediaBackend::Cli,
+        &retry,
+    )
+    .unwrap();
+    convert_wav_bytes_to_flac_with_backend(
+        &wav,
+        &dir.path().join("bytes.flac"),
+        &ffmpeg,
+        MediaBackend::Cli,
+        &retry,
+    )
+    .unwrap();
+
+    let hca = synthetic_hca();
+    convert_hca_bytes_to_mp3_with_backend(
+        &hca,
+        &dir.path().join("hca.mp3"),
+        &ffmpeg,
+        MediaBackend::Cli,
+        &retry,
+    )
+    .unwrap();
+    convert_hca_bytes_to_flac_with_backend(
+        &hca,
+        &dir.path().join("hca.flac"),
+        &ffmpeg,
+        MediaBackend::Cli,
+        &retry,
+    )
+    .unwrap();
+
+    for name in [
+        "file.mp3",
+        "bytes.mp3",
+        "file.flac",
+        "bytes.flac",
+        "hca.mp3",
+        "hca.flac",
+    ] {
+        assert!(dir.path().join(name).exists());
+    }
+}
+
+#[cfg(not(feature = "media-ffi"))]
+#[test]
+fn disabled_ffi_backend_reports_every_unsupported_conversion() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("input.bin");
+    fs::write(&input, b"input").unwrap();
+    let retry = RetryConfig {
+        attempts: 1,
+        initial_backoff_ms: 1,
+        max_backoff_ms: 1,
+    };
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    assert!(runtime
+        .block_on(convert_usm_to_mp4_with_backend(
+            &input,
+            &dir.path().join("usm.mp4"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &retry,
+        ))
+        .is_err());
+    assert!(runtime
+        .block_on(convert_m2v_to_mp4_with_backend(
+            &input,
+            &dir.path().join("m2v.mp4"),
+            false,
+            "ffmpeg",
+            MediaBackend::Ffi,
+            None,
+            &retry,
+        ))
+        .is_err());
+    assert!(runtime
+        .block_on(convert_m2v_bytes_to_mp4_with_backend(
+            b"m2v",
+            &dir.path().join("bytes.mp4"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            None,
+            &retry,
+        ))
+        .is_err());
+
+    let sync_results = [
+        convert_wav_to_mp3_with_backend(
+            &input,
+            &dir.path().join("wav.mp3"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &retry,
+        ),
+        convert_wav_bytes_to_mp3_with_backend(
+            b"wav",
+            &dir.path().join("bytes.mp3"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &retry,
+        ),
+        convert_hca_bytes_to_mp3_with_backend(
+            b"hca",
+            &dir.path().join("hca.mp3"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &retry,
+        ),
+        convert_wav_to_flac_with_backend(
+            &input,
+            &dir.path().join("wav.flac"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &retry,
+        ),
+        convert_wav_bytes_to_flac_with_backend(
+            b"wav",
+            &dir.path().join("bytes.flac"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &retry,
+        ),
+        convert_hca_bytes_to_flac_with_backend(
+            b"hca",
+            &dir.path().join("hca.flac"),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &retry,
+        ),
+    ];
+    assert!(sync_results.into_iter().all(|result| result.is_err()));
+}
+
 #[cfg(feature = "media-ffi")]
 #[test]
 fn ffi_usm_to_mp4_handles_real_sample_when_available() {
@@ -319,7 +491,6 @@ fn ffi_backend_transcodes_wav_bytes_to_mp3() {
     assert!(fs::metadata(output).unwrap().len() > 0);
 }
 
-#[cfg(feature = "media-ffi")]
 fn test_wav_bytes() -> Vec<u8> {
     let sample_rate = 44_100_u32;
     let channels = 1_u16;
@@ -350,4 +521,26 @@ fn test_wav_bytes() -> Vec<u8> {
         wav.extend_from_slice(&value.to_le_bytes());
     }
     wav
+}
+
+fn synthetic_hca() -> Vec<u8> {
+    let sample_rate = 44_100;
+    let samples = (0..4_096)
+        .map(|index| {
+            let time = index as f32 / sample_rate as f32;
+            (time * 440.0 * std::f32::consts::TAU).sin() * 0.25
+        })
+        .collect::<Vec<_>>();
+    let mut encoder = cridecoder::HcaEncoder::new(cridecoder::HcaEncoderConfig {
+        channels: 1,
+        sample_rate,
+        bitrate: 64_000,
+        ..cridecoder::HcaEncoderConfig::default()
+    })
+    .unwrap();
+    let mut encoded = Vec::new();
+    encoder
+        .encode(&samples, &mut std::io::Cursor::new(&mut encoded))
+        .unwrap();
+    encoded
 }

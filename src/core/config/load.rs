@@ -483,4 +483,72 @@ regions:
         restore_env("HARUKI_CONFIG_OPENDAL_SCHEME", old_scheme);
         restore_env("HARUKI_CONFIG_OPENDAL_ROOT", old_root);
     }
+
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn config_uri_parser_and_bootstrap_options_reject_invalid_inputs() {
+        for uri in [
+            "file:///tmp/config",
+            "opendal://missing-path",
+            "opendal:///path",
+            "opendal://fs/",
+        ] {
+            assert!(parse_config_storage_uri(uri).is_err(), "{uri}");
+        }
+        assert_eq!(
+            parse_config_storage_uri("opendal://named/a\\b.yaml").unwrap(),
+            ConfigStorageUri {
+                provider: "named".to_string(),
+                path: "a/b.yaml".to_string(),
+            }
+        );
+
+        let _env_lock = env_lock();
+        let old_scheme = std::env::var(CONFIG_OPENDAL_SCHEME_ENV).ok();
+        let old_root = std::env::var(CONFIG_OPENDAL_ROOT_ENV).ok();
+        std::env::remove_var(CONFIG_OPENDAL_SCHEME_ENV);
+        assert!(config_storage_provider_options().is_err());
+        std::env::set_var(CONFIG_OPENDAL_SCHEME_ENV, " FS ");
+        std::env::set_var(CONFIG_OPENDAL_ROOT_ENV, " /tmp/config-root ");
+        let (scheme, options) = config_storage_provider_options().unwrap();
+        assert_eq!(scheme, "fs");
+        assert_eq!(options["root"], "/tmp/config-root");
+        restore_env(CONFIG_OPENDAL_SCHEME_ENV, old_scheme);
+        restore_env(CONFIG_OPENDAL_ROOT_ENV, old_root);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn config_loaders_report_file_storage_utf8_and_yaml_errors() {
+        let _env_lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(AppConfig::load_from_path(dir.path().join("missing.yaml")).is_err());
+        let invalid_yaml = dir.path().join("invalid.yaml");
+        std::fs::write(&invalid_yaml, "config_version: [").unwrap();
+        assert!(AppConfig::load_from_path(&invalid_yaml).is_err());
+
+        let invalid_utf8 = dir.path().join("invalid-utf8.yaml");
+        std::fs::write(&invalid_utf8, [0xff, 0xfe]).unwrap();
+        let old_scheme = std::env::var(CONFIG_OPENDAL_SCHEME_ENV).ok();
+        let old_root = std::env::var(CONFIG_OPENDAL_ROOT_ENV).ok();
+        std::env::set_var(CONFIG_OPENDAL_SCHEME_ENV, "fs");
+        std::env::set_var(CONFIG_OPENDAL_ROOT_ENV, dir.path());
+        assert!(
+            AppConfig::load_from_opendal_uri("opendal://config/invalid-utf8.yaml")
+                .await
+                .is_err()
+        );
+        assert!(
+            AppConfig::load_from_opendal_uri("opendal://config/missing.yaml")
+                .await
+                .is_err()
+        );
+        restore_env(CONFIG_OPENDAL_SCHEME_ENV, old_scheme);
+        restore_env(CONFIG_OPENDAL_ROOT_ENV, old_root);
+
+        let candidates = candidate_paths();
+        assert!(candidates
+            .iter()
+            .any(|path| path.ends_with("haruki-asset-configs.yaml")));
+    }
 }

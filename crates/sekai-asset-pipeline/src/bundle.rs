@@ -294,4 +294,28 @@ mod tests {
             crate::ExportPipelineError::InvalidArtifactPath { .. }
         ));
     }
+
+    #[test]
+    fn artifact_manifest_handles_relative_empty_and_invalid_inputs() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("relative.txt"), b"relative").unwrap();
+        let manifest =
+            ArtifactManifest::from_files(dir.path(), &[std::path::PathBuf::from("relative.txt")])
+                .unwrap();
+        assert_eq!(manifest.artifacts[0].relative_path, "relative.txt");
+        assert!(ArtifactManifest::from_files(dir.path(), &[])
+            .unwrap()
+            .artifacts
+            .is_empty());
+        assert!(ArtifactManifest::from_files(dir.path(), &[dir.path().to_path_buf()]).is_err());
+        assert!(ArtifactManifest::from_files(
+            &dir.path().join("missing-root"),
+            &[std::path::PathBuf::from("missing")],
+        )
+        .is_err());
+        assert!(
+            ArtifactManifest::from_files(dir.path(), &[std::path::PathBuf::from("missing")],)
+                .is_err()
+        );
+    }
 }

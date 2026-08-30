@@ -1242,4 +1242,106 @@ haruki_3d:
         assert!(export.haruki_3d.cleanup_work_dir_after_success);
         assert!(!export.haruki_3d.cleanup_work_dir_after_failure);
     }
+
+    #[test]
+    fn string_enums_accept_aliases_and_reject_unknown_values() {
+        for value in ["auto", " AUTO "] {
+            assert_eq!(
+                value.parse::<AssetHttpVersion>().unwrap(),
+                AssetHttpVersion::Auto
+            );
+        }
+        for value in ["http1", "http1_only", "http/1", "http/1.1"] {
+            assert_eq!(
+                value.parse::<AssetHttpVersion>().unwrap(),
+                AssetHttpVersion::Http1
+            );
+        }
+        assert!("http2".parse::<AssetHttpVersion>().is_err());
+
+        assert_eq!("rust".parse::<ImageBackend>().unwrap(), ImageBackend::Rust);
+        assert!("native".parse::<ImageBackend>().is_err());
+
+        for (value, expected) in [
+            ("fast", ImagePngCompression::Fast),
+            ("default", ImagePngCompression::Default),
+            ("best", ImagePngCompression::Best),
+        ] {
+            assert_eq!(value.parse::<ImagePngCompression>().unwrap(), expected);
+        }
+        assert!("slow".parse::<ImagePngCompression>().is_err());
+
+        for (value, expected) in [
+            ("png", ImageOutputFormat::Png),
+            ("jpg", ImageOutputFormat::Jpg),
+            ("jpeg", ImageOutputFormat::Jpg),
+            ("webp", ImageOutputFormat::Webp),
+        ] {
+            assert_eq!(value.parse::<ImageOutputFormat>().unwrap(), expected);
+        }
+        assert!("bmp".parse::<ImageOutputFormat>().is_err());
+
+        assert_eq!(
+            "m2v".parse::<VideoOutputFormat>().unwrap(),
+            VideoOutputFormat::M2v
+        );
+        assert_eq!(
+            "mp4".parse::<VideoOutputFormat>().unwrap(),
+            VideoOutputFormat::Mp4
+        );
+        assert!("webm".parse::<VideoOutputFormat>().is_err());
+
+        assert_eq!(
+            "wav".parse::<AudioOutputFormat>().unwrap(),
+            AudioOutputFormat::Wav
+        );
+        assert_eq!(
+            "flac".parse::<AudioOutputFormat>().unwrap(),
+            AudioOutputFormat::Flac
+        );
+        assert_eq!(
+            "mp3".parse::<AudioOutputFormat>().unwrap(),
+            AudioOutputFormat::Mp3
+        );
+        assert!("aac".parse::<AudioOutputFormat>().is_err());
+
+        assert_eq!("auto".parse::<MediaBackend>().unwrap(), MediaBackend::Auto);
+        assert_eq!("ffi".parse::<MediaBackend>().unwrap(), MediaBackend::Ffi);
+        assert_eq!("cli".parse::<MediaBackend>().unwrap(), MediaBackend::Cli);
+        assert!("disabled".parse::<MediaBackend>().is_err());
+    }
+
+    #[test]
+    fn storage_options_accept_scalars_and_reject_nested_values() {
+        let provider: StorageProviderConfig = yaml_serde::from_str(
+            r#"
+options:
+  empty:
+  enabled: true
+  retries: 3
+  label: assets
+"#,
+        )
+        .unwrap();
+        assert_eq!(provider.options.get("empty").map(String::as_str), Some(""));
+        assert_eq!(
+            provider.options.get("enabled").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            provider.options.get("retries").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            provider.options.get("label").map(String::as_str),
+            Some("assets")
+        );
+
+        for yaml in [
+            "options:\n  nested: [one, two]\n",
+            "options:\n  nested:\n    key: value\n",
+        ] {
+            assert!(yaml_serde::from_str::<StorageProviderConfig>(yaml).is_err());
+        }
+    }
 }

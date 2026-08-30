@@ -159,7 +159,7 @@ impl AssetExecutionContext {
 #[cfg(test)]
 mod tests {
     use crate::core::pipeline::prepare_asset_run;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::path::Path;
 
     use tempfile::tempdir;
@@ -168,12 +168,14 @@ mod tests {
     use crate::core::download_records::DownloadRecord;
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
-    use super::super::model::AssetExecutionContext;
+    use super::super::model::{AssetExecutionContext, DownloadTask, Haruki3dExportPlan};
     use super::exporter::{exporter_metric_lines, missing_haruki_3d_bundle_paths};
     use super::tasks::bundle_dependency_closure;
 
     use super::super::test_support::test_region;
-    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
+    use sekai_asset_pipeline::{
+        raw_bundle_output_path, AssetBundleDetail, AssetBundleInfo, AssetCategory, ResolvedBundle,
+    };
 
     #[test]
     fn haruki_3d_work_root_is_disabled_by_default() {
@@ -549,5 +551,168 @@ HARUKI_3D_MISSING_BUNDLE=../escape\nHARUKI_3D_MISSING_BUNDLE=live_pv/model/body/
             missing_haruki_3d_bundle_paths(stderr),
             vec!["live_pv/model/body/0001".to_string()]
         );
+    }
+
+    #[test]
+    fn staging_lifecycle_verifies_placeholders_records_and_cleanup() {
+        let temp = tempdir().unwrap();
+        let mut region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: "https://example.com/info".to_string(),
+            asset_bundle_url_template: "https://example.com/{bundle_path}".to_string(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::new(),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        region.export.haruki_3d.enabled = true;
+        region.export.haruki_3d.cleanup_work_dir_after_failure = true;
+        region.export.haruki_3d.cleanup_work_dir_after_success = true;
+        let config = AppConfig {
+            regions: BTreeMap::from([("jp".to_string(), region.clone())]),
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
+        let task = |path: &str, revision: &str| DownloadTask {
+            bundle: ResolvedBundle {
+                bundle_path: path.to_string(),
+                download_path: path.to_string(),
+                revision: revision.to_string(),
+                category: AssetCategory::OnDemand,
+                file_size: 4,
+            },
+            priority: 0,
+            export_payloads: false,
+            stage_haruki_3d: true,
+        };
+        let body = task("live/body", "body-v2");
+        let material = task("common/material", "material-v1");
+        let tasks = vec![body.clone(), material.clone()];
+        let record_path = temp.path().join("downloaded.json");
+        let asset_root = temp.path().join("run/AssetBundles");
+        let work_run_dir = temp.path().join("run");
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([
+                (
+                    "live/body".to_string(),
+                    AssetBundleDetail {
+                        bundle_name: "live/body".to_string(),
+                        cache_file_name: String::new(),
+                        cache_directory_name: String::new(),
+                        hash: "body-v2".to_string(),
+                        category: AssetCategory::OnDemand,
+                        crc: 0,
+                        file_size: 4,
+                        dependencies: vec!["common/material".to_string()],
+                        paths: vec![],
+                        is_builtin: false,
+                        is_relocate: None,
+                        md5_hash: None,
+                        download_path: None,
+                    },
+                ),
+                (
+                    "common/material".to_string(),
+                    AssetBundleDetail {
+                        bundle_name: "common/material".to_string(),
+                        cache_file_name: String::new(),
+                        cache_directory_name: String::new(),
+                        hash: "material-v1".to_string(),
+                        category: AssetCategory::OnDemand,
+                        crc: 0,
+                        file_size: 4,
+                        dependencies: vec![],
+                        paths: vec![],
+                        is_builtin: false,
+                        is_relocate: None,
+                        md5_hash: None,
+                        download_path: None,
+                    },
+                ),
+            ]),
+        };
+        let mut plan = Haruki3dExportPlan {
+            config: region.export.haruki_3d.clone(),
+            info,
+            tasks: tasks.clone(),
+            pending_tasks: vec![body.clone()],
+            pending_paths: HashSet::from([body.bundle_path.clone()]),
+            downloaded_assets: DownloadRecord::from([
+                (body.bundle_path.clone(), "body-v1".to_string()),
+                (material.bundle_path.clone(), material.revision.clone()),
+            ]),
+            record_path: record_path.clone(),
+            dependency_index_path: temp.path().join("dependencies.json"),
+            asset_root: asset_root.clone(),
+            work_run_dir: work_run_dir.clone(),
+        };
+
+        assert_eq!(
+            AssetExecutionContext::pending_haruki_3d_tasks(&tasks, &plan.downloaded_assets, true)
+                .len(),
+            1
+        );
+        assert_eq!(
+            AssetExecutionContext::pending_haruki_3d_tasks(&tasks, &plan.downloaded_assets, false)
+                .len(),
+            2
+        );
+
+        let source = temp.path().join("source.bundle");
+        std::fs::write(&source, b"body").unwrap();
+        let body_path = raw_bundle_output_path(&asset_root, &body.bundle_path).unwrap();
+        AssetExecutionContext::copy_haruki_3d_work_bundle(&source, &body_path).unwrap();
+        let (progress, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        executor
+            .prepare_haruki_3d_staging(&plan, &Some(progress), &None)
+            .unwrap();
+        assert!(body_path.exists());
+        assert!(raw_bundle_output_path(&asset_root, &material.bundle_path)
+            .unwrap()
+            .exists());
+        assert!(asset_root.join(".haruki-sparse-input").exists());
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_ok());
+
+        plan.pending_tasks = tasks.clone();
+        plan.pending_paths = tasks.iter().map(|task| task.bundle_path.clone()).collect();
+        executor.update_haruki_3d_sparse_marker(&plan).unwrap();
+        assert!(!asset_root.join(".haruki-sparse-input").exists());
+
+        plan.downloaded_assets
+            .insert(body.bundle_path.clone(), body.revision.clone());
+        crate::core::download_records::save_download_record(&record_path, &plan.downloaded_assets)
+            .unwrap();
+        executor
+            .invalidate_missing_haruki_3d_bundles(&mut plan, "HARUKI_3D_MISSING_BUNDLE=live/body")
+            .unwrap();
+        assert!(!plan.downloaded_assets.contains_key("live/body"));
+        assert!(!plan.downloaded_assets.contains_key("common/material"));
+
+        std::fs::create_dir_all(&work_run_dir).unwrap();
+        std::fs::write(work_run_dir.join("temporary"), b"x").unwrap();
+        executor.cleanup_failed_haruki_3d_export(&plan).unwrap();
+        assert!(!work_run_dir.exists());
+        AssetExecutionContext::remove_haruki_3d_work_dir(&work_run_dir).unwrap();
+
+        std::fs::create_dir_all(&work_run_dir).unwrap();
+        AssetExecutionContext::finish_haruki_3d_export_plan(&plan).unwrap();
+        assert!(!work_run_dir.exists());
+        let completed = crate::core::download_records::load_download_record(&record_path).unwrap();
+        assert_eq!(completed["live/body"], "body-v2");
+        assert_eq!(completed["common/material"], "material-v1");
     }
 }

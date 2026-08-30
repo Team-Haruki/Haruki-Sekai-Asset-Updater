@@ -448,3 +448,154 @@ pub(super) fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) -> Result<(), ExportPip
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn task_runner_covers_empty_single_error_and_worker_panics() {
+        assert!(run_tasks::<u8, u8, _>(Vec::new(), 0, Ok)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            run_tasks(vec![2_u8], 0, |value| Ok(value + 1)).unwrap(),
+            vec![3]
+        );
+
+        let error = run_tasks(vec![1_u8, 2], 1, |_| {
+            Err::<u8, _>(ExportPipelineError::Media {
+                message: "expected".to_string(),
+            })
+        })
+        .unwrap_err();
+        assert!(matches!(error, ExportPipelineError::Media { .. }));
+
+        for use_string in [false, true] {
+            let error = run_tasks(vec![1_u8, 2], 1, move |_| -> Result<u8, _> {
+                if use_string {
+                    std::panic::panic_any("string panic".to_string());
+                }
+                std::panic::panic_any(7_u8);
+            })
+            .unwrap_err();
+            let ExportPipelineError::WorkerPanic { message, .. } = error else {
+                panic!("expected worker panic");
+            };
+            assert_eq!(
+                message,
+                if use_string {
+                    "string panic"
+                } else {
+                    "unknown worker panic"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn usm_input_accessors_and_cleanup_cover_path_and_memory_inputs() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("clip.usm");
+        std::fs::write(&path, b"one").unwrap();
+        let input = UsmProcessingInput::Path(path.clone());
+        assert_eq!(input.path(), Some(path.as_path()));
+        assert_eq!(input.output_dir(), temp.path());
+        assert_eq!(input.output_name().unwrap(), "clip");
+        input.cleanup_sources().unwrap();
+        assert!(!path.exists());
+
+        let source = temp.path().join("segment.usm");
+        std::fs::write(&source, b"two").unwrap();
+        let input = UsmProcessingInput::Bytes {
+            output_dir: temp.path().to_path_buf(),
+            output_name: "joined".to_string(),
+            fallback_name: "joined.usm".to_string(),
+            data: b"joined".to_vec(),
+            source_files: vec![source.clone()],
+        };
+        assert_eq!(input.path(), None);
+        assert_eq!(input.output_dir(), temp.path());
+        assert_eq!(input.output_name().unwrap(), "joined");
+        assert_eq!(input.output_sort_key(), temp.path().join("joined.usm"));
+        input.cleanup_sources().unwrap();
+        assert!(!source.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let invalid = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+            assert!(UsmProcessingInput::Path(invalid).output_name().is_err());
+        }
+    }
+
+    #[test]
+    fn usm_file_helpers_merge_inputs_and_report_io_errors() {
+        let temp = tempdir().unwrap();
+        assert!(read_usm_segment_files_to_memory(
+            temp.path(),
+            "missing",
+            &[temp.path().join("missing-1.usm")],
+        )
+        .is_err());
+
+        let path = temp.path().join("one.usm");
+        let memory_source = temp.path().join("two.usm");
+        std::fs::write(&path, b"one").unwrap();
+        std::fs::write(&memory_source, b"two").unwrap();
+        let merged = merge_usm_inputs(
+            temp.path(),
+            vec![
+                UsmProcessingInput::Path(path.clone()),
+                UsmProcessingInput::Bytes {
+                    output_dir: temp.path().to_path_buf(),
+                    output_name: "memory".to_string(),
+                    fallback_name: "memory.usm".to_string(),
+                    data: b"two".to_vec(),
+                    source_files: vec![memory_source.clone()],
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&merged).unwrap(), b"onetwo");
+        assert!(!path.exists());
+        assert!(!memory_source.exists());
+
+        assert_eq!(
+            merge_usm_inputs(temp.path(), vec![UsmProcessingInput::Path(merged.clone())]).unwrap(),
+            merged
+        );
+        assert!(merge_usm_inputs(
+            temp.path(),
+            vec![UsmProcessingInput::Path(temp.path().join("absent.usm"))]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn file_scanning_and_extension_filters_cover_recursive_and_scoped_modes() {
+        let temp = tempdir().unwrap();
+        let nested = temp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let upper = nested.join("movie.USM");
+        let other = nested.join("note.txt");
+        std::fs::write(&upper, b"video").unwrap();
+        std::fs::write(&other, b"text").unwrap();
+
+        assert_eq!(
+            find_files_by_extension(temp.path(), "usm").unwrap(),
+            vec![upper.clone()]
+        );
+        assert_eq!(
+            post_process_files_by_extension(temp.path(), false, &[], "USM").unwrap(),
+            vec![upper.clone()]
+        );
+        assert_eq!(
+            post_process_files_by_extension(temp.path(), true, &[upper.clone(), other], "usm")
+                .unwrap(),
+            vec![upper]
+        );
+        assert!(scan_all_files(&temp.path().join("missing")).is_err());
+    }
+}

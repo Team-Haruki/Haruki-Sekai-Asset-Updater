@@ -31,6 +31,14 @@ pub(super) fn write_payload_bundle(
     Ok(written_files)
 }
 
+#[cfg(test)]
+pub(crate) fn write_payload_bundle_for_test(
+    target: &Path,
+    payload: &[u8],
+) -> Result<Vec<PathBuf>, ExportPipelineError> {
+    write_payload_bundle(target, payload)
+}
+
 pub(super) fn payload_bundle_entry_target(target: &Path, entry_name: &str) -> PathBuf {
     let parent = target.parent().unwrap_or_else(|| Path::new(""));
     let stem = target

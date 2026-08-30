@@ -495,4 +495,120 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn validates_names_auth_crypto_filters_formats_and_haruki_3d_fields() {
+        let mut config = AppConfig::default();
+        config
+            .regions
+            .insert("JP".to_string(), RegionConfig::default());
+        assert!(matches!(
+            validate_region_names(&config),
+            Err(ConfigError::InvalidRegionName(name)) if name == "JP"
+        ));
+
+        assert!(validate_auth_config(&AuthConfig::default()).is_ok());
+        let mut auth = AuthConfig {
+            enabled: true,
+            ..AuthConfig::default()
+        };
+        assert!(validate_auth_config(&auth).is_err());
+        auth.bearer_token = Some("token".to_string());
+        assert!(validate_auth_config(&auth).is_ok());
+        auth.bearer_token = None;
+        auth.user_agent_prefix = Some("Haruki".to_string());
+        assert!(validate_auth_config(&auth).is_ok());
+
+        assert!(validate_aes_hex("key", "not-hex", &[16]).is_err());
+        assert!(validate_aes_hex("key", "00", &[16]).is_err());
+        assert!(validate_aes_hex("key", &"00".repeat(16), &[16]).is_ok());
+        let crypto = CryptoConfig {
+            aes_key_hex: Some("00".repeat(32)),
+            aes_iv_hex: Some("00".repeat(16)),
+        };
+        assert!(validate_region_crypto("jp", &crypto).is_ok());
+
+        let mut region = RegionConfig {
+            enabled: true,
+            ..RegionConfig::default()
+        };
+        region.filters.start_app = vec!["[".to_string()];
+        assert!(validate_region_filter_regexes("jp", &region).is_err());
+        region.filters.start_app = vec!["^start/".to_string()];
+        region.filters.on_demand = vec!["^ondemand/".to_string()];
+        region.filters.skip = vec!["skip$".to_string()];
+        region.filters.priority = vec!["priority".to_string()];
+        region.export.raw_bundles = Some(super::super::schema::RawBundleExportConfig {
+            output_dir: None,
+            include: vec!["^raw/".to_string()],
+            exclude: vec!["tmp$".to_string()],
+        });
+        assert!(validate_region_filter_regexes("jp", &region).is_ok());
+        region.export.raw_bundles.as_mut().unwrap().exclude = vec!["(".to_string()];
+        assert!(validate_region_filter_regexes("jp", &region).is_err());
+
+        assert!(
+            validate_image_export_config("jp", &ImageExportConfig { formats: vec![] }).is_err()
+        );
+        assert!(validate_video_export_config(
+            "jp",
+            &VideoExportConfig {
+                formats: vec![],
+                direct_mp4: false,
+            }
+        )
+        .is_err());
+        assert!(
+            validate_audio_export_config("jp", &AudioExportConfig { formats: vec![] }).is_err()
+        );
+
+        let mut haruki = Haruki3dExportConfig {
+            enabled: true,
+            ..Haruki3dExportConfig::default()
+        };
+        for field in ["exporter_path", "master_dir", "output_dir", "manifest_file"] {
+            haruki.exporter_path = "/exporter".to_string();
+            haruki.master_dir = "/master".to_string();
+            haruki.output_dir = "/out".to_string();
+            haruki.manifest_file = "/out/manifest".to_string();
+            match field {
+                "exporter_path" => haruki.exporter_path.clear(),
+                "master_dir" => haruki.master_dir.clear(),
+                "output_dir" => haruki.output_dir.clear(),
+                "manifest_file" => haruki.manifest_file.clear(),
+                _ => unreachable!(),
+            }
+            assert!(validate_haruki_3d_export_config("jp", &haruki).is_err());
+        }
+        haruki.exporter_path = "/exporter".to_string();
+        haruki.master_dir = "/master".to_string();
+        haruki.output_dir = "/out".to_string();
+        haruki.manifest_file = "/out/manifest".to_string();
+        assert!(validate_haruki_3d_export_config("jp", &haruki).is_err());
+        haruki.work_dir = "/work".to_string();
+        assert!(validate_haruki_3d_export_config("jp", &haruki).is_err());
+        haruki.include = vec!["^live/".to_string()];
+        haruki.role_character3d_ids = vec![-1];
+        assert!(validate_haruki_3d_export_config("jp", &haruki).is_err());
+        haruki.role_character3d_ids = vec![1];
+        assert!(validate_haruki_3d_export_config("jp", &haruki).is_ok());
+
+        assert!(validate_asset_studio_read_kinds(&BTreeMap::from([(
+            "".to_string(),
+            "auto".to_string(),
+        )]))
+        .is_err());
+        assert_eq!(
+            normalize_asset_studio_image_format(" RAW_RGBA ").unwrap(),
+            "raw_rgba"
+        );
+        warn_media_fallback_backend_options(&MediaBackendConfig {
+            backend: MediaBackend::Cli,
+            ..MediaBackendConfig::default()
+        });
+        warn_media_fallback_backend_options(&MediaBackendConfig {
+            backend: MediaBackend::Auto,
+            ..MediaBackendConfig::default()
+        });
+    }
 }

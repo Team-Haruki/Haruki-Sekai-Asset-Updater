@@ -9,7 +9,10 @@ use tempfile::tempdir;
 
 use crate::{ImageEncodingOptions as ImageBackendConfig, ImageFormat as ImageOutputFormat};
 
-use super::super::payload::bundle::{parse_payload_bundle, parse_payload_bundle_borrowed};
+use super::super::payload::bundle::{
+    parse_payload_bundle, parse_payload_bundle_borrowed, parse_payload_bundle_shared,
+    write_payload_bundle_for_test,
+};
 use super::super::payload::dedup::payload_signature;
 use super::super::payload::image_files::{
     write_native_image_payload_final_files, write_native_image_payload_final_files_with_backend,
@@ -1256,6 +1259,162 @@ fn native_payload_bundle_borrowed_parser_reuses_payload_slices() {
     assert_eq!(entries[0].0, "asset.bin");
     assert_eq!(entries[0].1, b"data");
     assert_eq!(entries[0].1.as_ptr(), payload[data_start..].as_ptr());
+}
+
+#[test]
+fn native_payload_bundle_shared_parser_and_writer_preserve_entry_bytes() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(super::super::types::UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC);
+    payload.extend_from_slice(&2_u32.to_le_bytes());
+    for (name, data) in [
+        ("first.bin", b"one".as_slice()),
+        ("nested/second.bin", b"two".as_slice()),
+    ] {
+        payload.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        payload.extend_from_slice(name.as_bytes());
+    }
+    payload.extend_from_slice(b"onetwo");
+
+    let shared = bytes::Bytes::from(payload.clone());
+    let entries = parse_payload_bundle_shared(&shared).unwrap();
+    assert_eq!(
+        entries[0],
+        ("first.bin".to_string(), bytes::Bytes::from_static(b"one"))
+    );
+    assert_eq!(entries[1].1, bytes::Bytes::from_static(b"two"));
+
+    let temp = tempdir().unwrap();
+    let target = temp.path().join("container.bundle");
+    let written = write_payload_bundle_for_test(&target, &payload).unwrap();
+    assert_eq!(written.len(), 2);
+    assert_eq!(
+        fs::read(temp.path().join("container/first.bin")).unwrap(),
+        b"one"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("container/nested/second.bin")).unwrap(),
+        b"two"
+    );
+}
+
+#[test]
+fn native_payload_bundle_parser_rejects_every_malformed_header_and_entry_shape() {
+    use super::super::types::{
+        UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN,
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC, UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+    };
+
+    assert!(parse_payload_bundle(b"bad").is_err());
+    let mut truncated_legacy = UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC.to_vec();
+    truncated_legacy.extend_from_slice(&1_u32.to_le_bytes());
+    assert!(parse_payload_bundle(&truncated_legacy).is_err());
+
+    for (name, data_len, data) in [
+        (b"x".as_slice(), 1_u64, b"".as_slice()),
+        (&[0xff], 0_u64, b"".as_slice()),
+    ] {
+        let mut malformed = UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC.to_vec();
+        malformed.extend_from_slice(&1_u32.to_le_bytes());
+        malformed.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        malformed.extend_from_slice(&data_len.to_le_bytes());
+        malformed.extend_from_slice(name);
+        malformed.extend_from_slice(data);
+        assert!(parse_payload_bundle(&malformed).is_err());
+    }
+    let mut truncated_grouped_name = UNITY_ENGINE_PAYLOAD_BUNDLE_MAGIC.to_vec();
+    truncated_grouped_name.extend_from_slice(&1_u32.to_le_bytes());
+    truncated_grouped_name.extend_from_slice(&5_u32.to_le_bytes());
+    truncated_grouped_name.extend_from_slice(&0_u64.to_le_bytes());
+    truncated_grouped_name.extend_from_slice(b"x");
+    assert!(parse_payload_bundle(&truncated_grouped_name).is_err());
+
+    let v2 = |version: u16, header_len: u16, expected: u64, tail: &[u8]| {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&UNITY_ENGINE_PAYLOAD_BUNDLE_V2_MAGIC.to_le_bytes());
+        payload.extend_from_slice(&version.to_le_bytes());
+        payload.extend_from_slice(&header_len.to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&expected.to_le_bytes());
+        payload.extend_from_slice(tail);
+        payload
+    };
+    assert!(parse_payload_bundle(&v2(
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION + 1,
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16,
+        0,
+        &[],
+    ))
+    .is_err());
+    assert!(parse_payload_bundle(&v2(UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION, 1, 0, &[],)).is_err());
+
+    let mut truncated_name = Vec::new();
+    truncated_name.extend_from_slice(&5_u32.to_le_bytes());
+    truncated_name.extend_from_slice(&1_u64.to_le_bytes());
+    truncated_name.extend_from_slice(b"x");
+    assert!(parse_payload_bundle(&v2(
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16,
+        1,
+        &truncated_name,
+    ))
+    .is_err());
+
+    let mut invalid_utf8 = Vec::new();
+    invalid_utf8.extend_from_slice(&1_u32.to_le_bytes());
+    invalid_utf8.extend_from_slice(&1_u64.to_le_bytes());
+    invalid_utf8.push(0xff);
+    invalid_utf8.push(1);
+    assert!(parse_payload_bundle(&v2(
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16,
+        1,
+        &invalid_utf8,
+    ))
+    .is_err());
+
+    let mut truncated_data = Vec::new();
+    truncated_data.extend_from_slice(&1_u32.to_le_bytes());
+    truncated_data.extend_from_slice(&3_u64.to_le_bytes());
+    truncated_data.extend_from_slice(b"x1");
+    assert!(parse_payload_bundle(&v2(
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16,
+        3,
+        &truncated_data,
+    ))
+    .is_err());
+
+    let mut valid_entry = Vec::new();
+    valid_entry.extend_from_slice(&1_u32.to_le_bytes());
+    valid_entry.extend_from_slice(&1_u64.to_le_bytes());
+    valid_entry.extend_from_slice(b"xd");
+    let mut trailing = v2(
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16,
+        1,
+        &valid_entry,
+    );
+    trailing.push(0);
+    assert!(parse_payload_bundle(&trailing).is_err());
+    assert!(parse_payload_bundle(&v2(
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+        UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16,
+        2,
+        &valid_entry,
+    ))
+    .is_err());
+
+    for length in [4, 5, 7, 11, 19] {
+        let mut truncated = v2(
+            UNITY_ENGINE_PAYLOAD_BUNDLE_V2_VERSION,
+            UNITY_ENGINE_PAYLOAD_BUNDLE_V2_HEADER_LEN as u16,
+            0,
+            &[],
+        );
+        truncated.truncate(length);
+        assert!(parse_payload_bundle(&truncated).is_err());
+    }
 }
 
 #[test]

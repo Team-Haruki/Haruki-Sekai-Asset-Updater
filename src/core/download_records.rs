@@ -160,6 +160,20 @@ mod tests {
         assert_eq!(loaded, record);
     }
 
+    #[test]
+    fn corrupt_and_unreadable_local_records_are_handled_explicitly() {
+        let dir = tempfile::tempdir().unwrap();
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, b"{truncated").unwrap();
+        assert!(load_download_record(&corrupt).unwrap().is_empty());
+        assert!(!corrupt.exists());
+        assert!(dir.path().join("corrupt.json.corrupt").exists());
+
+        assert!(super::parse_download_record("bad.json", b"not-json").is_err());
+        assert!(load_download_record(dir.path()).is_err());
+        assert!(save_download_record(dir.path(), &BTreeMap::new()).is_err());
+    }
+
     #[tokio::test]
     async fn storage_round_trip_persists_json_map() {
         opendal::init_default_registry();
@@ -194,5 +208,22 @@ mod tests {
                 .unwrap();
 
         assert_eq!(loaded, record);
+
+        operator.write("bad.json", "not-json").await.unwrap();
+        assert!(
+            load_download_record_from_storage("local", &operator, "bad.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            load_download_record_from_storage("local", &operator, "state")
+                .await
+                .is_err()
+        );
+        assert!(
+            save_download_record_to_storage("local", &operator, "", &record)
+                .await
+                .is_err()
+        );
     }
 }

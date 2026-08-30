@@ -419,6 +419,73 @@ pub(super) fn sum_process_tree_cpu_percent(root_pid: u32, ps_output: &str) -> f6
     total
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn async_cpu_acquire_and_limiter_cache_release_permits() {
+        let first = cpu_budget_limiter(0);
+        let second = cpu_budget_limiter(1);
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let acquired = acquire_cpu_budget_permit(31_337).await.unwrap();
+        assert!(acquired.wait_ms < 10_000);
+        drop(acquired.permit);
+    }
+
+    #[test]
+    fn disabled_and_oversized_image_limits_do_not_deadlock() {
+        let disabled = acquire_image_memory_permit_blocking(0, usize::MAX);
+        assert!(disabled.limiter.is_none());
+        drop(disabled);
+
+        let oversized = acquire_image_memory_permit_blocking(17, usize::MAX);
+        assert_eq!(oversized.bytes, 17);
+        assert_eq!(
+            *oversized
+                .limiter
+                .as_ref()
+                .unwrap()
+                .active_bytes
+                .lock()
+                .unwrap(),
+            17
+        );
+        drop(oversized);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cpu_sampling_caches_results_and_process_scan_returns_a_number() {
+        let settings = CpuThrottleSettings {
+            enabled: true,
+            target_percent: f64::INFINITY,
+            sample_ms: 60_000,
+        };
+        let Ok(first) = sample_process_tree_cpu_percent(&settings) else {
+            return;
+        };
+        let second = sample_process_tree_cpu_percent(&settings).unwrap();
+        assert_eq!(first, second);
+        if let Ok(current) = current_process_tree_cpu_percent() {
+            assert!(current.is_finite());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_tree_parser_ignores_malformed_rows_and_cycles() {
+        let output = "\
+            broken\n\
+            10 nope 5.0\n\
+            10 1 nope\n\
+            10 11 2.5\n\
+            11 10 3.5\n";
+        assert_eq!(sum_process_tree_cpu_percent(10, output), 6.0);
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod limits_tests {
     use super::{parse_linux_proc_stat, sum_process_tree_cpu_ticks};

@@ -427,6 +427,7 @@ impl AssetExecutionContext {
 mod tests {
     use crate::core::pipeline::prepare_asset_run;
     use std::collections::{BTreeMap, HashMap};
+    use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
 
@@ -439,12 +440,69 @@ mod tests {
         RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
     };
 
+    use crate::core::download_records::DownloadRecord;
+    use crate::core::errors::AssetExecutionError;
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
 
-    use super::super::model::AssetExecutionContext;
+    use super::super::model::{AssetExecutionContext, BundleWritePlan, DownloadTask};
+    use super::super::progress::ExecutionProgressUpdate;
 
     use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
-    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
+    use sekai_asset_pipeline::{
+        AssetBundleDetail, AssetBundleInfo, AssetCategory, NativeSemanticExportPathRegistry,
+        ResolvedBundle,
+    };
+
+    fn local_context(
+        save_dir: Option<String>,
+        raw_bundle: bool,
+    ) -> (AppConfig, AssetExecutionContext) {
+        let mut region =
+            super::super::test_support::test_region(RegionProviderConfig::ColorfulPalette {
+                asset_info_url_template:
+                    "http://127.0.0.1/info/{env}/{hash}/{asset_version}/{asset_hash}".to_string(),
+                asset_bundle_url_template: "http://127.0.0.1/bundle/{bundle_path}".to_string(),
+                profile: "production".to_string(),
+                profile_hashes: BTreeMap::from([("production".to_string(), "profile".to_string())]),
+                required_cookies: false,
+                cookie_bootstrap_url: None,
+            });
+        region.paths.asset_save_dir = save_dir;
+        region.export.raw_bundles = raw_bundle.then_some(RawBundleExportConfig {
+            output_dir: None,
+            include: vec!["^start/".to_string()],
+            exclude: Vec::new(),
+        });
+        let config = AppConfig {
+            regions: BTreeMap::from([("jp".to_string(), region)]),
+            ..AppConfig::default()
+        };
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let prepared = prepare_asset_run(&config, &request).unwrap();
+        let context = AssetExecutionContext::new(&config, &prepared, &request).unwrap();
+        (config, context)
+    }
+
+    fn task(path: &str) -> DownloadTask {
+        DownloadTask {
+            bundle: ResolvedBundle {
+                bundle_path: path.to_string(),
+                download_path: path.to_string(),
+                revision: "revision".to_string(),
+                category: AssetCategory::StartApp,
+                file_size: 7,
+            },
+            priority: 0,
+            export_payloads: false,
+            stage_haruki_3d: true,
+        }
+    }
 
     #[tokio::test]
     async fn prefetch_can_fetch_asset_info_and_download_bundle() {
@@ -596,5 +654,159 @@ mod tests {
             b"BUNDLE"
         );
         assert!(!record_file.exists());
+    }
+
+    #[tokio::test]
+    async fn prefetch_result_accounts_for_success_failure_cancel_and_panics() {
+        let (_, context) = local_context(Some("unused".to_string()), false);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = Some(tx);
+        let mut completed = 0;
+        let mut failed = 0;
+
+        context
+            .handle_prefetch_result(
+                Ok(("start/ok".to_string(), Ok(()))),
+                &progress,
+                &mut completed,
+                &mut failed,
+            )
+            .unwrap();
+        assert_eq!(completed, 1);
+        assert!(matches!(
+            rx.recv().await,
+            Some(ExecutionProgressUpdate::BundleCompleted { .. })
+        ));
+
+        context
+            .handle_prefetch_result(
+                Ok((
+                    "start/fail".to_string(),
+                    Err(AssetExecutionError::MissingAssetSaveDir {
+                        region: "jp".to_string(),
+                    }),
+                )),
+                &progress,
+                &mut completed,
+                &mut failed,
+            )
+            .unwrap();
+        assert_eq!(failed, 1);
+        assert!(matches!(
+            rx.recv().await,
+            Some(ExecutionProgressUpdate::BundleFailed { .. })
+        ));
+
+        assert!(matches!(
+            context.handle_prefetch_result(
+                Ok((
+                    "start/cancel".to_string(),
+                    Err(AssetExecutionError::Cancelled)
+                )),
+                &progress,
+                &mut completed,
+                &mut failed,
+            ),
+            Err(AssetExecutionError::Cancelled)
+        ));
+
+        let handle = tokio::spawn(std::future::pending::<(
+            String,
+            Result<(), AssetExecutionError>,
+        )>());
+        handle.abort();
+        let join_error = handle.await;
+        context
+            .handle_prefetch_result(join_error, &progress, &mut completed, &mut failed)
+            .unwrap();
+        assert_eq!(failed, 2);
+    }
+
+    #[tokio::test]
+    async fn bundle_write_plan_persists_both_targets_and_hashes_staged_payload() {
+        let temp = tempdir().unwrap();
+        let save = temp.path().join("save");
+        let work = temp.path().join("work");
+        let (_, context) = local_context(Some(save.to_string_lossy().into_owned()), true);
+        let bundle_task = task("start/a");
+        let index = Arc::new(Mutex::new(DownloadRecord::new()));
+
+        let plan = context
+            .bundle_write_plan(
+                &bundle_task,
+                save.to_str().unwrap(),
+                Some(&work),
+                Some(&index),
+            )
+            .unwrap();
+        let raw = plan.raw_target.clone().unwrap();
+        let staged = plan.haruki_3d_target.clone().unwrap();
+        let source = temp.path().join("payload");
+        std::fs::write(&source, b"payload").unwrap();
+        AssetExecutionContext::persist_bundle_payload(source, plan)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(raw).unwrap(), b"payload");
+        assert_eq!(std::fs::read(staged).unwrap(), b"payload");
+        assert_eq!(index.lock().unwrap().len(), 1);
+
+        let invalid = task("../escape");
+        assert!(context
+            .bundle_write_plan(&invalid, save.to_str().unwrap(), Some(&work), None)
+            .is_err());
+    }
+
+    #[test]
+    fn raw_bundle_copy_reports_source_and_parent_errors() {
+        let temp = tempdir().unwrap();
+        let destination = temp.path().join("nested/bundle");
+        assert!(matches!(
+            AssetExecutionContext::copy_raw_bundle(&temp.path().join("missing"), &destination),
+            Err(AssetExecutionError::WriteRawBundle { .. })
+        ));
+
+        let source = temp.path().join("source");
+        let parent_file = temp.path().join("parent-file");
+        std::fs::write(&source, b"payload").unwrap();
+        std::fs::write(&parent_file, b"not a directory").unwrap();
+        assert!(matches!(
+            AssetExecutionContext::copy_raw_bundle(&source, &parent_file.join("bundle")),
+            Err(AssetExecutionError::CreateRawBundleDir { .. })
+        ));
+
+        AssetExecutionContext::copy_bundle_payload(
+            &source,
+            BundleWritePlan {
+                raw_target: None,
+                haruki_3d_target: None,
+                bundle_hash_index: None,
+                bundle_hash_index_key: "unused".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bundle_operations_reject_missing_save_directory_before_network_io() {
+        let (config, context) = local_context(None, false);
+        let task = task("start/a");
+        assert!(matches!(
+            context.prefetch_bundle(&config, &task, &None).await,
+            Err(AssetExecutionError::MissingAssetSaveDir { .. })
+        ));
+        assert!(matches!(
+            context
+                .download_and_export_bundle_payloads(
+                    &config,
+                    &task,
+                    &None,
+                    None,
+                    &NativeSemanticExportPathRegistry::default(),
+                    None,
+                )
+                .await,
+            Err(AssetExecutionError::MissingAssetSaveDir { .. })
+        ));
     }
 }

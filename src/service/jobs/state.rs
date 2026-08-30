@@ -255,4 +255,96 @@ mod tests {
         assert!(stopped, "a cancelled job must stop the completion path");
         assert_eq!(jobs.read().await[&id].status, JobStatus::Cancelled);
     }
+
+    fn summary(completed: usize, failed: usize) -> ExecutionSummary {
+        ExecutionSummary {
+            discovered_bundles: completed + failed,
+            queued_downloads: completed + failed,
+            completed_downloads: completed,
+            failed_downloads: failed,
+            updated_record_entries: completed,
+            chart_hash_sync_performed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_transitions_cover_success_failure_and_missing_jobs() {
+        let jobs: Arc<RwLock<HashMap<Uuid, JobSnapshot>>> = Arc::new(RwLock::new(HashMap::new()));
+        let success = queued_job("jp");
+        let success_id = success.id;
+        let failed = queued_job("en");
+        let failed_id = failed.id;
+        jobs.write().await.insert(success_id, success);
+        jobs.write().await.insert(failed_id, failed);
+        let region = RegionConfig::default();
+
+        assert!(
+            !complete_job_snapshot(
+                &jobs,
+                Uuid::new_v4(),
+                &request("jp"),
+                &region,
+                summary(1, 0),
+            )
+            .await
+        );
+        assert!(
+            !complete_job_snapshot(&jobs, success_id, &request("jp"), &region, summary(1, 0),)
+                .await
+        );
+        assert!(
+            !complete_job_snapshot(&jobs, failed_id, &request("en"), &region, summary(0, 2),).await
+        );
+
+        let jobs = jobs.read().await;
+        assert_eq!(jobs[&success_id].status, JobStatus::Completed);
+        assert_eq!(jobs[&failed_id].status, JobStatus::Failed);
+        assert!(jobs[&failed_id].failure.is_some());
+    }
+
+    #[tokio::test]
+    async fn direct_state_helpers_preserve_terminal_jobs_and_classify_failures() {
+        let mut dry_run = queued_job("jp");
+        let dry_run_id = dry_run.id;
+        complete_dry_run_job(&mut dry_run, dry_run_id);
+        assert_eq!(dry_run.status, JobStatus::Completed);
+
+        let mut started = queued_job("jp");
+        let started_id = started.id;
+        mark_job_execution_started(&mut started, started_id);
+        assert_eq!(started.status, JobStatus::Running);
+
+        let jobs = Arc::new(RwLock::new(HashMap::from([(started_id, started)])));
+        finish_failed(&jobs, started_id, "network timeout".to_string()).await;
+        assert_eq!(jobs.read().await[&started_id].status, JobStatus::Failed);
+        finish_failed(&jobs, started_id, "later error".to_string()).await;
+        assert_eq!(jobs.read().await[&started_id].message, "network timeout");
+        finish_failed(&jobs, Uuid::new_v4(), "missing".to_string()).await;
+
+        let cancelled = queued_job("tw");
+        let cancelled_id = cancelled.id;
+        jobs.write().await.insert(cancelled_id, cancelled);
+        finish_cancelled(&jobs, cancelled_id, "user request".to_string()).await;
+        let jobs_guard = jobs.read().await;
+        assert_eq!(jobs_guard[&cancelled_id].status, JobStatus::Cancelled);
+        assert_eq!(
+            jobs_guard[&cancelled_id].failure.as_ref().unwrap().kind,
+            JobFailureKind::Cancelled
+        );
+        drop(jobs_guard);
+        finish_cancelled(&jobs, Uuid::new_v4(), "missing".to_string()).await;
+    }
+
+    #[test]
+    fn cancellation_and_elapsed_helpers_handle_all_states() {
+        assert!(!is_cancelled(&None));
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(!is_cancelled(&Some(flag.clone())));
+        flag.store(true, Ordering::SeqCst);
+        assert!(is_cancelled(&Some(flag)));
+
+        let mut job = queued_job("jp");
+        job.created_at = chrono::Utc::now() + chrono::Duration::seconds(1);
+        assert_eq!(job_elapsed_ms(&job, chrono::Utc::now()), 0);
+    }
 }

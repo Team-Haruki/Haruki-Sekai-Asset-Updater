@@ -714,7 +714,7 @@ mod tests {
     use super::{
         build_storage_operator_target, construct_endpoint_url, construct_remote_path,
         construct_storage_key, normalize_prefix, plan_storage_targets, resolve_bucket_template,
-        upload_to_all_storages, PublicReadMatcher, StorageUploadOptions,
+        upload_single_file, upload_to_all_storages, PublicReadMatcher, StorageUploadOptions,
     };
 
     #[test]
@@ -1125,6 +1125,207 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("selected provider was not found"));
+    }
+
+    #[test]
+    fn provider_validation_covers_empty_duplicate_and_missing_bucket_cases() {
+        let empty = StorageConfig {
+            providers: vec![StorageProviderConfig::default()],
+        };
+        assert!(plan_storage_targets(&empty, "jp", &[]).is_err());
+        assert!(plan_storage_targets(&empty, "jp", &[" ".to_string()]).is_err());
+
+        let duplicate = StorageConfig {
+            providers: vec![
+                StorageProviderConfig {
+                    scheme: "fs".to_string(),
+                    ..StorageProviderConfig::default()
+                },
+                StorageProviderConfig {
+                    scheme: "FS".to_string(),
+                    ..StorageProviderConfig::default()
+                },
+            ],
+        };
+        assert!(plan_storage_targets(&duplicate, "jp", &["fs".to_string()]).is_err());
+
+        let missing_bucket = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("s3".to_string()),
+                scheme: "s3".to_string(),
+                ..StorageProviderConfig::default()
+            }],
+        };
+        assert!(matches!(
+            plan_storage_targets(&missing_bucket, "jp", &[]),
+            Err(StorageError::MissingBucket { .. })
+        ));
+    }
+
+    #[test]
+    fn provider_resolution_maps_legacy_fields_and_url_options() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("primary".to_string()),
+                scheme: "s3".to_string(),
+                endpoint: "example.com/".to_string(),
+                bucket: "assets-{region}".to_string(),
+                prefix: Some("/prefix/{server}/".to_string()),
+                region: Some("us-east-1".to_string()),
+                access_key: Some("access".to_string()),
+                secret_key: Some("secret".to_string()),
+                public_base_url: Some("https://cdn.example/{region}/".to_string()),
+                public_read: true,
+                path_style: false,
+                tls: true,
+                ..StorageProviderConfig::default()
+            }],
+        };
+        let target = plan_storage_targets(&storage, "jp", &[]).unwrap().remove(0);
+        assert_eq!(target.endpoint, "https://example.com");
+        assert_eq!(target.bucket, "assets-jp");
+        assert_eq!(target.prefix.as_deref(), Some("prefix/jp"));
+        assert_eq!(target.base_url, "https://cdn.example/jp");
+        assert!(target.public_read);
+        assert!(!target.path_style);
+        assert_eq!(construct_endpoint_url("host", false), "http://host");
+    }
+
+    #[tokio::test]
+    async fn upload_empty_inputs_and_remove_local_paths_are_explicit() {
+        let root = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        let file = root.path().join("remove.txt");
+        fs::write(&file, b"remove me").unwrap();
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                scheme: "fs".to_string(),
+                root: Some(target.path().to_string_lossy().into_owned()),
+                ..StorageProviderConfig::default()
+            }],
+        };
+        let retry = RetryConfig {
+            attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        };
+        upload_to_all_storages(
+            &storage,
+            "jp",
+            root.path(),
+            &[],
+            StorageUploadOptions {
+                selected_providers: &[],
+                public_read_include: &[],
+                public_read_exclude: &[],
+                remove_local: false,
+                concurrency: 0,
+                retry: &retry,
+            },
+        )
+        .await
+        .unwrap();
+        upload_to_all_storages(
+            &storage,
+            "jp",
+            root.path(),
+            std::slice::from_ref(&file),
+            StorageUploadOptions {
+                selected_providers: &[],
+                public_read_include: &[],
+                public_read_exclude: &[],
+                remove_local: true,
+                concurrency: 0,
+                retry: &retry,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!file.exists());
+        assert_eq!(
+            fs::read(target.path().join("remove.txt")).unwrap(),
+            b"remove me"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_errors_cover_missing_sources_and_duplicate_cleanup() {
+        let source_root = tempdir().unwrap();
+        let target_root = tempdir().unwrap();
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                scheme: "fs".to_string(),
+                root: Some(target_root.path().to_string_lossy().into_owned()),
+                ..StorageProviderConfig::default()
+            }],
+        };
+        let target = build_storage_operator_target(&storage, "fs", "jp").unwrap();
+        let retry = RetryConfig {
+            attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        };
+        let missing = source_root.path().join("missing.txt");
+        assert!(matches!(
+            upload_single_file(&target, source_root.path(), &missing, false, &retry).await,
+            Err(StorageError::Io { .. })
+        ));
+
+        let file = source_root.path().join("duplicate.txt");
+        fs::write(&file, b"payload").unwrap();
+        assert!(matches!(
+            upload_to_all_storages(
+                &storage,
+                "jp",
+                source_root.path(),
+                &[file.clone(), file.clone()],
+                StorageUploadOptions {
+                    selected_providers: &[],
+                    public_read_include: &[],
+                    public_read_exclude: &[],
+                    remove_local: true,
+                    concurrency: 1,
+                    retry: &retry,
+                },
+            )
+            .await,
+            Err(StorageError::Io { .. })
+        ));
+        assert_eq!(
+            fs::read(target_root.path().join("duplicate.txt")).unwrap(),
+            b"payload"
+        );
+    }
+
+    #[test]
+    fn public_operator_selection_and_matcher_file_paths_are_explicit() {
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("assets".to_string()),
+                scheme: "s3".to_string(),
+                endpoint: "s3.example.com".to_string(),
+                region: Some("us-east-1".to_string()),
+                bucket: "assets".to_string(),
+                ..StorageProviderConfig::default()
+            }],
+        };
+        let target = build_storage_operator_target(&storage, "assets", "jp").unwrap();
+        assert!(std::ptr::eq(
+            target.operator_for_file(true),
+            target.public_operator.as_ref().unwrap()
+        ));
+        assert!(std::ptr::eq(
+            target.operator_for_file(false),
+            &target.operator
+        ));
+
+        let matcher = PublicReadMatcher::new(&["\\.png$".to_string()], &[]).unwrap();
+        assert!(matcher
+            .matches_file(Path::new("root"), Path::new("root/icons/a.png"))
+            .unwrap());
+        assert!(matcher
+            .matches_file(Path::new("root"), Path::new("outside/a.png"))
+            .is_err());
     }
 
     #[tokio::test]

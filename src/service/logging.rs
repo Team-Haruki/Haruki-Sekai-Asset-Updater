@@ -488,7 +488,9 @@ fn component_color(component: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{access_log_middleware, format_access_line};
+    use std::io::Write;
+
+    use super::*;
 
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -574,5 +576,96 @@ mod tests {
 
         assert!(line.contains("202 POST /v2/assets/update 12.50ms"));
         assert!(line.ends_with('\n'));
+    }
+
+    #[test]
+    fn logging_helpers_cover_filters_layers_files_and_formatting_tables() {
+        assert_eq!(env_filter_directive("  "), "info");
+        assert_eq!(env_filter_directive("WARNING"), "warn");
+        assert_eq!(env_filter_directive("DEBUG"), "debug");
+        assert_eq!(
+            env_filter_directive("crate=trace,other=off"),
+            "crate=trace,other=off"
+        );
+        assert_eq!(env_filter_directive("custom"), "custom");
+
+        let _json_layer = main_log_layer(LogFormat::Json, BoxMakeWriter::new(io::sink), false);
+        let _pretty_layer = main_log_layer(LogFormat::Pretty, BoxMakeWriter::new(io::sink), true);
+
+        let mut config = AppConfig::default();
+        assert!(main_log_file_writer(&config).unwrap().is_none());
+        config.logging.file = Some("   ".to_string());
+        assert!(main_log_file_writer(&config).unwrap().is_none());
+
+        for (input, expected) in [
+            ("Jp", "JP"),
+            ("en", "EN"),
+            ("Tw", "TW"),
+            ("kr", "KR"),
+            ("Cn", "CN"),
+            ("custom", "CUSTOM"),
+        ] {
+            assert_eq!(normalize_region(input), expected);
+        }
+        for level in [
+            Level::TRACE,
+            Level::DEBUG,
+            Level::INFO,
+            Level::WARN,
+            Level::ERROR,
+        ] {
+            assert!(!level_name(&level).is_empty());
+            assert!(!level_color(&level).is_empty());
+        }
+        for (target, expected) in [
+            ("haruki_sekai_asset_updater", "main"),
+            ("haruki_sekai_asset_updater::core", "core"),
+            ("haruki_sekai_asset_updater::core::storage", "storage"),
+            ("haruki_sekai_asset_updater::service::http", "http"),
+            ("haruki_sekai_asset_updater::bin::worker", "worker"),
+            ("haruki_sekai_asset_updater::custom", "custom"),
+            ("haruki_sekai_asset_updater_bin", "main"),
+            ("dependency::module", "dependency"),
+            ("", ""),
+        ] {
+            assert_eq!(component_name(target), expected);
+        }
+        for component in [
+            "main", "core", "config", "service", "http", "updater", "asset", "assets", "storage",
+            "database", "db", "bin", "job", "worker", "access", "unknown",
+        ] {
+            assert!(!component_color(component).is_empty());
+        }
+
+        let slow = format_access_line("${latency}", "GET", "/", 200, 1_250.0);
+        assert_eq!(slow, "1.25s\n");
+    }
+
+    #[tokio::test]
+    async fn shared_and_async_file_writers_cover_success_and_io_errors() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("nested/service.log");
+        let make_writer = SharedFileMakeWriter::new(&path).unwrap();
+        let mut writer = make_writer.make_writer();
+        assert_eq!(writer.write(b"entry\n").unwrap(), 6);
+        writer.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "entry\n");
+
+        let access_path = temp.path().join("access/log.txt");
+        write_access_log(Some(access_path.to_str().unwrap()), "access\n")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(access_path).unwrap(), "access\n");
+        write_access_log(None, "stdout access\n").await.unwrap();
+
+        let parent_file = temp.path().join("parent-file");
+        std::fs::write(&parent_file, b"file").unwrap();
+        assert!(SharedFileMakeWriter::new(&parent_file.join("service.log")).is_err());
+        assert!(write_access_log(
+            Some(parent_file.join("access.log").to_str().unwrap()),
+            "entry\n"
+        )
+        .await
+        .is_err());
     }
 }

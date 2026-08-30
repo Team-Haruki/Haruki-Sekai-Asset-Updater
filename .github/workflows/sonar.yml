@@ -46,8 +46,8 @@ jobs:
         if: github.event_name == 'pull_request'
         run: python -m pip install --disable-pip-version-check diff-cover==10.5.1
 
-      - name: Generate LCOV coverage
-        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info
+      - name: Generate LCOV and enforce overall coverage
+        run: cargo llvm-cov --locked --workspace --lcov --output-path lcov.info --fail-under-lines 90
 
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0

@@ -47,7 +47,7 @@ pub(super) fn handle_acb_files_owned(
     )
 }
 
-pub(super) fn handle_acb_files(
+pub(in crate::export) fn handle_acb_files(
     options: &AcbPostProcessOptions<'_>,
     acb_concurrency: usize,
     scoped_post_process: bool,

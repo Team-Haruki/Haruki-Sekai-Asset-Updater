@@ -11,14 +11,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Default)]
-pub(super) struct AcbPostProcessOutput {
-    pub(super) generated_files: Vec<PathBuf>,
-    pub(super) phase_ms: HashMap<String, u64>,
+pub(in crate::export) struct AcbPostProcessOutput {
+    pub(in crate::export) generated_files: Vec<PathBuf>,
+    pub(in crate::export) phase_ms: HashMap<String, u64>,
 }
 
-pub(super) struct HcaTrackProcessJob {
-    pub(super) track: SharedAcbTrack,
-    pub(super) output_dir: PathBuf,
+pub(in crate::export) struct HcaTrackProcessJob {
+    pub(in crate::export) track: SharedAcbTrack,
+    pub(in crate::export) output_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -62,15 +62,15 @@ impl OwnedAcbPostProcessOptions {
 }
 
 #[derive(Clone)]
-pub(super) struct AcbPostProcessOptions<'a> {
-    pub(super) output_dir: &'a Path,
-    pub(super) region: &'a RegionConfig,
-    pub(super) ffmpeg_path: &'a str,
-    pub(super) media_backend: MediaBackend,
-    pub(super) retry: &'a RetryConfig,
-    pub(super) hca_concurrency: usize,
-    pub(super) audio_encode_concurrency: usize,
-    pub(super) cpu_budget: usize,
+pub(in crate::export) struct AcbPostProcessOptions<'a> {
+    pub(in crate::export) output_dir: &'a Path,
+    pub(in crate::export) region: &'a RegionConfig,
+    pub(in crate::export) ffmpeg_path: &'a str,
+    pub(in crate::export) media_backend: MediaBackend,
+    pub(in crate::export) retry: &'a RetryConfig,
+    pub(in crate::export) hca_concurrency: usize,
+    pub(in crate::export) audio_encode_concurrency: usize,
+    pub(in crate::export) cpu_budget: usize,
 }
 
 impl From<&AcbPostProcessOptions<'_>> for OwnedAcbPostProcessOptions {
@@ -98,17 +98,17 @@ pub(super) struct AcbTrackExtractionOutput {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct HcaTrackProcessOutput {
-    pub(super) generated_files: Vec<PathBuf>,
-    pub(super) phase_ms: HashMap<String, u64>,
+pub(in crate::export) struct HcaTrackProcessOutput {
+    pub(in crate::export) generated_files: Vec<PathBuf>,
+    pub(in crate::export) phase_ms: HashMap<String, u64>,
 }
 
-pub(super) struct HcaTrackProcessOptions<'a> {
-    pub(super) output_dir: &'a Path,
-    pub(super) region: &'a RegionConfig,
-    pub(super) ffmpeg_path: &'a str,
-    pub(super) media_backend: MediaBackend,
-    pub(super) retry: &'a RetryConfig,
-    pub(super) audio_encode_concurrency: usize,
-    pub(super) cpu_budget: usize,
+pub(in crate::export) struct HcaTrackProcessOptions<'a> {
+    pub(in crate::export) output_dir: &'a Path,
+    pub(in crate::export) region: &'a RegionConfig,
+    pub(in crate::export) ffmpeg_path: &'a str,
+    pub(in crate::export) media_backend: MediaBackend,
+    pub(in crate::export) retry: &'a RetryConfig,
+    pub(in crate::export) audio_encode_concurrency: usize,
+    pub(in crate::export) cpu_budget: usize,
 }

@@ -223,4 +223,42 @@ mod tests {
             JobFailureKind::Cancelled
         );
     }
+
+    #[tokio::test]
+    async fn manager_construction_lookup_and_listing_cover_all_status_buckets() {
+        let mut unlimited_config = AppConfig::default();
+        unlimited_config.execution.max_concurrent_jobs = 0;
+        assert!(JobManager::new(Arc::new(unlimited_config))
+            .job_semaphore
+            .is_none());
+
+        let manager = manager();
+        let statuses = [
+            JobStatus::Queued,
+            JobStatus::Planning,
+            JobStatus::WaitingForPipeline,
+            JobStatus::Running,
+            JobStatus::Completed,
+            JobStatus::Failed,
+            JobStatus::Cancelled,
+        ];
+        let mut ids = Vec::new();
+        for status in statuses {
+            let mut job = queued_job("jp");
+            job.status = status;
+            ids.push(job.id);
+            manager.jobs.write().await.insert(job.id, job);
+        }
+
+        assert!(manager.get(ids[0]).await.is_some());
+        assert!(manager.get(Uuid::new_v4()).await.is_none());
+        let summary = manager.list().await;
+        assert_eq!(summary.total, 7);
+        assert_eq!(summary.queued.len(), 1);
+        assert_eq!(summary.running.len(), 3);
+        assert_eq!(summary.completed.len(), 1);
+        assert_eq!(summary.failed.len(), 1);
+        assert_eq!(summary.cancelled.len(), 1);
+        assert_eq!(summary.jobs.len(), 7);
+    }
 }

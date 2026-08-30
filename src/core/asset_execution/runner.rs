@@ -937,13 +937,18 @@ mod tests {
         AppConfig, RegionConfig, RegionPathsConfig, RegionProviderConfig, RegionRuntimeConfig,
     };
     use crate::core::download_records::DownloadRecord;
+    use crate::core::errors::AssetExecutionError;
     use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
     use crate::core::pipeline::prepare_asset_run;
 
     use super::super::model::AssetExecutionContext;
     use super::super::runner::{post_process_backlog_capacity, publishable_bundle_files};
-    use super::super::test_support::{encrypt_asset_info, TEST_AES_IV_HEX, TEST_AES_KEY_HEX};
-    use sekai_asset_pipeline::{AssetBundleDetail, AssetBundleInfo, AssetCategory};
+    use super::super::test_support::{
+        encrypt_asset_info, text_asset_unity_fs_bundle, TEST_AES_IV_HEX, TEST_AES_KEY_HEX,
+    };
+    use sekai_asset_pipeline::{
+        AssetBundleDetail, AssetBundleInfo, AssetCategory, ResolvedRelease,
+    };
 
     #[tokio::test]
     async fn blocking_record_save_returns_the_original_record() {
@@ -963,6 +968,84 @@ mod tests {
             crate::core::download_records::load_download_record(&path).unwrap(),
             record
         );
+    }
+
+    #[tokio::test]
+    async fn memory_limiter_checkpoint_and_completion_helpers_cover_edge_cases() {
+        assert_eq!(super::bytes_to_units(0), 1);
+        assert_eq!(super::bytes_to_units(1024 * 1024 + 1), 2);
+        assert_eq!(
+            super::blocking_panic_message(Box::new("borrowed")),
+            "borrowed"
+        );
+        assert_eq!(
+            super::blocking_panic_message(Box::new("owned".to_string())),
+            "owned"
+        );
+        assert_eq!(
+            super::blocking_panic_message(Box::new(7_u8)),
+            "blocking task panicked"
+        );
+
+        let mut config = AppConfig::default();
+        config.resources.memory.max_in_flight_bundle_bytes = 0;
+        let disabled = super::BundleMemoryLimiter::from_config(&config);
+        assert_eq!(disabled.limit_bytes(), 0);
+        assert!(disabled.acquire(42).await.is_none());
+        config.resources.memory.max_in_flight_bundle_bytes = 2 * 1024 * 1024;
+        let enabled = super::BundleMemoryLimiter::from_config(&config);
+        let permit = enabled.acquire(usize::MAX).await.unwrap();
+        assert_eq!(permit.num_permits(), 2);
+        drop(permit);
+
+        assert!(
+            AssetExecutionContext::save_bundle_hash_index_checkpoint(None, None)
+                .await
+                .is_ok()
+        );
+        let dir = tempdir().unwrap();
+        let index_path = dir.path().join("index.json");
+        let index = Arc::new(std::sync::Mutex::new(DownloadRecord::from([(
+            "bundle".to_string(),
+            "hash".to_string(),
+        )])));
+        AssetExecutionContext::save_bundle_hash_index_checkpoint(Some(&index_path), Some(&index))
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::core::download_records::load_download_record(&index_path)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let record_path = dir.path().join("record.json");
+        let mut record = DownloadRecord::new();
+        let mut completed = 0;
+        let mut completed_standard = 0;
+        let mut pending = 0;
+        AssetExecutionContext::record_completed_bundle(
+            &None,
+            &record_path.to_string_lossy(),
+            &mut record,
+            &mut completed,
+            &mut completed_standard,
+            &mut pending,
+            1,
+            "jp",
+            Some(&index_path),
+            Some(&index),
+            "start/test".to_string(),
+            "revision".to_string(),
+            true,
+        )
+        .await;
+        assert_eq!((completed, completed_standard, pending), (1, 1, 0));
+        assert_eq!(
+            record.get("start/test").map(String::as_str),
+            Some("revision")
+        );
+        assert!(record_path.exists());
     }
 
     #[test]
@@ -1003,7 +1086,7 @@ mod tests {
             os: Some("ios".to_string()),
             bundles: bundles
                 .iter()
-                .map(|(name, _)| {
+                .map(|(name, body)| {
                     (
                         (*name).to_string(),
                         AssetBundleDetail {
@@ -1013,7 +1096,7 @@ mod tests {
                             hash: format!("{name}-hash"),
                             category: AssetCategory::StartApp,
                             crc: 1,
-                            file_size: 1,
+                            file_size: i64::try_from(body.len()).unwrap(),
                             dependencies: Vec::new(),
                             paths: Vec::new(),
                             is_builtin: false,
@@ -1163,6 +1246,125 @@ mod tests {
             0,
             "failed bundles must remain eligible for a later refetch"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn valid_unity_bundle_runs_the_complete_download_export_and_record_flow() {
+        let temp = tempdir().unwrap();
+        let bundle = text_asset_unity_fs_bundle("hello", b"pipeline coverage");
+        let (addr, server, _info) = serve(vec![("start/text", bundle)]);
+        let (config, request) = execution_config(addr, temp.path());
+
+        let executor = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
+        let summary = executor.execute(&config, None, None).await.unwrap();
+
+        assert_eq!(
+            (summary.queued_downloads, summary.completed_downloads),
+            (1, 1)
+        );
+        assert_eq!(summary.failed_downloads, 0);
+        let record =
+            crate::core::download_records::load_download_record(temp.path().join("record.json"))
+                .unwrap();
+        assert_eq!(
+            record.get("start/text").map(String::as_str),
+            Some("start/text-hash")
+        );
+        assert!(temp.path().join("exports").exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_validates_release_profile_crypto_and_cookie_modes() {
+        let temp = tempdir().unwrap();
+        let (addr, server, _info) = serve(vec![("start/a", vec![1])]);
+        let (mut config, request) = execution_config(addr, temp.path());
+        let prepared = prepare_asset_run(&config, &request).unwrap();
+        let mut context = AssetExecutionContext::new(&config, &prepared, &request).unwrap();
+        assert!(!context.requires_cookies());
+        context.fetch_runtime_cookies_if_required().await.unwrap();
+        let disabled_3d = context
+            .clone()
+            .run_haruki_3d_background_export(&config, None, None)
+            .await
+            .unwrap();
+        assert_eq!(disabled_3d.matched_bundles, 0);
+        let task = super::super::model::DownloadTask {
+            priority: 0,
+            export_payloads: true,
+            stage_haruki_3d: false,
+            bundle: sekai_asset_pipeline::ResolvedBundle {
+                bundle_path: "start/a".to_string(),
+                download_path: "start/a".to_string(),
+                revision: "hash".to_string(),
+                category: AssetCategory::StartApp,
+                file_size: 1,
+            },
+        };
+        context.resolved_release = None;
+        assert!(context.bundle_request(&task).is_err());
+        context.resolved_release = Some(ResolvedRelease {
+            asset_version: "1".to_string(),
+            asset_hash: "hash".to_string(),
+        });
+        assert_eq!(
+            context.bundle_request(&task).unwrap().bundle.bundle_path,
+            "start/a"
+        );
+
+        let region = config.regions.get_mut("jp").unwrap();
+        if let RegionProviderConfig::ColorfulPalette {
+            required_cookies,
+            profile_hashes,
+            ..
+        } = &mut region.provider
+        {
+            *required_cookies = true;
+            profile_hashes.clear();
+        }
+        let prepared = prepare_asset_run(&config, &request).unwrap();
+        let mut missing_profile = AssetExecutionContext::new(&config, &prepared, &request).unwrap();
+        assert!(missing_profile.requires_cookies());
+        missing_profile
+            .fetch_runtime_cookies_if_required()
+            .await
+            .unwrap();
+        assert!(matches!(
+            missing_profile.fetch_asset_bundle_info().await,
+            Err(AssetExecutionError::MissingProfileHash { .. })
+        ));
+
+        if let RegionProviderConfig::ColorfulPalette { profile_hashes, .. } =
+            &mut config.regions.get_mut("jp").unwrap().provider
+        {
+            profile_hashes.insert("production".to_string(), "abc".to_string());
+        }
+        let missing_release_request = AssetUpdateRequest {
+            asset_version: None,
+            asset_hash: None,
+            ..request.clone()
+        };
+        let prepared = prepare_asset_run(&config, &missing_release_request).unwrap();
+        let mut missing_release =
+            AssetExecutionContext::new(&config, &prepared, &missing_release_request).unwrap();
+        assert!(matches!(
+            missing_release.fetch_asset_bundle_info().await,
+            Err(AssetExecutionError::MissingAssetVersionOrHash { .. })
+        ));
+
+        config.regions.get_mut("jp").unwrap().crypto.aes_key_hex = None;
+        let prepared = prepare_asset_run(&config, &request).unwrap();
+        let mut missing_crypto = AssetExecutionContext::new(&config, &prepared, &request).unwrap();
+        assert!(matches!(
+            missing_crypto.fetch_asset_bundle_info().await,
+            Err(AssetExecutionError::MissingCryptoConfig { .. })
+        ));
         server.abort();
     }
 

@@ -465,4 +465,84 @@ mod tests {
             index.lock().unwrap().clone()
         );
     }
+
+    #[tokio::test]
+    async fn cache_helpers_cover_configuration_hashing_and_missing_stale_entries() {
+        let mut config = AppConfig::default();
+        assert!(super::configured_asset_bundle_cache_dir(&config).is_none());
+        config.execution.asset_bundle_cache_dir = Some("  /tmp/cache  ".to_string());
+        assert_eq!(
+            super::configured_asset_bundle_cache_dir(&config).unwrap(),
+            std::path::PathBuf::from("/tmp/cache")
+        );
+
+        let dir = tempdir().unwrap();
+        let payload = dir.path().join("payload");
+        std::fs::write(&payload, b"abc").unwrap();
+        AssetExecutionContext::record_bundle_payload_hash(None, "ignored".to_string(), &payload)
+            .unwrap();
+        let index = Arc::new(std::sync::Mutex::new(DownloadRecord::new()));
+        AssetExecutionContext::record_bundle_payload_hash(
+            Some(index.clone()),
+            "bundle".to_string(),
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(
+            index.lock().unwrap()["bundle"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(AssetExecutionContext::record_bundle_payload_hash(
+            Some(index),
+            "missing".to_string(),
+            &dir.path().join("missing"),
+        )
+        .is_err());
+
+        let task = DownloadTask {
+            bundle: ResolvedBundle {
+                download_path: "start/a".to_string(),
+                bundle_path: "start/a".to_string(),
+                revision: "expected".to_string(),
+                category: AssetCategory::StartApp,
+                file_size: 8,
+            },
+            priority: 0,
+            export_payloads: true,
+            stage_haruki_3d: false,
+        };
+        let cache_file = dir.path().join("cache");
+        assert_eq!(
+            AssetExecutionContext::bundle_cache_entry_status(&cache_file, &task).await,
+            BundleCacheEntryStatus::Missing
+        );
+        tokio::fs::write(&cache_file, b"1234").await.unwrap();
+        assert_eq!(
+            AssetExecutionContext::bundle_cache_entry_status(&cache_file, &task).await,
+            BundleCacheEntryStatus::Current
+        );
+        tokio::fs::write(bundle_cache_metadata_path(&cache_file), "wrong")
+            .await
+            .unwrap();
+        assert_eq!(
+            AssetExecutionContext::bundle_cache_entry_status(&cache_file, &task).await,
+            BundleCacheEntryStatus::Stale
+        );
+        tokio::fs::remove_file(&cache_file).await.unwrap();
+        assert_eq!(
+            AssetExecutionContext::bundle_cache_entry_status(&cache_file, &task).await,
+            BundleCacheEntryStatus::Missing
+        );
+
+        let atomic = dir.path().join("atomic");
+        AssetExecutionContext::atomic_write_bundle_cache_file(&atomic, b"body")
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&atomic).await.unwrap(), b"body");
+        assert!(
+            AssetExecutionContext::atomic_write_bundle_cache_file(dir.path(), b"bad")
+                .await
+                .is_err()
+        );
+    }
 }

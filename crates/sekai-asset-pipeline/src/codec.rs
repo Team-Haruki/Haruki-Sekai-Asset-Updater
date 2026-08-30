@@ -168,7 +168,11 @@ fn normalize_usm_output_names(
 
 #[cfg(test)]
 mod tests {
-    use super::{codec_summary, CODEC_BACKEND};
+    use std::io::Cursor;
+
+    use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn summary_reports_published_codec_backend() {
@@ -178,5 +182,94 @@ mod tests {
         assert!(summary.supports_usm);
         assert!(summary.supports_hca_to_wav);
         assert!(summary.supports_usm_metadata);
+    }
+
+    fn synthetic_hca() -> Vec<u8> {
+        let samples = (0..4_096)
+            .map(|index| {
+                let time = index as f32 / 44_100.0;
+                (time * 440.0 * std::f32::consts::TAU).sin() * 0.25
+            })
+            .collect::<Vec<_>>();
+        let mut encoder = cridecoder::HcaEncoder::new(cridecoder::HcaEncoderConfig {
+            channels: 1,
+            sample_rate: 44_100,
+            bitrate: 64_000,
+            ..cridecoder::HcaEncoderConfig::default()
+        })
+        .unwrap();
+        let mut encoded = Vec::new();
+        encoder
+            .encode(&samples, &mut Cursor::new(&mut encoded))
+            .unwrap();
+        encoded
+    }
+
+    #[test]
+    fn codec_entry_points_cover_valid_synthetic_hca_and_acb() {
+        let dir = tempdir().unwrap();
+        let hca = synthetic_hca();
+        let hca_path = dir.path().join("tone.hca");
+        std::fs::write(&hca_path, &hca).unwrap();
+
+        let wav_bytes = decode_hca_bytes_to_wav_bytes(&hca).unwrap();
+        assert!(wav_bytes.starts_with(b"RIFF"));
+        let bytes_wav = dir.path().join("bytes.wav");
+        decode_hca_bytes_to_wav(&hca, &bytes_wav).unwrap();
+        assert!(std::fs::read(&bytes_wav).unwrap().starts_with(b"RIFF"));
+        let file_wav = dir.path().join("file.wav");
+        decode_hca_to_wav(&hca_path, &file_wav).unwrap();
+        assert!(std::fs::read(&file_wav).unwrap().starts_with(b"RIFF"));
+
+        let mut builder = cridecoder::AcbBuilder::new();
+        builder.add_track(cridecoder::TrackInput::new("tone", 7, hca));
+        let mut acb = Vec::new();
+        builder.build(&mut Cursor::new(&mut acb), None).unwrap();
+        let waveforms = export_acb_unique_to_memory(Cursor::new(&acb), None).unwrap();
+        assert_eq!(waveforms.len(), 1);
+        let acb_path = dir.path().join("tone.acb");
+        std::fs::write(&acb_path, acb).unwrap();
+        let acb_out = dir.path().join("acb");
+        std::fs::create_dir(&acb_out).unwrap();
+        assert!(export_acb(&acb_path, &acb_out).unwrap().is_some());
+    }
+
+    #[test]
+    fn codec_entry_points_report_magic_io_and_malformed_media() {
+        let dir = tempdir().unwrap();
+        let crid = dir.path().join("movie.usm");
+        std::fs::write(&crid, b"CRIDbroken").unwrap();
+        let short = dir.path().join("short.usm");
+        std::fs::write(&short, b"CRI").unwrap();
+        assert!(has_usm_magic(b"CRID"));
+        assert!(!has_usm_magic(b"CRI"));
+        assert!(file_has_usm_magic(&crid).unwrap());
+        assert!(!file_has_usm_magic(&short).unwrap());
+        assert!(file_has_usm_magic(&dir.path().join("missing")).is_err());
+        assert!(read_usm_metadata(&crid).is_err());
+        assert!(export_usm_to_memory(b"CRIDbroken", b"fallback", true).is_err());
+        assert!(export_usm_reader_to_memory(Cursor::new(b"bad"), b"fallback", false).is_err());
+        assert!(export_usm(&crid, dir.path()).is_err());
+        assert_eq!(export_acb(&crid, dir.path()).unwrap(), None);
+        assert!(decode_hca_bytes_to_wav_bytes(b"bad").is_err());
+        assert!(decode_hca_bytes_to_wav(b"bad", &dir.path().join("bad.wav")).is_err());
+        assert!(decode_hca_to_wav(&crid, &dir.path().join("bad-file.wav")).is_err());
+    }
+
+    #[test]
+    fn usm_output_normalization_renames_each_stream_to_the_input_stem() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("movie.usm");
+        let video = dir.path().join("internal.m2v");
+        let audio = dir.path().join("internal.wav");
+        std::fs::write(&video, b"video").unwrap();
+        std::fs::write(&audio, b"audio").unwrap();
+
+        let outputs = normalize_usm_output_names(&input, vec![video, audio]).unwrap();
+        assert_eq!(
+            outputs,
+            vec![dir.path().join("movie.m2v"), dir.path().join("movie.wav")]
+        );
+        assert!(outputs.iter().all(|path| path.exists()));
     }
 }

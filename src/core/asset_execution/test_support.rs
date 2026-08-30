@@ -60,3 +60,79 @@ pub(super) fn encrypt_asset_info(info: &AssetBundleInfo) -> Vec<u8> {
         .to_vec();
     encrypted
 }
+
+pub(super) fn text_asset_unity_fs_bundle(name: &str, payload: &[u8]) -> Vec<u8> {
+    let mut object = Vec::new();
+    push_aligned_bytes(&mut object, name.as_bytes());
+    push_aligned_bytes(&mut object, payload);
+
+    let mut metadata = Vec::new();
+    metadata.extend_from_slice(b"2022.3.62f1\0");
+    metadata.extend_from_slice(&13_i32.to_le_bytes());
+    metadata.push(0);
+    metadata.extend_from_slice(&1_i32.to_le_bytes());
+    metadata.extend_from_slice(&49_i32.to_le_bytes());
+    metadata.push(0);
+    metadata.extend_from_slice(&(-1_i16).to_le_bytes());
+    metadata.extend_from_slice(&[0; 16]);
+    metadata.extend_from_slice(&1_i32.to_le_bytes());
+    while !(48 + metadata.len()).is_multiple_of(4) {
+        metadata.push(0);
+    }
+    metadata.extend_from_slice(&7_i64.to_le_bytes());
+    metadata.extend_from_slice(&0_i64.to_le_bytes());
+    metadata.extend_from_slice(&u32::try_from(object.len()).unwrap().to_le_bytes());
+    metadata.extend_from_slice(&0_i32.to_le_bytes());
+    for _ in 0..3 {
+        metadata.extend_from_slice(&0_i32.to_le_bytes());
+    }
+    metadata.push(0);
+    let data_offset = (48 + metadata.len()).next_multiple_of(16);
+    let mut serialized = vec![0_u8; 48];
+    serialized[8..12].copy_from_slice(&22_u32.to_be_bytes());
+    serialized[20..24].copy_from_slice(&u32::try_from(metadata.len()).unwrap().to_be_bytes());
+    serialized[24..32].copy_from_slice(
+        &i64::try_from(data_offset + object.len())
+            .unwrap()
+            .to_be_bytes(),
+    );
+    serialized[32..40].copy_from_slice(&i64::try_from(data_offset).unwrap().to_be_bytes());
+    serialized.extend_from_slice(&metadata);
+    serialized.resize(data_offset, 0);
+    serialized.extend_from_slice(&object);
+
+    let mut blocks_info = vec![0_u8; 16];
+    blocks_info.extend_from_slice(&1_i32.to_be_bytes());
+    blocks_info.extend_from_slice(&u32::try_from(serialized.len()).unwrap().to_be_bytes());
+    blocks_info.extend_from_slice(&u32::try_from(serialized.len()).unwrap().to_be_bytes());
+    blocks_info.extend_from_slice(&0_u16.to_be_bytes());
+    blocks_info.extend_from_slice(&1_i32.to_be_bytes());
+    blocks_info.extend_from_slice(&0_i64.to_be_bytes());
+    blocks_info.extend_from_slice(&i64::try_from(serialized.len()).unwrap().to_be_bytes());
+    blocks_info.extend_from_slice(&4_u32.to_be_bytes());
+    blocks_info.extend_from_slice(b"asset.assets\0");
+
+    let mut output = Vec::new();
+    output.extend_from_slice(b"UnityFS\0");
+    output.extend_from_slice(&6_u32.to_be_bytes());
+    output.extend_from_slice(b"5.x.x\0");
+    output.extend_from_slice(b"2022.3.62f1\0");
+    let size_offset = output.len();
+    output.extend_from_slice(&0_i64.to_be_bytes());
+    output.extend_from_slice(&u32::try_from(blocks_info.len()).unwrap().to_be_bytes());
+    output.extend_from_slice(&u32::try_from(blocks_info.len()).unwrap().to_be_bytes());
+    output.extend_from_slice(&0x40_u32.to_be_bytes());
+    output.extend_from_slice(&blocks_info);
+    output.extend_from_slice(&serialized);
+    let output_size = i64::try_from(output.len()).unwrap();
+    output[size_offset..size_offset + 8].copy_from_slice(&output_size.to_be_bytes());
+    output
+}
+
+fn push_aligned_bytes(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_le_bytes());
+    output.extend_from_slice(bytes);
+    while !output.len().is_multiple_of(4) {
+        output.push(0);
+    }
+}

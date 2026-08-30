@@ -698,4 +698,87 @@ regions:
             if name == "HARUKI_TEST_MISSING_AES_KEY"
         ));
     }
+
+    #[test]
+    fn env_override_helpers_cover_invalid_paths_sequences_and_scalar_parsing() {
+        assert!(parse_env_override_path("OTHER__VALUE").is_err());
+        assert!(parse_env_override_path("HARUKI__").is_err());
+        assert!(parse_env_override_path("HARUKI__SERVER____PORT").is_err());
+        assert_eq!(
+            parse_env_override_path("HARUKI__SERVER__PORT").unwrap(),
+            vec!["server".to_string(), "port".to_string()]
+        );
+        assert_eq!(parse_env_override_value(""), Value::String(String::new()));
+        assert_eq!(parse_env_override_value("42"), Value::Number(42.into()));
+        assert_eq!(
+            parse_env_override_value("[invalid"),
+            Value::String("[invalid".to_string())
+        );
+
+        let mut root = Value::Null;
+        assert!(apply_env_override(&mut root, "HARUKI__", &[], Value::Bool(true)).is_err());
+        apply_env_override(
+            &mut root,
+            "HARUKI__ITEMS__2__NAME",
+            &["items".to_string(), "2".to_string(), "name".to_string()],
+            Value::String("third".to_string()),
+        )
+        .unwrap();
+        let Value::Mapping(root) = root else {
+            panic!("root should be a mapping");
+        };
+        let Value::Sequence(items) = &root[&Value::String("items".to_string())] else {
+            panic!("items should be a sequence");
+        };
+        assert_eq!(items.len(), 3);
+
+        let mut sequence = Value::Null;
+        set_env_override_leaf(&mut sequence, "1", Value::Bool(true));
+        assert!(matches!(sequence, Value::Sequence(_)));
+        let mut scalar = Value::Bool(false);
+        set_env_override_leaf(&mut scalar, "name", Value::String("value".to_string()));
+        assert!(matches!(scalar, Value::Mapping(_)));
+
+        assert_eq!(non_empty_option("  ".to_string()), None);
+        assert_eq!(
+            non_empty_option(" value ".to_string()).as_deref(),
+            Some(" value ")
+        );
+        assert!(parse_positive_usize("field", "bad").is_err());
+        assert!(parse_positive_usize("field", "0").is_err());
+        assert_eq!(parse_positive_usize("field", " 2 ").unwrap(), 2);
+        assert!(parse_usize_env("field", "-1").is_err());
+        assert!(parse_cpu_ratio_env("field", "bad").is_err());
+        for value in ["0", "false", "no", "off"] {
+            assert!(!parse_bool_env("field", value).unwrap());
+        }
+        assert!(parse_bool_env("field", "maybe").is_err());
+        assert!(expand_env_references_in_string("${env:UNCLOSED").is_err());
+    }
+
+    #[test]
+    fn split_concurrency_and_http_env_overrides_are_applied() {
+        let _env_lock = env_lock();
+        let names = [
+            "HARUKI_AUDIO_ENCODE_CONCURRENCY",
+            "HARUKI_VIDEO_ENCODE_CONCURRENCY",
+            "HARUKI_ASSET_HTTP_VERSION",
+        ];
+        let old = names.map(|name| std::env::var(name).ok());
+        std::env::set_var(names[0], "3");
+        std::env::set_var(names[1], "4");
+        std::env::set_var(names[2], "http1");
+        let mut config = AppConfig::default();
+        resolve_backend_env_overrides(&mut config).unwrap();
+        resolve_concurrency_env_overrides(&mut config).unwrap();
+        assert_eq!(config.concurrency.audio_encode, 3);
+        assert_eq!(config.concurrency.video_encode, 4);
+        assert_eq!(
+            config.server.asset_http_version,
+            super::super::schema::AssetHttpVersion::Http1
+        );
+        for (name, value) in names.into_iter().zip(old) {
+            restore_env(name, value);
+        }
+    }
 }

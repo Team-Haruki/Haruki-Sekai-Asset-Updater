@@ -31,7 +31,7 @@ struct HcaWorkerState {
     first_error: Arc<Mutex<Option<ExportPipelineError>>>,
 }
 
-pub(super) fn process_hca_tracks(
+pub(in crate::export) fn process_hca_tracks(
     mut hca_tracks: Vec<HcaTrackProcessJob>,
     options: &AcbPostProcessOptions<'_>,
 ) -> Result<AcbPostProcessOutput, ExportPipelineError> {
@@ -175,7 +175,7 @@ pub(super) fn process_hca_track_job_on_large_stack(
         })?
 }
 
-pub(super) fn process_hca_track(
+pub(in crate::export) fn process_hca_track(
     track: SharedAcbTrack,
     options: &HcaTrackProcessOptions<'_>,
 ) -> Result<HcaTrackProcessOutput, ExportPipelineError> {
