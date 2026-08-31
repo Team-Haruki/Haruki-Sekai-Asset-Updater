@@ -36,6 +36,7 @@ enum Obfuscation {
 struct PrefixDecoder {
     mode: Obfuscation,
     prefix: Vec<u8>,
+    decoded_prefix: Vec<u8>,
 }
 
 impl PrefixDecoder {
@@ -43,7 +44,21 @@ impl PrefixDecoder {
         Self {
             mode: Obfuscation::Undecided,
             prefix: Vec::with_capacity(128),
+            decoded_prefix: Vec::with_capacity(256),
         }
+    }
+
+    async fn write_decoded(
+        &mut self,
+        file: &mut File,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<u64, ClientError> {
+        let remaining = 256_usize.saturating_sub(self.decoded_prefix.len());
+        self.decoded_prefix
+            .extend_from_slice(&bytes[..remaining.min(bytes.len())]);
+        write_all(file, path, bytes).await?;
+        Ok(bytes.len() as u64)
     }
 
     async fn write_chunk(
@@ -68,17 +83,15 @@ impl PrefixDecoder {
                 self.prefix.clear();
                 Obfuscation::Xor
             } else {
-                write_all(file, path, &self.prefix).await?;
-                written += self.prefix.len() as u64;
-                self.prefix.clear();
+                let prefix = std::mem::take(&mut self.prefix);
+                written += self.write_decoded(file, path, &prefix).await?;
                 Obfuscation::None
             };
         }
 
         match self.mode {
             Obfuscation::None | Obfuscation::Simple => {
-                write_all(file, path, chunk).await?;
-                written += chunk.len() as u64;
+                written += self.write_decoded(file, path, chunk).await?;
             }
             Obfuscation::Xor => {
                 let needed = 128_usize.saturating_sub(self.prefix.len());
@@ -89,12 +102,10 @@ impl PrefixDecoder {
                     for (index, byte) in self.prefix.iter_mut().enumerate() {
                         *byte ^= XOR_PATTERN[index % XOR_PATTERN.len()];
                     }
-                    write_all(file, path, &self.prefix).await?;
-                    written += self.prefix.len() as u64;
-                    self.prefix.clear();
+                    let prefix = std::mem::take(&mut self.prefix);
+                    written += self.write_decoded(file, path, &prefix).await?;
                     self.mode = Obfuscation::Simple;
-                    write_all(file, path, chunk).await?;
-                    written += chunk.len() as u64;
+                    written += self.write_decoded(file, path, chunk).await?;
                 }
             }
             Obfuscation::Undecided => unreachable!("prefix mode was resolved above"),
@@ -102,14 +113,16 @@ impl PrefixDecoder {
         Ok(written)
     }
 
-    async fn finish(mut self, file: &mut File, path: &Path) -> Result<u64, ClientError> {
+    async fn finish(&mut self, file: &mut File, path: &Path) -> Result<u64, ClientError> {
         // Inputs shorter than four bytes are not recognized as obfuscated.
         // XOR payloads shorter than 128 bytes preserve the historical behavior
         // and are written unchanged after their header is removed.
-        let written = self.prefix.len() as u64;
-        write_all(file, path, &self.prefix).await?;
-        self.prefix.clear();
-        Ok(written)
+        let prefix = std::mem::take(&mut self.prefix);
+        self.write_decoded(file, path, &prefix).await
+    }
+
+    fn decoded_prefix(&self) -> &[u8] {
+        &self.decoded_prefix
     }
 }
 
@@ -181,7 +194,7 @@ impl SekaiAssetClient {
                 decoded_bytes += decoder.write_chunk(&mut file, &temp_path, &chunk).await?;
             }
             decoded_bytes += decoder.finish(&mut file, &temp_path).await?;
-            validate_manifest_size(request, wire_bytes, decoded_bytes)?;
+            validate_manifest_size(request, wire_bytes, decoded_bytes, decoder.decoded_prefix())?;
             file.flush()
                 .await
                 .map_err(|source| ClientError::WriteFile {
@@ -286,11 +299,16 @@ fn validate_manifest_size(
     request: &BundleRequest,
     wire_bytes: u64,
     decoded_bytes: u64,
+    decoded_prefix: &[u8],
 ) -> Result<(), ClientError> {
     let Ok(expected) = u64::try_from(request.bundle.file_size) else {
         return Ok(());
     };
-    if expected == 0 || expected == wire_bytes || expected == decoded_bytes {
+    if expected == 0
+        || expected == wire_bytes
+        || expected == decoded_bytes
+        || unityfs_declared_size(decoded_prefix).is_some_and(|size| size == decoded_bytes)
+    {
         return Ok(());
     }
     Err(ClientError::BundleSizeMismatch {
@@ -299,6 +317,18 @@ fn validate_manifest_size(
         wire: wire_bytes,
         decoded: decoded_bytes,
     })
+}
+
+fn unityfs_declared_size(prefix: &[u8]) -> Option<u64> {
+    if !prefix.starts_with(b"UnityFS\0") || prefix.len() < 12 {
+        return None;
+    }
+    let mut cursor = 12;
+    for _ in 0..2 {
+        cursor += prefix.get(cursor..)?.iter().position(|byte| *byte == 0)? + 1;
+    }
+    let bytes: [u8; 8] = prefix.get(cursor..cursor + 8)?.try_into().ok()?;
+    Some(u64::from_be_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -686,10 +716,17 @@ mod tests {
         let flush_result = read_only.flush().await;
         assert!(write_result.is_err() || flush_result.is_err());
 
-        assert!(validate_manifest_size(&request(-1), 10, 6).is_ok());
-        assert!(validate_manifest_size(&request(0), 10, 6).is_ok());
-        assert!(validate_manifest_size(&request(10), 10, 6).is_ok());
-        assert!(validate_manifest_size(&request(6), 10, 6).is_ok());
+        assert!(validate_manifest_size(&request(-1), 10, 6, b"").is_ok());
+        assert!(validate_manifest_size(&request(0), 10, 6, b"").is_ok());
+        assert!(validate_manifest_size(&request(10), 10, 6, b"").is_ok());
+        assert!(validate_manifest_size(&request(6), 10, 6, b"").is_ok());
+
+        let mut unityfs = b"UnityFS\0".to_vec();
+        unityfs.extend_from_slice(&6_u32.to_be_bytes());
+        unityfs.extend_from_slice(b"2022.3.62f2\0");
+        unityfs.extend_from_slice(b"2022.3.62f2\0");
+        unityfs.extend_from_slice(&6_u64.to_be_bytes());
+        assert!(validate_manifest_size(&request(99), 10, 6, &unityfs).is_ok());
     }
 
     #[tokio::test]

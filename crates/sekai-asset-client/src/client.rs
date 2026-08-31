@@ -275,18 +275,34 @@ fn collect_cookie_header(headers: &HeaderMap) -> Result<Option<HeaderValue>, Cli
             .map_err(|error| ClientError::InvalidCookieHeader {
                 reason: error.to_string(),
             })?;
-        let pair = raw.split(';').next().unwrap_or_default().trim();
-        let Some((name, _)) = pair.split_once('=') else {
+        let pair_count_before = pairs.len();
+        for segment in raw.split(';') {
+            let pair = segment.trim();
+            let Some((name, _)) = pair.split_once('=') else {
+                // Cookie attributes without a value are extensible. Once this
+                // Set-Cookie value has supplied a real pair, ignore all such
+                // flags instead of maintaining a brittle attribute allowlist.
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(ClientError::InvalidCookieHeader {
+                    reason: "cookie name is empty".to_string(),
+                });
+            }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "path" | "domain" | "expires" | "max-age" | "samesite" | "priority"
+            ) {
+                continue;
+            }
+            pairs.push(pair);
+        }
+        if pairs.len() == pair_count_before {
             return Err(ClientError::InvalidCookieHeader {
                 reason: "cookie pair is missing `=`".to_string(),
             });
-        };
-        if name.trim().is_empty() {
-            return Err(ClientError::InvalidCookieHeader {
-                reason: "cookie name is empty".to_string(),
-            });
         }
-        pairs.push(pair);
     }
     if pairs.is_empty() {
         return Ok(None);
@@ -616,6 +632,22 @@ mod tests {
         let mut empty_name = HeaderMap::new();
         empty_name.insert(SET_COOKIE, HeaderValue::from_static("=value; Path=/"));
         assert!(collect_cookie_header(&empty_name).is_err());
+
+        let mut combined_cloudfront = HeaderMap::new();
+        combined_cloudfront.insert(
+            SET_COOKIE,
+            HeaderValue::from_static(
+                "CloudFront-Policy=policy; CloudFront-Signature=signature; CloudFront-Key-Pair-Id=key",
+            ),
+        );
+        assert_eq!(
+            collect_cookie_header(&combined_cloudfront)
+                .unwrap()
+                .unwrap(),
+            HeaderValue::from_static(
+                "CloudFront-Policy=policy; CloudFront-Signature=signature; CloudFront-Key-Pair-Id=key"
+            )
+        );
 
         let mut non_text = HeaderMap::new();
         non_text.insert(SET_COOKIE, HeaderValue::from_bytes(&[0xff]).unwrap());
