@@ -23,7 +23,8 @@ fn write_executable_script(path: &std::path::Path, script: impl AsRef<[u8]>) {
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
+        // The generated script is only for this test process; do not expose it to other users.
+        perms.set_mode(0o700);
         fs::set_permissions(path, perms).unwrap();
     }
 }
