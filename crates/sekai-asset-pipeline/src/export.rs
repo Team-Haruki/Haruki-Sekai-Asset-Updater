@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::{ExportPipelineError, PipelineOptions};
 
+mod fixture_default;
 mod images;
 mod limits;
 mod media_postprocess;

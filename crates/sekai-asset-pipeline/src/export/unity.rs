@@ -212,6 +212,7 @@ fn call_unity_rs_object_export(
             .or_default() += elapsed_millis(batch_started);
     }
     write_assetstudio_playable_payloads(options, &mut path_state, playable_outputs)?;
+    super::fixture_default::write_fixture_default(options, &mut path_state, &assets)?;
     summary.written_files = path_state.written_files;
     summary.acb_sources = path_state.acb_sources;
     path_state.image_encode.merge_into(&mut summary.phase_ms);
