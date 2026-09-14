@@ -20,7 +20,7 @@ cbc = { version = "0.2", features = ["alloc"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 hex = "0.4"
 mime_guess = "2.0"
-opendal = { version = "0.58.2", default-features = false, features = [
+opendal = { version = "0.59.1", default-features = false, features = [
     "executors-tokio",
     "reqwest-rustls-tls",
     "services-fs",
