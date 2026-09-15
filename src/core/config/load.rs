@@ -76,7 +76,7 @@ impl AppConfig {
         let storage_uri = parse_config_storage_uri(uri)?;
         let (scheme, options) = config_storage_provider_options()?;
 
-        opendal::init_default_registry();
+        opendal::install_default();
         let operator = opendal::Operator::via_iter(&scheme, options).map_err(|source| {
             ConfigError::ConfigStorageProvider {
                 provider: storage_uri.provider.clone(),
