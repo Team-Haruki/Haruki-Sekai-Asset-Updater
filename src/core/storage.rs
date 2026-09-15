@@ -397,7 +397,9 @@ fn build_operator_target(
     provider: &StorageProviderConfig,
     region_name: &str,
 ) -> Result<StorageOperatorTarget, StorageError> {
-    opendal::init_default_registry();
+    // Registers the enabled services and installs the default HTTP transport; with
+    // default features off, `init_default_registry` alone leaves S3 without a transport.
+    opendal::install_default();
     let resolved = resolve_storage_provider(provider, region_name)?;
     let operator =
         Operator::via_iter(&resolved.scheme, resolved.options.clone()).map_err(|source| {
@@ -1245,6 +1247,44 @@ mod tests {
         assert_eq!(
             fs::read(target.path().join("remove.txt")).unwrap(),
             b"remove me"
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_uploads_have_an_http_transport_installed() {
+        // Nothing listens on port 1: the upload must fail on the network, not on a missing
+        // opendal HTTP transport (the v7.1.1 regression that broke every S3 upload).
+        let source_root = tempdir().unwrap();
+        let file = source_root.path().join("ondemand/probe.txt");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, b"probe").unwrap();
+        let storage = StorageConfig {
+            providers: vec![StorageProviderConfig {
+                name: Some("garage".to_string()),
+                scheme: "s3".to_string(),
+                endpoint: "127.0.0.1:1".to_string(),
+                tls: false,
+                bucket: "pjsk-assets".to_string(),
+                prefix: Some("{region}-assets".to_string()),
+                region: Some("garage".to_string()),
+                access_key: Some("GKtest".to_string()),
+                secret_key: Some("secret".to_string()),
+                ..StorageProviderConfig::default()
+            }],
+        };
+        let target = build_storage_operator_target(&storage, "garage", "jp").unwrap();
+        let retry = RetryConfig {
+            attempts: 1,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+        };
+        let error = upload_single_file(&target, source_root.path(), &file, false, &retry)
+            .await
+            .expect_err("nothing listens on 127.0.0.1:1");
+        let message = format!("{error:?}");
+        assert!(
+            !message.contains("HTTP transport"),
+            "S3 upload failed before reaching the network: {message}"
         );
     }
 
