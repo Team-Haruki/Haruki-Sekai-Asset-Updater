@@ -22,6 +22,14 @@ impl NativeSemanticExportPathState {
         }
     }
 
+    pub(crate) fn with_texture_naming(
+        mut self,
+        texture_naming: super::super::paths::NativeTextureNamingPlan,
+    ) -> Self {
+        self.texture_naming = texture_naming;
+        self
+    }
+
     pub(crate) fn claim_payload(
         &mut self,
         path: PathBuf,

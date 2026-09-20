@@ -495,3 +495,87 @@ pub(super) fn safe_payload_bundle_path(name: &str) -> PathBuf {
 pub(super) fn image_output_file_for_format(target: &Path, format: ImageOutputFormat) -> PathBuf {
     target.with_extension(image_format_extension(format))
 }
+
+/// Which Texture2D objects have to be named after themselves rather than after
+/// their container.
+///
+/// A container that holds exactly one texture named after it keeps the flat
+/// `<container>.png` path — that is the overwhelming majority and the shape every
+/// consumer already links to. A prefab that merely *references* textures is the
+/// other case: its objects carry their own names (`btn_home_mysekai`,
+/// `icon_chr_mysekai_h144_wh`, ...) but all resolve to the prefab's path, so
+/// before this plan they collapsed onto one name and were told apart only by a
+/// positional `__dupN` suffix — up to `__dup444` in the JP gacha bundles, which
+/// is neither addressable nor stable when the prefab is rebuilt.
+#[derive(Debug, Clone, Default)]
+pub(super) struct NativeTextureNamingPlan {
+    object_name_indices: HashSet<usize>,
+}
+
+impl NativeTextureNamingPlan {
+    pub(super) fn uses_object_name(&self, index: usize) -> bool {
+        self.object_name_indices.contains(&index)
+    }
+}
+
+/// Decide the texture naming for one bundle, before any object is read.
+///
+/// Grouping by container (not by final path) keeps this independent of the
+/// payload kind, which is only known after the read, and independent of the
+/// order objects happen to be claimed in.
+pub(super) fn plan_native_texture_naming(
+    assets: &[UnityAssetInfo],
+    strip_path_prefix: &str,
+) -> NativeTextureNamingPlan {
+    let mut by_container: std::collections::HashMap<PathBuf, Vec<usize>> =
+        std::collections::HashMap::new();
+    for asset in assets {
+        if !is_plain_texture2d_asset(asset) || is_member_cutout_container(asset) {
+            continue;
+        }
+        let Some(container) = asset
+            .container
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        by_container
+            .entry(strip_container_prefix(container, strip_path_prefix))
+            .or_default()
+            .push(asset.index);
+    }
+
+    let mut object_name_indices = HashSet::new();
+    for (relative, indices) in by_container {
+        if indices.len() == 1 {
+            let container_stem = relative
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            let matches_container = assets
+                .iter()
+                .find(|asset| asset.index == indices[0])
+                .and_then(|asset| asset.name.as_deref())
+                .is_some_and(|name| {
+                    assetstudio_fix_file_name(name) == assetstudio_fix_file_name(container_stem)
+                });
+            if matches_container {
+                continue;
+            }
+        }
+        object_name_indices.extend(indices);
+    }
+
+    NativeTextureNamingPlan {
+        object_name_indices,
+    }
+}
+
+fn is_plain_texture2d_asset(asset: &UnityAssetInfo) -> bool {
+    asset
+        .asset_type
+        .as_deref()
+        .map(normalize_assetstudio_type_name)
+        .is_some_and(|normalized| matches!(normalized.as_str(), "texture2d" | "texture2dimage"))
+}

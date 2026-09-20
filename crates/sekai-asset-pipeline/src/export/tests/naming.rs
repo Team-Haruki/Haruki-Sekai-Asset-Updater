@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use super::super::get_export_group;
 use super::super::paths::{
     assetstudio_fix_file_name, assetstudio_semantic_file_stem, default_extension_for_asset,
-    native_object_output_extension, native_object_output_path, normalize_semantic_path_component,
-    safe_payload_bundle_path, semantic_assetstudio_object_output_path,
-    static_known_payload_extension, strip_container_prefix,
+    named_subasset_output_path, native_object_output_extension, native_object_output_path,
+    normalize_semantic_path_component, plan_native_texture_naming, safe_payload_bundle_path,
+    semantic_assetstudio_object_output_path, static_known_payload_extension,
+    strip_container_prefix,
 };
 use super::super::selectors::{
     assetstudio_export_type_selector, assetstudio_type_selector_matches,
@@ -580,4 +581,104 @@ fn path_helpers_cover_every_semantic_directory_and_extension_family() {
     ] {
         let _ = native_object_output_extension(&asset, Some(payload_kind), Some(".txt"));
     }
+}
+
+fn texture_asset(index: usize, name: &str, container: &str) -> UnityAssetInfo {
+    UnityAssetInfo {
+        index,
+        name: Some(name.to_string()),
+        container: Some(container.to_string()),
+        asset_type: Some("Texture2D".to_string()),
+        type_id: 28,
+        path_id: 1000 + index as i64,
+        unique_id: None,
+        size: 42,
+        source_file: None,
+    }
+}
+
+const RESOURCES_PREFIX: &str = "assets/sekai/assetbundle/resources";
+
+#[test]
+fn lone_texture_named_after_its_container_keeps_the_flat_path() {
+    let assets = vec![texture_asset(
+        0,
+        "accessory_0001",
+        "assets/sekai/assetbundle/resources/startapp/thumbnail/avatar_accessory/accessory_0001.png",
+    )];
+
+    let plan = plan_native_texture_naming(&assets, RESOURCES_PREFIX);
+
+    assert!(!plan.uses_object_name(0));
+}
+
+#[test]
+fn textures_referenced_by_a_prefab_are_named_after_themselves() {
+    let container =
+        "assets/sekai/assetbundle/resources/ondemand/gacha/favorite_character_gacha/animation/item_get.prefab";
+    let assets = vec![
+        texture_asset(0, "btn_home_mysekai", container),
+        texture_asset(1, "icon_chr_mysekai_h144_wh", container),
+    ];
+
+    let plan = plan_native_texture_naming(&assets, RESOURCES_PREFIX);
+
+    // Both, not just the loser of the claim race: the flat path belongs to neither.
+    assert!(plan.uses_object_name(0));
+    assert!(plan.uses_object_name(1));
+
+    let target = named_subasset_output_path(
+        Path::new("/tmp/out/ondemand/gacha/favorite_character_gacha/animation/item_get.png"),
+        &assets[1],
+        "texture2d",
+    );
+    assert_eq!(
+        target,
+        PathBuf::from(
+            "/tmp/out/ondemand/gacha/favorite_character_gacha/animation/item_get.assets/texture2d/icon_chr_mysekai_h144_wh.png"
+        )
+    );
+}
+
+#[test]
+fn lone_texture_under_a_different_name_than_its_container_is_named_after_itself() {
+    let assets = vec![texture_asset(
+        0,
+        "btn_home_mysekai",
+        "assets/sekai/assetbundle/resources/startapp/lottery_game/new_year_2024/prefabs/lotteryperformanceroot.prefab",
+    )];
+
+    let plan = plan_native_texture_naming(&assets, RESOURCES_PREFIX);
+
+    assert!(plan.uses_object_name(0));
+}
+
+#[test]
+fn member_cutout_textures_keep_their_own_convention() {
+    let container =
+        "assets/sekai/assetbundle/resources/character/member_cutout/res005_no005/cutout.prefab";
+    let assets = vec![
+        texture_asset(0, "cutout_a", container),
+        texture_asset(1, "cutout_b", container),
+    ];
+
+    let plan = plan_native_texture_naming(&assets, RESOURCES_PREFIX);
+
+    assert!(!plan.uses_object_name(0));
+    assert!(!plan.uses_object_name(1));
+}
+
+#[test]
+fn texture_naming_plan_ignores_non_texture_objects() {
+    let container = "assets/sekai/assetbundle/resources/ondemand/live_pv/0009.prefab";
+    let mut mono = texture_asset(0, "ShaderProperty", container);
+    mono.asset_type = Some("MonoBehaviour".to_string());
+    let assets = vec![mono, texture_asset(1, "stage_light", container)];
+
+    let plan = plan_native_texture_naming(&assets, RESOURCES_PREFIX);
+
+    // The MonoBehaviour is not counted, so the one texture is alone under the
+    // prefab -- but its name still differs from the container, so it is renamed.
+    assert!(!plan.uses_object_name(0));
+    assert!(plan.uses_object_name(1));
 }

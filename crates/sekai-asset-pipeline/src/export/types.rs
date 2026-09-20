@@ -223,6 +223,8 @@ pub(super) struct NativeObjectExportSummary {
 #[derive(Debug, Default)]
 pub(super) struct NativeSemanticExportPathState {
     pub(super) registry: NativeSemanticExportPathRegistry,
+    /// Decided once per bundle, before the first read: see `plan_native_texture_naming`.
+    pub(super) texture_naming: super::paths::NativeTextureNamingPlan,
     pub(super) written_files: Vec<PathBuf>,
     pub(super) acb_sources: Vec<NativeInMemoryMediaSource>,
     pub(super) image_encode: NativeImageEncodeTelemetry,
