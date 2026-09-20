@@ -26,7 +26,9 @@ use self::naming::{
     is_text_asset_acb_target, is_text_asset_decoded_usm_target,
     native_image_surrogate_public_target, text_asset_public_bytes_target,
 };
-use super::paths::{assetbundle_typetree_output_path, native_object_output_path};
+use super::paths::{
+    assetbundle_typetree_output_path, named_subasset_output_path, native_object_output_path,
+};
 use super::types::{
     NativeImageEncodeSettings, NativeInMemoryMediaSource, NativeObjectExportOptions,
     NativeSemanticExportPathState, NativeSemanticPathClaim, UnityAssetInfo, UnityObjectReadOutput,
@@ -107,6 +109,13 @@ fn claim_native_payload_target(
         read_output.response.payload_kind.as_deref(),
         read_output.response.suggested_extension.as_deref(),
     );
+    // A texture that only happens to be referenced by its container carries its own
+    // name; keep it instead of stacking every one of them onto the container's path.
+    let target = if path_state.texture_naming.uses_object_name(asset.index) {
+        named_subasset_output_path(&target, asset, "texture2d")
+    } else {
+        target
+    };
     let target = text_asset_public_bytes_target(&target, asset).unwrap_or(target);
     let target = assetbundle_typetree_output_path(
         options.output_dir,

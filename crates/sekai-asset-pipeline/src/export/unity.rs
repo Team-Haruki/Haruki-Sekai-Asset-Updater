@@ -31,6 +31,7 @@ use crate::{
 };
 
 use super::merge_phase_ms;
+use super::paths::plan_native_texture_naming;
 use super::payload::playable::{is_playable_mono_typetree, write_assetstudio_playable_payloads};
 use super::payload::write_native_object_payload;
 use super::selectors::{
@@ -158,7 +159,9 @@ fn call_unity_rs_object_export(
 
     let read_batch_size =
         native_read_batch_size_for_assets(options.read_batch_size, &readable_assets);
-    let mut path_state = NativeSemanticExportPathState::with_registry(path_registry.clone());
+    let texture_naming = plan_native_texture_naming(&assets, options.strip_path_prefix);
+    let mut path_state = NativeSemanticExportPathState::with_registry(path_registry.clone())
+        .with_texture_naming(texture_naming);
     let mut playable_outputs = Vec::new();
     for asset_chunk in readable_assets.chunks(read_batch_size) {
         summary.object_read_plan.batch_count += 1;
