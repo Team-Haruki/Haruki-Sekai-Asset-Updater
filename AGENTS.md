@@ -13,12 +13,17 @@
   - `crates/sekai-asset-pipeline/`
   - `src/`
   - `tests/`
+- 本地启动主服务使用 `cargo run`（需要 `haruki-asset-configs.yaml` 和相关环境变量），
+  容器方式使用 `docker compose up --build`。
 - 对外 HTTP 接口目前使用 v2 路径：
   - `GET /healthz`
   - `POST /v2/assets/update`
   - `GET /v2/jobs`
   - `GET /v2/jobs/{id}`
   - `POST /v2/jobs/{id}/cancel`
+- 请求流程：`POST /v2/assets/update` 由 handler 创建任务，`JobManager` 派发 tokio task，
+  经 `build_execution_plan` 得到 `ExecutionPlan`，再由 `AssetExecutionContext` 执行
+  下载/解密/导出/上传，任务状态通过 `GET /v2/jobs/{id}` 查询。
 
 ## 2. 目录约定
 
@@ -83,6 +88,8 @@
 - 共享 crate 不得反向依赖 Axum、JobManager、下载记录、OpenDAL 发布、Haruki 3D
   或 Git 同步等应用层能力。
 - FFmpeg 是仅存的外部运行依赖（使用 media FFI feature 时链接其系统库）。
+- FFmpeg 必须是 7.x：`rsmpeg` 的绑定与版本强绑定，更高版本会在 rsmpeg 内部报类型错误，
+  而不会给出任何与版本相关的提示。
 
 ## 5. 代码风格约定
 
@@ -103,6 +110,18 @@ cargo fmt
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
+
+`--all-features` 会打开 `media-ffi`，让 `rsmpeg` 链接本机 FFmpeg。不加该 feature 时，
+`crates/sekai-asset-pipeline/src/media/ffi.rs`（仓库中最大的 unsafe 面）不会被任何本地
+检查覆盖。macOS + Homebrew 下默认 `pkg-config` 会解析到当前 `ffmpeg`，需显式指向
+`ffmpeg@7`：
+
+```bash
+export PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
+export FFMPEG_PKG_CONFIG_PATH=/opt/homebrew/opt/ffmpeg@7/lib/pkgconfig
+```
+
+CI 在 Linux 构建，容器内已固定 FFmpeg 7。
 
 Sonar/覆盖率相关变更还应运行：
 
@@ -145,7 +164,7 @@ Pull Request 的变更代码覆盖率同样不得低于 90%。CI 使用 `diff-co
 
 ## 8. 推荐工作流
 
-1. 先阅读 `README.md`、`CLAUDE.md` 和本文件。
+1. 先阅读 `README.md` 和本文件。
 2. 只在 Rust 结构内工作。
 3. 修改后先跑 `cargo fmt`。
 4. 再跑 `cargo clippy`。
