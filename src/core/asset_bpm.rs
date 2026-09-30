@@ -244,7 +244,7 @@ fn parse_chart_bpm(bytes: &[u8]) -> Result<BpmChart, AssetIndexError> {
         if count == 0 {
             continue;
         }
-        for (position, token) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (position, token) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let Ok(token) = std::str::from_utf8(token) else {
                 continue;
             };
