@@ -210,6 +210,7 @@ fn native_image_object_payload_is_encoded_and_written_during_export() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "character/member/test",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -281,6 +282,7 @@ fn text_asset_acb_payload_is_queued_as_memory_source_without_writing_file() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "sound/foo",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -341,6 +343,7 @@ fn music_score_text_asset_manifest_uses_public_txt_extension() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "music/music_score/0002_01",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -410,6 +413,7 @@ fn decoded_usm_text_asset_is_not_recorded_as_final_manifest_entry() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "event/opening",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -468,6 +472,7 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "actionset/group0",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -527,7 +532,7 @@ fn assetbundle_typetree_routes_to_container_bundle_record_path() {
 }
 
 #[test]
-fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
+fn assetbundle_typetree_mixed_categories_use_download_category_path() {
     let dir = tempdir().unwrap();
     let mut region = processing_pipeline_options().region;
     region.export.by_category = true;
@@ -535,6 +540,7 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "crystal_shop/thumbnail/mysekai_mission_pass5",
+        category: "startapp",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -587,15 +593,145 @@ fn assetbundle_typetree_mixed_categories_use_stable_bundle_fallback_path() {
 
     let expected = dir
         .path()
-        .join("crystal_shop/thumbnail/mysekai_mission_pass5/_bundle.json");
+        .join("startapp/crystal_shop/thumbnail/mysekai_mission_pass5/_bundle.json");
     assert!(expected.exists());
+    assert!(!dir.path().join("crystal_shop").exists());
     let manifest =
         fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
     let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
     assert_eq!(
         entry.get("path").and_then(|value| value.as_str()),
-        Some("crystal_shop/thumbnail/mysekai_mission_pass5/_bundle.json")
+        Some("startapp/crystal_shop/thumbnail/mysekai_mission_pass5/_bundle.json")
     );
+}
+
+/// The native reader used to report class 142 as `ClassID142`, which skipped the
+/// `_bundle.json` routing and wrote the object at the output root, named after
+/// the bundle (`event_story/event_breaktime_2021/scenario.json`).
+#[test]
+fn classid142_assetbundle_typetree_routes_into_container_category() {
+    let dir = tempdir().unwrap();
+    let mut region = processing_pipeline_options().region;
+    region.export.by_category = true;
+    let read_kinds = BTreeMap::new();
+    let options = NativeObjectExportOptions {
+        output_dir: dir.path(),
+        export_path: "event_story/event_breaktime_2021/scenario",
+        category: "ondemand",
+        strip_path_prefix: "assets/sekai/assetbundle/resources",
+        region: &region,
+        read_kinds: &read_kinds,
+        image_format: "bmp",
+        read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
+    };
+    let mut path_state = NativeSemanticExportPathState::default();
+    let asset = UnityAssetInfo {
+        index: 0,
+        name: Some("event_story/event_breaktime_2021/scenario".to_string()),
+        container: None,
+        asset_type: Some("ClassID142".to_string()),
+        type_id: 142,
+        path_id: 1,
+        unique_id: None,
+        size: 0,
+        source_file: None,
+    };
+    let entries = (1..=8)
+        .map(|episode| {
+            format!(
+                r#"{{"key":"assets/sekai/assetbundle/resources/ondemand/event_story/event_breaktime_2021/scenario/event_23_0{episode}.asset","value":{{"asset":{{"m_FileID":0,"m_PathID":{episode}}}}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let payload = format!(
+        r#"{{"m_Name":"event_story/event_breaktime_2021/scenario","m_AssetBundleName":"event_story/event_breaktime_2021/scenario","m_Container":[{entries}]}}"#
+    );
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("typetree_json".to_string()),
+            payload_len: payload.len() as i64,
+            suggested_extension: Some(".json".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: payload.into_bytes().into(),
+    };
+
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+    assert!(dir
+        .path()
+        .join("ondemand/event_story/event_breaktime_2021/scenario/_bundle.json")
+        .exists());
+    assert!(!dir.path().join("event_story").exists());
+    let manifest =
+        fs::read_to_string(dir.path().join(".assetstudio-export-manifest.jsonl")).unwrap();
+    let entry: sonic_rs::Value = sonic_rs::from_str(manifest.trim()).unwrap();
+    assert_eq!(
+        entry.get("path").and_then(|value| value.as_str()),
+        Some("ondemand/event_story/event_breaktime_2021/scenario/_bundle.json")
+    );
+}
+
+#[test]
+fn containerless_object_by_category_lands_in_download_category_bundle_dir() {
+    let dir = tempdir().unwrap();
+    let mut region = processing_pipeline_options().region;
+    region.export.by_category = true;
+    let read_kinds = BTreeMap::new();
+    let options = NativeObjectExportOptions {
+        output_dir: dir.path(),
+        export_path: "event_story/event_breaktime_2021/scenario",
+        category: "ondemand",
+        strip_path_prefix: "assets/sekai/assetbundle/resources",
+        region: &region,
+        read_kinds: &read_kinds,
+        image_format: "bmp",
+        read_batch_size: 16,
+        image_encode: &NativeImageEncodeSettings::default(),
+    };
+    let mut path_state = NativeSemanticExportPathState::default();
+    // A class the reader has no name for, without a container, named like the bundle.
+    let asset = UnityAssetInfo {
+        index: 0,
+        name: Some("event_story/event_breaktime_2021/scenario".to_string()),
+        container: None,
+        asset_type: Some("ClassID999".to_string()),
+        type_id: 999,
+        path_id: 1,
+        unique_id: None,
+        size: 0,
+        source_file: None,
+    };
+    let payload = br#"{"m_Name":"event_story/event_breaktime_2021/scenario"}"#;
+    let read_output = UnityObjectReadOutput {
+        response: UnityObjectReadResponse {
+            success: true,
+            asset: Some(asset.clone()),
+            payload_kind: Some("typetree_json".to_string()),
+            payload_len: payload.len() as i64,
+            suggested_extension: Some(".json".to_string()),
+            warnings: Vec::new(),
+            phase_ms: HashMap::new(),
+            error: None,
+            duration_ms: None,
+        },
+        payload: payload.to_vec().into(),
+    };
+
+    write_native_object_payload(&options, &mut path_state, &asset, &read_output).unwrap();
+
+    assert!(dir
+        .path()
+        .join("ondemand/event_story/event_breaktime_2021/scenario/scenario.json")
+        .exists());
+    assert!(!dir.path().join("event_story").exists());
 }
 
 #[test]
@@ -607,6 +743,7 @@ fn monoscript_typetree_routes_to_container_subasset_path() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "actionset/group0",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -958,6 +1095,7 @@ fn playable_export_dedupes_identical_payloads_across_bundle_states() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "virtual_live/mc/timeline/foo",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -1030,6 +1168,7 @@ fn native_object_export_skips_byte_identical_semantic_duplicates() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "character/member/res004_no026",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,
@@ -1095,6 +1234,7 @@ fn native_object_export_keeps_distinct_semantic_duplicates() {
     let options = NativeObjectExportOptions {
         output_dir: dir.path(),
         export_path: "mysekai/site/field/grasslands",
+        category: "ondemand",
         strip_path_prefix: "assets/sekai/assetbundle/resources",
         region: &region,
         read_kinds: &read_kinds,

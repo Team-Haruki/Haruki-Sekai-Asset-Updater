@@ -299,6 +299,9 @@ pub struct NativeInMemoryMediaSource {
 pub(super) struct NativeObjectExportOptions<'a> {
     pub(super) output_dir: &'a Path,
     pub(super) export_path: &'a str,
+    /// The bundle's download category directory (`startapp` / `ondemand`). With
+    /// `by_category` it is where objects whose own path names no category land.
+    pub(super) category: &'a str,
     pub(super) strip_path_prefix: &'a str,
     pub(super) region: &'a RegionConfig,
     pub(super) read_kinds: &'a BTreeMap<String, String>,
