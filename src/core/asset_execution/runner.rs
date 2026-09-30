@@ -235,6 +235,14 @@ impl AssetExecutionContext {
                 discovered = discovered_bundles,
                 "no new assets to download"
             );
+            crate::core::asset_index::publish_after_update(
+                app_config,
+                &self.region_name,
+                &self.region,
+                0,
+                &cancel_flag,
+            )
+            .await?;
             return Ok(ExecutionSummary {
                 discovered_bundles,
                 queued_downloads: 0,
@@ -666,6 +674,14 @@ impl AssetExecutionContext {
             },
         );
 
+        crate::core::asset_index::publish_after_update(
+            app_config,
+            &self.region_name,
+            &self.region,
+            failed,
+            &cancel_flag,
+        )
+        .await?;
         Ok(ExecutionSummary {
             discovered_bundles,
             queued_downloads,

@@ -933,6 +933,8 @@ impl AudioExportConfig {
 #[serde(default)]
 pub struct RegionUploadConfig {
     pub enabled: bool,
+    /// Publish a complete Cloud inventory after a fully successful update.
+    pub publish_asset_index: bool,
     pub providers: Vec<String>,
     pub public_read: UploadPublicReadConfig,
     pub remove_local_after_upload: bool,

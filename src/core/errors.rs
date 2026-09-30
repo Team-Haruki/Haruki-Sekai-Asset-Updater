@@ -195,6 +195,8 @@ pub enum StorageError {
 #[derive(Debug, Error)]
 pub enum AssetExecutionError {
     #[error(transparent)]
+    AssetIndex(#[from] crate::core::asset_index::AssetIndexError),
+    #[error(transparent)]
     Region(#[from] RegionError),
     #[error(transparent)]
     DownloadRecord(#[from] DownloadRecordError),
