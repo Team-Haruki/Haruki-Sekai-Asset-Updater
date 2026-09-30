@@ -969,6 +969,7 @@ dependencies = [
  "axum",
  "cbc",
  "chrono",
+ "futures-util",
  "hex",
  "mime_guess",
  "opendal",

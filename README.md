@@ -150,6 +150,50 @@ every StartApp/OnDemand bundle selected by the region filters into that cache;
 `export.raw_bundles` continues to control the optional second raw-bundle copy in
 the asset output tree.
 
+## Cloud asset inventory publication
+
+Set `regions.<region>.upload.publish_asset_index: true` to publish a complete
+inventory after an update finishes with no failed bundle downloads, exports or
+uploads. Raw bundle prefetch jobs never publish. Publication runs while the
+JobManager holds the same region lock as asset writes and remains inside the
+job timeout. Cancelled and partially failed updates leave the previous pointer.
+
+The upload provider root must end in `<region>-assets` (for example,
+`root: "{region}-assets"` in the shared Garage bucket). The publisher opens the
+parent namespace so inventory keys retain `jp-assets/...`, while the pointer is
+`indexes/assets/v1/jp/current.json`. An empty S3 root is supported when canonical
+`<region>-assets/` object keys already exist. Other layouts are rejected;
+publication never renames existing assets or invents a prefix for a partial list.
+
+The publisher streams the full region listing, writes deterministic immutable
+JSON shards addressed by SHA-256, and checks the full listing again before
+advancing the pointer. It refuses empty regions, invalid keys, changed assets,
+corrupt shards, more than 500,000 objects, or shards over 64 MiB. JSON uses
+`sonic-rs`; the manifest revision hashes sorted `prefix + NUL + shard SHA256 + LF`
+records, making it independent of JSON formatting in Cloud or other producers.
+The current pointer is written only after every selected provider has prepared
+and verified its inventory. Pointer writes across providers are not atomic;
+if one write fails, a previously promoted provider still contains a complete,
+verified inventory and rerunning the job repairs the remaining destinations.
+Other processes writing the same region must use the same publication protocol
+and external serialization; the in-process lock does not coordinate services.
+
+Publication also generates the BPM index from both `startapp` and `ondemand`
+chart prefixes. An unreadable or malformed chart fails the entire publication;
+it never publishes an index that silently omits that chart. A verified BPM blob
+is reused when the resource revision has not changed.
+
+Publication failures make the update job fail even when asset uploads already
+finished. `GET /v2/jobs/{id}` exposes `status: "failed"` and the error in both
+`message` and `failure.message`; the existing `job failed` error log includes
+the same message, job ID and region. Publication errors identify the provider
+and a fixed stage: `inventory_prepare`, `bpm_index`, `inventory_verify` or
+`pointer_publish`. Preparation, BPM generation and verification failures leave
+every existing `current.json` unchanged. Pointer-write failures preserve each
+provider's last complete pointer, subject to the cross-provider limitation
+above. Correct the failed asset or storage operation and rerun the update;
+successful uploads are not rolled back.
+
 ## Runtime Tuning
 
 - AssetStudio exports directly call the linked `unity-rs-core` library.

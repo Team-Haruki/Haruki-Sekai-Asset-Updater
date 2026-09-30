@@ -1,4 +1,6 @@
+pub(crate) mod asset_bpm;
 pub mod asset_execution;
+pub(crate) mod asset_index;
 pub mod config;
 pub mod download_records;
 pub mod errors;

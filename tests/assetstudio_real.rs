@@ -71,6 +71,7 @@ fn run_real_assetstudio_export(bundle_path: String) {
         },
         upload: RegionUploadConfig {
             enabled: false,
+            publish_asset_index: false,
             providers: Vec::new(),
             public_read: haruki_sekai_asset_updater::core::config::UploadPublicReadConfig::default(
             ),

@@ -185,6 +185,7 @@ regions:
         cleanup_work_dir_after_failure: true
     upload:
       enabled: false
+      publish_asset_index: false # requires S3/FS root ending in {region}-assets; publish only after complete jobs
       providers: []
       public_read:
         include: []
@@ -238,6 +239,7 @@ regions:
         formats: ["mp3"] # wav | flac | mp3
     upload:
       enabled: false
+      publish_asset_index: false # requires S3/FS root ending in {region}-assets; publish only after complete jobs
       providers: []
       public_read:
         include: []

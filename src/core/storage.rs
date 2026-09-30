@@ -69,6 +69,48 @@ pub fn build_storage_operator_target(
     build_operator_target(provider, region_name)
 }
 
+/// Use the namespace above `<region>-assets` for Cloud's index pointers, while
+/// keeping uploaded objects under their existing keys. Unsupported layouts are
+/// rejected rather than publishing an incomplete or incorrectly rooted view.
+pub(crate) fn build_asset_index_targets(
+    storage: &StorageConfig,
+    region_name: &str,
+    selected_providers: &[String],
+) -> Result<Vec<StorageOperatorTarget>, StorageError> {
+    selected_provider_configs(storage, selected_providers)?
+        .into_iter()
+        .map(|provider| {
+            let mut resolved = resolve_storage_provider(provider, region_name)?;
+            let root = resolved.options.get("root").cloned().unwrap_or_default();
+            let root = root.trim_end_matches('/');
+            let region_root = format!("{region_name}-assets");
+            let index_root = if (root.is_empty() || root == region_root) && resolved.scheme == "s3" {
+                String::new()
+            } else if root == region_root {
+                ".".to_string()
+            } else if let Some(parent) = root.strip_suffix(&format!("/{region_root}")) {
+                if parent.is_empty() && resolved.scheme == "fs" { "/".to_string() } else { parent.to_string() }
+            } else {
+                return Err(StorageError::InvalidProviderConfig {
+                    provider: resolved.provider,
+                    message: format!("publish_asset_index requires root ending in {region_root} (or an empty S3 root)"),
+                });
+            };
+            resolved.options.insert("root".to_string(), index_root.clone());
+            if resolved.scheme == "fs" {
+                // A reader must observe the previous or next pointer, never a
+                // partially overwritten JSON document. Keep temporary files
+                // on the same filesystem and outside the regional inventory.
+                resolved.options.entry("atomic_write_dir".to_string()).or_insert_with(|| {
+                    Path::new(&index_root).join("indexes/.asset-index-tmp").to_string_lossy().into_owned()
+                });
+            }
+            resolved.root = Some(index_root);
+            build_resolved_operator_target(resolved)
+        })
+        .collect()
+}
+
 pub fn plan_storage_targets(
     storage: &StorageConfig,
     region_name: &str,
@@ -401,6 +443,13 @@ fn build_operator_target(
     // default features off, `init_default_registry` alone leaves S3 without a transport.
     opendal::install_default();
     let resolved = resolve_storage_provider(provider, region_name)?;
+    build_resolved_operator_target(resolved)
+}
+
+fn build_resolved_operator_target(
+    resolved: ResolvedStorageProvider,
+) -> Result<StorageOperatorTarget, StorageError> {
+    opendal::install_default();
     let operator =
         Operator::via_iter(&resolved.scheme, resolved.options.clone()).map_err(|source| {
             StorageError::Provider {
