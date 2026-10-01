@@ -1,4 +1,5 @@
-FROM rust:trixie AS builder
+# ── Build stages (cargo-chef: dependencies are cooked in their own cached layer) ──
+FROM lukemathwalker/cargo-chef:0.1.78-rust-trixie AS chef
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /app
@@ -15,19 +16,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libswresample-dev \
     libswscale-dev && \
     rm -rf /var/lib/apt/lists/*
-COPY Cargo.toml Cargo.toml
-COPY Cargo.lock Cargo.lock
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
 # The workspace members the root crate depends on. Without these the build
 # fails at manifest resolution, before it ever reaches a source file.
 COPY crates crates
 COPY src src
-COPY tests tests
+RUN cargo chef prepare --recipe-path recipe.json
 
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --features media-ffi --recipe-path recipe.json
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY src src
+
+# The version comes from Cargo.toml (bumped before tagging; CI never passes this arg).
+# For a manual build with another version string, only this package's own entries in
+# Cargo.toml and Cargo.lock are rewritten: the dependency set stays the committed lock.
 ARG HARUKI_PACKAGE_VERSION=""
 RUN if [ -n "${HARUKI_PACKAGE_VERSION}" ]; then \
         package_version="${HARUKI_PACKAGE_VERSION#v}"; \
         sed -i "0,/^version = /s#^version = .*#version = \"${package_version}\"#" Cargo.toml; \
-        cargo generate-lockfile; \
+        sed -i "/^name = \"haruki-sekai-asset-updater\"$/{n;s#^version = .*#version = \"${package_version}\"#}" Cargo.lock; \
     fi
 RUN cargo build --release --locked --features media-ffi
 

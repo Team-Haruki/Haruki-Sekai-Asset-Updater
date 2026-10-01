@@ -196,18 +196,53 @@ Examples from this repo's history:
 
 ## GitHub Actions workflows
 
-Use the standardized workflow layout in `.github/workflows`:
+CI reuses the shared templates in
+[`seiunx-dev/ci-templates`](https://github.com/seiunx-dev/ci-templates) at `@v1`.
+The files in `.github/workflows` are thin callers:
 
-- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
-- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo clippy --locked --workspace --all-targets -- -D warnings`, then `cargo test --locked --workspace`. A separate CI job repeats clippy/test with the `media-ffi` feature enabled.
-- `sonar.yml` generates workspace LCOV, enforces at least 90% overall line coverage, runs the SonarQube scan, and enforces at least 90% coverage on pull-request changes.
-- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
-- `docker.yml` is the standard Docker entrypoint. It runs on `main` pushes, `v*` tags, PRs that touch Docker/build inputs, and manual dispatch. PRs build only; non-PR runs push GHCR images with lowercase image names and Docker metadata tags.
+- `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
+  dispatch:
+  - `Rust` (`rust-ci`): fmt, clippy `--workspace --all-targets -D warnings`, and the
+    workspace tests run once under `cargo llvm-cov` with a 90% line-coverage floor.
+  - `Rust (media-ffi)` (`rust-ci` in `debian:trixie-slim` with the FFmpeg 7.1 dev
+    packages, same as the runtime image): clippy and tests with
+    `--features haruki-sekai-asset-updater/media-ffi`.
+  - `Diff coverage` (PRs only, custom job in the caller): `diff-cover` ≥ 90% on the
+    changed lines against the base branch, fed by the `Rust` job's coverage artifact.
+  - `Sonar` scans that coverage (skipped green on Dependabot/fork PRs); `Workflow lint`
+    runs actionlint.
+  - `Docker` does not wait for the tests and builds on every PR (no path filter; the
+    old one missed `crates/**`). On `main` it pushes the immutable
+    `ghcr.io/team-haruki/haruki-sekai-asset-updater:sha-<full sha>` and `:sha-<7 chars>`
+    as soon as the build finishes; the `Docker tags` job (`docker-retag.yml`, after
+    `CI OK`) then moves `:main` to that digest without rebuilding, so `:main` only
+    follows commits whose `CI OK` passed. The Dockerfile uses cargo-chef; the registry
+    `:buildcache` keeps the cooked dependency layer.
+- The aggregate job **`CI OK`** is the only required status check.
+- `release.yml` (`Release`): bump `version` in `Cargo.toml` (and the package's own entry
+  in `Cargo.lock`) in a PR → merge and wait for `CI OK` on `main` → push the tag
+  `v<version>`. `release-gate` refuses a tag that differs from `Cargo.toml` and waits
+  for `CI OK` on the tagged commit; then the binaries are built from the committed
+  `Cargo.lock` (tags only, without `media-ffi`;
+  `haruki-sekai-asset-updater-{linux-x64,macos-arm64}.tar.gz` and `-windows-x64.zip`,
+  each with a top-level `haruki-sekai-asset-updater-<label>/` folder), the `main` image
+  `:sha-<sha>` is promoted (re-tagged, not rebuilt) to `:<version>`, `:<major>.<minor>`
+  and `:latest`, and the GitHub Release is published with `SHA256SUMS-<tag>.txt`.
+  Manual dispatch is a dry run: it builds the binaries and publishes nothing.
+- CI never rewrites `Cargo.toml` or regenerates `Cargo.lock`. The Dockerfile's
+  `HARUKI_PACKAGE_VERSION` build arg is only for manual builds; it rewrites this
+  package's own version entries and keeps the locked dependency set.
 
 Workflow maintenance rules:
 
-- Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
-- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
-- Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
-- Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
-- Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.
+- Use the shared templates first. Add custom jobs or steps only when a template
+  genuinely cannot meet the project's needs, keep them in the thin caller files, and
+  add a comment explaining why.
+- Template bugs and missing features are fixed upstream in `seiunx-dev/ci-templates`
+  (new `v1.x.y` tag), not worked around here.
+- Keep top-level `permissions: contents: read`; grant `packages: write` / `contents: write`
+  only on the job that needs it.
+- Do not suppress `githubactions:S7637` (full-SHA pins) in `sonar-project.properties`: the
+  template's `sonar.yml` already ignores it for the `@v1` references.
+- Third-party actions in caller-side custom steps are pinned to a full commit SHA with a
+  `# vX.Y.Z` comment; Dependabot (`github-actions`) updates them and the template refs.

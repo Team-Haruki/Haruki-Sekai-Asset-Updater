@@ -10,71 +10,102 @@ on:
 permissions:
   contents: read
 
+# PRs: one group per PR, newer pushes cancel older runs. Everything else: one group per
+# event and commit, so a queued main run is never replaced by a newer one (every commit keeps
+# its "CI OK" and :sha-<sha> image for the release gate and promote-on-tag).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
-    name: Rust checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+    name: Rust
+    uses: seiunx-dev/ci-templates/.github/workflows/rust-ci.yml@v1
+    with:
+      coverage: true
+      coverage-fail-under-lines: "90"
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+  rust-ffi:
+    name: Rust (media-ffi)
+    uses: seiunx-dev/ci-templates/.github/workflows/rust-ci.yml@v1
+    with:
+      cache-key-prefix: rust-ffi
+      container: debian:trixie-slim # ffmpeg 7.1 dev libs, same as the runtime image
+      apt-packages: clang pkg-config libavcodec-dev libavdevice-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
+      fmt: false
+      feature-sets: --features haruki-sekai-asset-updater/media-ffi
+      test-feature-sets: --features haruki-sekai-asset-updater/media-ffi
+
+  # Custom job: no template measures coverage of the changed lines; the old sonar.yml
+  # enforced diff-cover >= 90% on PRs, so it stays here, fed by rust-ci's coverage artifact.
+  diff-cover:
+    name: Diff coverage
+    if: github.event_name == 'pull_request'
+    needs: [rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check build
-        run: cargo check --locked --workspace --all-targets
-
-      - name: Run Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo test --locked --workspace
-
-  rust-media-ffi:
-    name: Rust checks (media-ffi)
-    runs-on: ubuntu-latest
-    # Mirror the Dockerfile's build environment (Debian trixie ships the ffmpeg 7.x dev libs that
-    # rsmpeg's `ffmpeg7_1` feature needs) so the production media-ffi path is actually compiled,
-    # clippy'd and tested in CI instead of only inside the Docker build.
-    container: debian:trixie-slim
-    steps:
-      - name: Install system dependencies
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-rust
+          path: coverage
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: diff-cover >= 90%
+        env:
+          BASE: ${{ github.base_ref }}
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates curl clang pkg-config build-essential git \
-            libavcodec-dev libavdevice-dev libavformat-dev \
-            libavutil-dev libswresample-dev libswscale-dev
-          rm -rf /var/lib/apt/lists/*
+          python -m pip install diff-cover==10.5.1
+          diff-cover coverage/lcov-rust.info --compare-branch="origin/$BASE" --fail-under=90
 
-      - name: Checkout
-        uses: actions/checkout@v7
+  sonar:
+    name: Sonar
+    needs: [rust]
+    uses: seiunx-dev/ci-templates/.github/workflows/sonar.yml@v1
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
-        with:
-          components: clippy
+  docker:
+    name: Docker
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: seiunx-dev/ci-templates/.github/workflows/docker.yml@v1
+    with:
+      defer-moving-tags: true # push :sha-* right away; :main moves after CI OK (docker-tags)
+      cache-backend: registry
+      cache-mode: max
+      # no pr-paths: the old filter missed crates/** and tests/**
 
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+  workflows:
+    name: Workflow lint
+    uses: seiunx-dev/ci-templates/.github/workflows/actionlint.yml@v1
 
-      - name: Run Clippy (media-ffi)
-        run: cargo clippy --locked --workspace --all-targets --features haruki-sekai-asset-updater/media-ffi -- -D warnings
+  ci-ok:
+    name: CI OK # the only required status check
+    if: always()
+    needs: [rust, rust-ffi, diff-cover, sonar, docker, workflows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
 
-      - name: Run tests (media-ffi)
-        run: cargo test --locked --workspace --features haruki-sekai-asset-updater/media-ffi
+  docker-tags:
+    name: Docker tags # :main follows only commits whose CI OK passed
+    needs: [docker, ci-ok]
+    if: needs.docker.outputs.deferred-tags != ''
+    permissions:
+      contents: read
+      packages: write
+    uses: seiunx-dev/ci-templates/.github/workflows/docker-retag.yml@v1
+    with:
+      image: ${{ needs.docker.outputs.image }}
+      digest: ${{ needs.docker.outputs.digest }}
+      tags: ${{ needs.docker.outputs.deferred-tags }}
