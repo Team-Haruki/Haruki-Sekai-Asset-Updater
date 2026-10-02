@@ -13,6 +13,7 @@ use unity_rs_core::mesh::MeshReadLimits;
 use unity_rs_core::monobehaviour::{
     read_mono_behaviour_json, MonoBehaviourReadLimits, MONO_BEHAVIOUR_CLASS_ID,
 };
+use unity_rs_core::serialized::ASSET_BUNDLE_CLASS_ID;
 use unity_rs_core::shader::SHADER_CLASS_ID;
 use unity_rs_core::simple_assets::{
     SimpleAssetReadLimits, AUDIO_CLIP_CLASS_ID, FONT_CLASS_ID, MOVIE_TEXTURE_CLASS_ID,
@@ -26,9 +27,7 @@ use unity_rs_core::texture_array::{
     TEXTURE_2D_ARRAY_CLASS_ID,
 };
 
-use crate::{
-    ExportPipelineError, PipelineOptions as AppConfig, PipelineRegionOptions as RegionConfig,
-};
+use crate::{ExportPipelineError, PipelineOptions as AppConfig};
 
 use super::merge_phase_ms;
 use super::paths::plan_native_texture_naming;
@@ -48,10 +47,10 @@ use super::types::{
 
 pub(super) async fn run_unity_rs_object_export(
     app_config: &AppConfig,
-    region: &RegionConfig,
     asset_bundle_file: &Path,
     output_dir: &Path,
     export_path: &str,
+    category: &str,
     strip_path_prefix: &str,
     path_registry: &NativeSemanticExportPathRegistry,
 ) -> Result<NativeObjectExportSummary, ExportPipelineError> {
@@ -60,8 +59,9 @@ pub(super) async fn run_unity_rs_object_export(
     let input_path = asset_bundle_file.to_path_buf();
     let output_dir = output_dir.to_path_buf();
     let export_path = export_path.to_string();
+    let category = category.to_string();
     let strip_path_prefix = strip_path_prefix.to_string();
-    let region = region.clone();
+    let region = app_config.region.clone();
     let read_kinds = app_config.backends.asset_studio.read_kinds.clone();
     let image_format = app_config
         .backends
@@ -84,6 +84,7 @@ pub(super) async fn run_unity_rs_object_export(
         let options = NativeObjectExportOptions {
             output_dir: &output_dir,
             export_path: &export_path,
+            category: &category,
             strip_path_prefix: &strip_path_prefix,
             region: &region,
             read_kinds: &read_kinds,
@@ -535,7 +536,7 @@ fn elapsed_millis(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-fn unity_class_name(class_id: i32) -> String {
+pub(super) fn unity_class_name(class_id: i32) -> String {
     match class_id {
         1 => "GameObject",
         4 => "Transform",
@@ -551,6 +552,7 @@ fn unity_class_name(class_id: i32) -> String {
         MONO_BEHAVIOUR_CLASS_ID => "MonoBehaviour",
         FONT_CLASS_ID => "Font",
         137 => "SkinnedMeshRenderer",
+        ASSET_BUNDLE_CLASS_ID => "AssetBundle",
         MOVIE_TEXTURE_CLASS_ID => "MovieTexture",
         TEXTURE_2D_ARRAY_CLASS_ID => "Texture2DArray",
         SPRITE_CLASS_ID => "Sprite",

@@ -132,10 +132,10 @@ pub async fn export_unity_asset_bundle_payloads_with_registry(
 
     let native_object_summary = run_unity_rs_object_export(
         options,
-        region,
         asset_bundle_file,
         output_dir,
         export_path,
+        &category.to_lowercase(),
         &exclude_path_prefix,
         path_registry,
     )

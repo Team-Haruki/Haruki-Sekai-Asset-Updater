@@ -144,6 +144,7 @@ mod tests {
             let options = NativeObjectExportOptions {
                 output_dir: dir.path(),
                 export_path: "mysekai/fixture/chair",
+                category: "ondemand",
                 strip_path_prefix: "assets/sekai/assetbundle/resources",
                 region: &region,
                 read_kinds: &read_kinds,
