@@ -233,7 +233,9 @@ The files in `.github/workflows` are thin callers:
     `CI OK`) then moves `:main` to that digest without rebuilding, so `:main` only
     follows commits whose `CI OK` passed. The Dockerfile uses cargo-chef; the registry
     `:buildcache` keeps the cooked dependency layer.
-- The aggregate job **`CI OK`** is the only required status check.
+- The aggregate job **`CI OK`** is the single CI verdict: `Docker tags` and
+  `release-gate` wait for it. `main` has no branch protection or rulesets, so GitHub
+  does not enforce it as a required check; it gates merges by convention only.
 - `release.yml` (`Release`): bump `version` in `Cargo.toml` (and the package's own entry
   in `Cargo.lock`) in a PR → merge and wait for `CI OK` on `main` → push the tag
   `v<version>`. `release-gate` refuses a tag that differs from `Cargo.toml` and waits

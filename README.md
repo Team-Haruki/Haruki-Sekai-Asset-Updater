@@ -61,18 +61,15 @@ for the boundary and API example.
   `git_sync.chart_hashes.password`,
   `regions.*.crypto.aes_key_hex`,
   `regions.*.crypto.aes_iv_hex`.
-- Tracked config templates expect values such as:
-  `HARUKI_MEDIA_BACKEND`,
-  `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE`,
-  `HARUKI_ASSET_STUDIO_IMAGE_FORMAT`,
-  `HARUKI_ASSET_HTTP_VERSION`,
-  `HARUKI_CPU_BUDGET_AUTO`,
-  `HARUKI_CPU_BUDGET_RATIO`,
-  `HARUKI_CPU_RESERVED`,
-  `HARUKI_SHARED_AES_KEY_HEX`,
-  `HARUKI_SHARED_AES_IV_HEX`,
-  `HARUKI_EN_AES_KEY_HEX`,
-  `HARUKI_EN_AES_IV_HEX`.
+- `.env.example` and `docker-compose.yml` provide the AES variables
+  `HARUKI_SHARED_AES_KEY_HEX`, `HARUKI_SHARED_AES_IV_HEX`,
+  `HARUKI_EN_AES_KEY_HEX` and `HARUKI_EN_AES_IV_HEX`; reference them from
+  `regions.*.crypto` in your local config with `${env:VAR_NAME}`.
+- Tuning variables such as `HARUKI_MEDIA_BACKEND`,
+  `HARUKI_ASSET_STUDIO_READ_BATCH_SIZE`, `HARUKI_ASSET_STUDIO_IMAGE_FORMAT`,
+  `HARUKI_ASSET_HTTP_VERSION` and `HARUKI_CPU_BUDGET_*` are not template
+  references: the loader reads them directly and they override the matching
+  config keys (see [Runtime Tuning](#runtime-tuning)).
 
 ## Run locally
 

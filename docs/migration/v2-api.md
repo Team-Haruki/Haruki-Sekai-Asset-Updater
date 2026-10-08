@@ -48,7 +48,8 @@ Response body:
 Notes:
 
 - The current service accepts, plans, and executes jobs.
-- Every job plan now reports `codec_backend: "crates.io:cridecoder@0.1.1"`.
+- Every job plan reports `codec_backend: "crates.io:cridecoder"` (the crate version
+  is pinned by `Cargo.lock`, not reported in the plan).
 - Dry-run jobs complete with a concrete execution plan.
 - Non-dry-run jobs now execute asset info fetch, bundle download, deobfuscation, and Rust post-processing.
 - `mode` defaults to `update`. `prefetch_raw_bundles` downloads selected bundles
@@ -66,14 +67,15 @@ Returns a summary of all known jobs, grouped by status.
 Current response fields:
 
 - `total`
-- `queued` / `running` / `completed` / `failed` / `cancelled` (job id lists)
+- `queued` / `running` / `completed` / `failed` / `cancelled` (job id lists;
+  `running` also holds `planning` and `waiting_for_pipeline` jobs)
 - `jobs` (per-job entries)
 
 ## `GET /v2/jobs/{id}`
 
-Returns the current snapshot for a submitted job.
+Returns the current snapshot for a submitted job, wrapped as `{"job": {...}}`.
 
-Current response fields include:
+Current fields of `job` include:
 
 - `status`
 - `message`
@@ -86,6 +88,8 @@ Current status values:
 
 - `queued`
 - `planning`
+- `waiting_for_pipeline` (defined in the status enum; the current service
+  does not assign it)
 - `running`
 - `cancelled`
 - `failed`
@@ -118,15 +122,17 @@ Notes:
 
 ## Failure Semantics
 
-When a job fails or is cancelled, the response snapshot includes:
+When a job fails or is cancelled, the job snapshot includes:
 
 ```json
 {
-  "failure": {
-    "kind": "network",
-    "message": "HTTP request to ... returned status 503",
-    "retryable": true,
-    "at": "2026-01-01T00:00:00Z"
+  "job": {
+    "failure": {
+      "kind": "network",
+      "message": "HTTP request to ... returned status 503",
+      "retryable": true,
+      "at": "2026-01-01T00:00:00Z"
+    }
   }
 }
 ```
