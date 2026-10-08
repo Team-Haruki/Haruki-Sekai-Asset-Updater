@@ -613,6 +613,66 @@ fn lone_texture_named_after_its_container_keeps_the_flat_path() {
 }
 
 #[test]
+fn lone_texture_whose_name_differs_from_its_container_only_in_case_keeps_the_flat_path() {
+    // Unity lowercases container paths; the object keeps its original casing.
+    // Real JP/EN cases that #75 moved into `<container>.assets/texture2d/`.
+    let cases = [
+        (
+            "icon_eventBadge_1",
+            "assets/sekai/assetbundle/resources/ondemand/event/event_angelclover_2021/icon/icon_eventbadge_1.png",
+        ),
+        (
+            "icon_eventBadge_4",
+            "assets/sekai/assetbundle/resources/startapp/thumbnail/common_event/badge_an/icon_eventbadge_4.png",
+        ),
+        (
+            "event_Infinitelygray_2021",
+            "assets/sekai/assetbundle/resources/startapp/home/banner/event_infinitelygray_2021/event_infinitelygray_2021.png",
+        ),
+        (
+            "banner_Championship_2022_AUTUMN",
+            "assets/sekai/assetbundle/resources/startapp/home/banner/banner_championship_2022_autumn/banner_championship_2022_autumn.png",
+        ),
+        (
+            "stripeAnimation1",
+            "assets/sekai/assetbundle/resources/ondemand/gacha/ab_gacha_379/screen/texture/stripeanimation1.png",
+        ),
+        (
+            "1_3_MOREMOREJUMP\u{ff01}Card",
+            "assets/sekai/assetbundle/resources/ondemand/stamp_mission/2nd_anniv_pm/texture/card/1_3_moremorejump\u{ff01}card.png",
+        ),
+    ];
+
+    for (name, container) in cases {
+        let assets = vec![texture_asset(0, name, container)];
+
+        let plan = plan_native_texture_naming(&assets, RESOURCES_PREFIX);
+
+        assert!(
+            !plan.uses_object_name(0),
+            "{name} under {container} must keep the flat path"
+        );
+    }
+}
+
+#[test]
+fn textures_differing_only_in_case_from_each_other_are_still_a_collision() {
+    // Two textures in one container is a collision whatever their case: neither
+    // owns the flat path.
+    let container =
+        "assets/sekai/assetbundle/resources/ondemand/gacha/ab_gacha_379/screen/texture/stripeanimation1.prefab";
+    let assets = vec![
+        texture_asset(0, "stripeAnimation1", container),
+        texture_asset(1, "stripeanimation1", container),
+    ];
+
+    let plan = plan_native_texture_naming(&assets, RESOURCES_PREFIX);
+
+    assert!(plan.uses_object_name(0));
+    assert!(plan.uses_object_name(1));
+}
+
+#[test]
 fn textures_referenced_by_a_prefab_are_named_after_themselves() {
     let container =
         "assets/sekai/assetbundle/resources/ondemand/gacha/favorite_character_gacha/animation/item_get.prefab";
