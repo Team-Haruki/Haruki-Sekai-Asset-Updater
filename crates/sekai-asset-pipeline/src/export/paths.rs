@@ -557,9 +557,7 @@ pub(super) fn plan_native_texture_naming(
                 .iter()
                 .find(|asset| asset.index == indices[0])
                 .and_then(|asset| asset.name.as_deref())
-                .is_some_and(|name| {
-                    assetstudio_fix_file_name(name) == assetstudio_fix_file_name(container_stem)
-                });
+                .is_some_and(|name| texture_name_matches_container_stem(name, container_stem));
             if matches_container {
                 continue;
             }
@@ -570,6 +568,15 @@ pub(super) fn plan_native_texture_naming(
     NativeTextureNamingPlan {
         object_name_indices,
     }
+}
+
+/// Unity lowercases every container path when it builds the bundle, while the
+/// object keeps the name the artist gave it (`icon_eventBadge_1` under
+/// `.../icon_eventbadge_1.png`). Such a texture is still the one the container
+/// is named after, so it must keep the flat path; compare without case.
+fn texture_name_matches_container_stem(name: &str, container_stem: &str) -> bool {
+    assetstudio_fix_file_name(name).to_lowercase()
+        == assetstudio_fix_file_name(container_stem).to_lowercase()
 }
 
 fn is_plain_texture2d_asset(asset: &UnityAssetInfo) -> bool {
