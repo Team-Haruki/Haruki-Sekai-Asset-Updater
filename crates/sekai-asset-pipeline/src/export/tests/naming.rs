@@ -4,16 +4,17 @@ use std::path::{Path, PathBuf};
 
 use super::super::get_export_group;
 use super::super::paths::{
-    assetstudio_fix_file_name, assetstudio_semantic_file_stem, default_extension_for_asset,
-    named_subasset_output_path, native_object_output_extension, native_object_output_path,
-    normalize_semantic_path_component, plan_native_texture_naming, safe_payload_bundle_path,
-    semantic_assetstudio_object_output_path, static_known_payload_extension,
-    strip_container_prefix,
+    assetbundle_typetree_output_path, assetstudio_fix_file_name, assetstudio_semantic_file_stem,
+    default_extension_for_asset, named_subasset_output_path, native_object_output_extension,
+    native_object_output_path, normalize_semantic_path_component, plan_native_texture_naming,
+    safe_payload_bundle_path, semantic_assetstudio_object_output_path,
+    static_known_payload_extension, strip_container_prefix,
 };
 use super::super::selectors::{
     assetstudio_export_type_selector, assetstudio_type_selector_matches,
 };
 use super::super::types::{UnityAssetInfo, ASSETSTUDIO_MAX_PUBLIC_FILE_STEM_CHARS};
+use super::super::unity::unity_class_name;
 
 #[test]
 fn get_export_group_matches_go_rules() {
@@ -103,6 +104,7 @@ fn mono_behaviour_primary_asset_uses_container_json_path() {
         "character/member/res005_no005",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("typetree_json"),
         Some(".json"),
@@ -136,6 +138,7 @@ fn mono_behaviour_bundledata_uses_container_json_path() {
         "music/long/0001_01",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("typetree_json"),
         Some(".json"),
@@ -169,6 +172,7 @@ fn live2d_build_motion_data_uses_motion_container_json_path() {
         "live2d/model/v1/main/01_ichika/01ichika_cloth001",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("typetree_json"),
         Some(".json"),
@@ -204,6 +208,7 @@ fn mono_script_stays_in_container_subasset_path() {
         "character/member/res005_no005",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("typetree_json"),
         Some(".json"),
@@ -239,6 +244,7 @@ fn member_cutout_sprite_objects_use_resolved_cutout_path() {
         "character/member_cutout/res001_no001",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("image_png"),
         Some(".png"),
@@ -274,6 +280,7 @@ fn member_cutout_texture_objects_use_resolved_cutout_path() {
         "character/member_cutout/res001_no001",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("image_png"),
         Some(".png"),
@@ -306,6 +313,7 @@ fn by_category_object_paths_follow_container_category_not_info_category() {
         "mysekai/foo",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("image_png"),
         Some(".png"),
@@ -314,6 +322,133 @@ fn by_category_object_paths_follow_container_category_not_info_category() {
     assert_eq!(
         target,
         PathBuf::from("/tmp/out/startapp/mysekai/foo/normal.png")
+    );
+}
+
+fn containerless_asset(name: &str, asset_type: &str, type_id: i32) -> UnityAssetInfo {
+    UnityAssetInfo {
+        index: 0,
+        name: Some(name.to_string()),
+        container: None,
+        asset_type: Some(asset_type.to_string()),
+        type_id,
+        path_id: 1,
+        unique_id: None,
+        size: 0,
+        source_file: None,
+    }
+}
+
+#[test]
+fn unity_class_name_names_the_assetbundle_class() {
+    assert_eq!(unity_class_name(142), "AssetBundle");
+    assert_eq!(unity_class_name(999), "ClassID999");
+}
+
+#[test]
+fn containerless_objects_stay_inside_the_bundle_directory() {
+    let bundle = "event_story/event_breaktime_2021/scenario";
+    let asset = containerless_asset(bundle, "ClassID999", 999);
+    let path = |by_category, category| {
+        native_object_output_path(
+            Path::new("/tmp/out"),
+            bundle,
+            "assets/sekai/assetbundle/resources",
+            by_category,
+            category,
+            &asset,
+            Some("typetree_json"),
+            Some(".json"),
+        )
+    };
+
+    assert_eq!(
+        path(true, "ondemand"),
+        PathBuf::from("/tmp/out/ondemand/event_story/event_breaktime_2021/scenario/scenario.json")
+    );
+    assert_eq!(
+        path(true, "StartApp"),
+        PathBuf::from("/tmp/out/startapp/event_story/event_breaktime_2021/scenario/scenario.json")
+    );
+    // A missing or unusable category still keeps the object inside the bundle directory.
+    for category in ["", "/", ".."] {
+        assert_eq!(
+            path(true, category),
+            PathBuf::from("/tmp/out/event_story/event_breaktime_2021/scenario/scenario.json")
+        );
+    }
+    // The flat layout is unchanged and ignores the category.
+    assert_eq!(
+        path(false, "ondemand"),
+        PathBuf::from("/tmp/out/event_story/event_breaktime_2021/scenario/scenario.json")
+    );
+}
+
+#[test]
+fn assetbundle_record_paths_by_layout_and_container_categories() {
+    let bundle = "event_story/event_breaktime_2021/scenario";
+    let route = |asset: &UnityAssetInfo, by_category, payload: &str| {
+        assetbundle_typetree_output_path(
+            Path::new("/tmp/out"),
+            bundle,
+            "assets/sekai/assetbundle/resources",
+            by_category,
+            "ondemand",
+            asset,
+            Some("typetree_json"),
+            payload.as_bytes(),
+        )
+        .unwrap()
+    };
+    let payload = format!(
+        r#"{{"m_AssetBundleName":"{bundle}","m_Container":[{{"key":"assets/sekai/assetbundle/resources/startapp/{bundle}/event_23_01.asset"}}]}}"#
+    );
+    let classid = containerless_asset(bundle, "ClassID142", 142);
+    let named = containerless_asset(bundle, "AssetBundle", 0);
+
+    // Recognised by class id or by name; the container's category wins over the download one.
+    for asset in [&classid, &named] {
+        assert_eq!(
+            route(asset, true, &payload),
+            Some(PathBuf::from(format!(
+                "/tmp/out/startapp/{bundle}/_bundle.json"
+            )))
+        );
+    }
+    // The flat layout is unchanged: `<export_path>/<bundle name>/_bundle.json`.
+    assert_eq!(
+        route(&classid, false, &payload),
+        Some(PathBuf::from(format!(
+            "/tmp/out/{bundle}/{bundle}/_bundle.json"
+        )))
+    );
+    // No container entries: the download category, not the output root.
+    assert_eq!(
+        route(
+            &classid,
+            true,
+            &format!(r#"{{"m_AssetBundleName":"{bundle}"}}"#)
+        ),
+        Some(PathBuf::from(format!(
+            "/tmp/out/ondemand/{bundle}/_bundle.json"
+        )))
+    );
+    // Other classes and payload kinds are left to the regular object path.
+    let other = containerless_asset(bundle, "ClassID999", 999);
+    assert_eq!(route(&other, true, &payload), None);
+    assert_eq!(
+        assetbundle_typetree_output_path(
+            Path::new("/tmp/out"),
+            bundle,
+            "assets/sekai/assetbundle/resources",
+            true,
+            "ondemand",
+            &classid,
+            Some("raw"),
+            b"",
+        )
+        .unwrap(),
+        None
     );
 }
 
@@ -338,6 +473,7 @@ fn non_character_sprite_objects_route_under_container_sprite_directory() {
         "event/foo",
         "assets/sekai/assetbundle/resources/startapp/",
         true,
+        "ondemand",
         &asset,
         Some("image_png"),
         Some(".png"),
@@ -371,6 +507,7 @@ fn mesh_objects_route_under_container_mesh_directory() {
         "mysekai/effect/common/fbx",
         "assets/sekai/assetbundle/resources/startapp/",
         true,
+        "ondemand",
         &asset,
         Some("mesh_obj"),
         Some(".obj"),
@@ -404,6 +541,7 @@ fn font_objects_use_named_file_in_container_parent_directory() {
         "custom_profile/font",
         "assets/sekai/assetbundle/resources",
         true,
+        "ondemand",
         &asset,
         Some("font"),
         Some(".otf"),

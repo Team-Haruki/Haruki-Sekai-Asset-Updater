@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
+use unity_rs_core::serialized::ASSET_BUNDLE_CLASS_ID;
 
 use crate::{ExportPipelineError, ImageFormat as ImageOutputFormat};
 
@@ -11,11 +12,21 @@ use super::types::{
     UNITY_ENGINE_IMAGE_SURROGATE_FORMAT,
 };
 
+/// Where one exported object is written before semantic renaming.
+///
+/// With `by_category` an object's container path already starts with its
+/// category (`startapp/...`, `ondemand/...`) and is used as is. An object
+/// without a container has only its name, which carries no category -- the
+/// bundle's own AssetBundle object is named after the bundle path -- so it is
+/// placed inside the bundle's directory under the download `category`, as the
+/// flat layout does with `export_path`, instead of at the output root.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn native_object_output_path(
     output_dir: &Path,
     export_path: &str,
     strip_path_prefix: &str,
     by_category: bool,
+    category: &str,
     asset: &UnityAssetInfo,
     payload_kind: Option<&str>,
     suggested_extension: Option<&str>,
@@ -23,17 +34,26 @@ pub(super) fn native_object_output_path(
     let container = asset
         .container
         .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| asset.name.as_deref().unwrap_or("asset"));
-    let relative = strip_container_prefix(container, strip_path_prefix);
-    let mut path = if by_category {
+        .filter(|value| !value.trim().is_empty());
+    let relative = strip_container_prefix(
+        container.unwrap_or_else(|| asset.name.as_deref().unwrap_or("asset")),
+        strip_path_prefix,
+    );
+    let mut path = if by_category && container.is_some() {
         output_dir.join(&relative)
     } else {
         let file_name = Path::new(&relative)
             .file_name()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(assetstudio_semantic_file_stem(asset)));
-        output_dir.join(export_path).join(file_name)
+        let bundle_dir = if by_category {
+            output_dir
+                .join(safe_category_dir(category))
+                .join(export_path)
+        } else {
+            output_dir.join(export_path)
+        };
+        bundle_dir.join(file_name)
     };
     let extension = native_object_output_extension(asset, payload_kind, suggested_extension);
     if !extension.is_empty() {
@@ -136,21 +156,23 @@ pub(super) fn normalize_semantic_path_component(value: &str) -> String {
         .collect()
 }
 
+/// Routes the bundle's own AssetBundle object to `<bundle>/_bundle.json`.
+///
+/// With `by_category` the record goes under the category its container entries
+/// name. When they name several categories, or none and no single directory,
+/// it goes under the bundle's download `category`, never the output root.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn assetbundle_typetree_output_path(
     output_dir: &Path,
     export_path: &str,
     strip_path_prefix: &str,
     by_category: bool,
+    category: &str,
     asset: &UnityAssetInfo,
     payload_kind: Option<&str>,
     payload: &[u8],
 ) -> Result<Option<PathBuf>, ExportPipelineError> {
-    if payload_kind != Some("typetree_json")
-        || asset
-            .asset_type
-            .as_deref()
-            .is_none_or(|asset_type| normalize_assetstudio_type_name(asset_type) != "assetbundle")
-    {
+    if payload_kind != Some("typetree_json") || !is_assetbundle_object(asset) {
         return Ok(None);
     }
 
@@ -198,17 +220,25 @@ pub(super) fn assetbundle_typetree_output_path(
         }
     }
 
-    if categories.len() > 1 {
-        return Ok(Some(output_dir.join(bundle_path).join("_bundle.json")));
-    }
-
-    if let Some(category) = categories.iter().next() {
+    if categories.len() == 1 {
+        let container_category = categories
+            .into_iter()
+            .next()
+            .expect("single container category is present");
         return Ok(Some(
             output_dir
-                .join(category)
+                .join(container_category)
                 .join(bundle_path)
                 .join("_bundle.json"),
         ));
+    }
+
+    let download_category_path = output_dir
+        .join(safe_category_dir(category))
+        .join(&bundle_path)
+        .join("_bundle.json");
+    if categories.len() > 1 {
+        return Ok(Some(download_category_path));
     }
 
     if container_parents.len() == 1 {
@@ -219,7 +249,28 @@ pub(super) fn assetbundle_typetree_output_path(
         return Ok(Some(output_dir.join(parent).join("_bundle.json")));
     }
 
-    Ok(Some(output_dir.join(bundle_path).join("_bundle.json")))
+    Ok(Some(download_category_path))
+}
+
+/// The bundle's own AssetBundle object (class 142), by class id or type name.
+fn is_assetbundle_object(asset: &UnityAssetInfo) -> bool {
+    asset.type_id == ASSET_BUNDLE_CLASS_ID
+        || asset
+            .asset_type
+            .as_deref()
+            .is_some_and(|asset_type| normalize_assetstudio_type_name(asset_type) == "assetbundle")
+}
+
+/// The download category as a single safe, lowercase path component. An empty
+/// or unusable value yields an empty path, i.e. the output root.
+fn safe_category_dir(category: &str) -> PathBuf {
+    Path::new(&category.to_lowercase())
+        .components()
+        .find_map(|component| match component {
+            std::path::Component::Normal(value) => Some(PathBuf::from(value)),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 pub(super) fn assetbundle_container_category(relative: &Path) -> Option<&'static str> {
