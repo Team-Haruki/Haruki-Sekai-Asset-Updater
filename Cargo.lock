@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "haruki-sekai-asset-updater"
-version = "7.2.3"
+version = "7.2.4"
 dependencies = [
  "aes",
  "axum",
