@@ -65,13 +65,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     /usr/share/lintian/* \
     /usr/share/man/*
 
-WORKDIR /app
-COPY --from=builder /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
+# The user and /app (owned by it) come first; the binary is copied with --chown. A `chown -R`
+# after the COPY would duplicate the whole binary into a second layer.
 RUN groupadd --gid 10001 haruki && \
     useradd --uid 10001 --gid haruki --no-create-home --home-dir /app \
       --shell /usr/sbin/nologin haruki && \
-    mkdir -p logs && \
-    chown -R haruki:haruki /app
+    install -d -o haruki -g haruki /app /app/logs
+
+WORKDIR /app
+COPY --from=builder --chown=10001:10001 /app/target/release/haruki-sekai-asset-updater /app/haruki-sekai-asset-updater
 
 ENV TZ=Asia/Shanghai \
     MALLOC_ARENA_MAX=4 \
