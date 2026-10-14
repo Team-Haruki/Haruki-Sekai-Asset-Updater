@@ -112,8 +112,8 @@ Lists every configured region with its runtime versions:
 `app_version` is absent for colorful-palette regions. `source` is `registry`,
 `manual` or `update_request`. `sync` is present for enabled Nuverse regions
 while `app_version_sync.enabled` is true; `last_result` is one of `up_to_date`,
-`adopted`, `registry_older`, `registry_failed`, `probe_failed` or
-`persist_failed`.
+`adopted`, `registry_older`, `pinned` (a forced override holds the region),
+`registry_failed`, `probe_failed` or `persist_failed`.
 
 ## `PUT /v2/regions/{region}/app-version`
 
@@ -125,7 +125,9 @@ Request body (at least one of the two values):
 
 - `app_version` (Nuverse regions only): adopted when newer than the current
   value and the version URL answers it with a numeric body. Equal values are a
-  no-op. `force: true` skips both checks.
+  no-op. `force: true` skips both checks and pins the value: the registry
+  poller and update requests do not replace a forced value; a later `PUT` or
+  `DELETE` does.
 - `unity_version` (every region): replaces the Unity version.
 
 Responses: `200` with `{"message", "region"}` (`message` is `"unchanged"`

@@ -387,7 +387,9 @@ pub async fn probe_app_version(
         .resolve_release(&RequestedRelease::default())
         .await
         .map_err(|err| err.to_string())?;
-    if release.asset_version.bytes().all(|b| b.is_ascii_digit()) {
+    let numeric = !release.asset_version.is_empty()
+        && release.asset_version.bytes().all(|b| b.is_ascii_digit());
+    if numeric {
         Ok(release.asset_version)
     } else {
         Err(format!(
@@ -761,6 +763,7 @@ mod tests {
         let base = version_cdn(vec![
             ("6.4.0", StatusCode::OK, "1234\n"),
             ("6.5.0", StatusCode::OK, "<html>"),
+            ("6.6.0", StatusCode::OK, " \n"),
         ])
         .await;
         let config = config_with(vec![], "unused");
@@ -780,6 +783,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(odd.contains("non-numeric"), "{odd}");
+        assert!(probe_app_version(&config, &region, "6.6.0", "2022.3.21f1")
+            .await
+            .is_err());
         let bad_header = probe_app_version(&config, &region, "6.4.0", "bad\nheader")
             .await
             .unwrap_err();

@@ -401,7 +401,7 @@ impl From<AdoptError> for ApiError {
         match value {
             AdoptError::UnknownRegion(_) => Self::NotFound(message),
             AdoptError::NotNuverse(_) | AdoptError::Invalid(_) => Self::BadRequest(message),
-            AdoptError::Downgrade { .. } => Self::Conflict(message),
+            AdoptError::Downgrade { .. } | AdoptError::Pinned { .. } => Self::Conflict(message),
             AdoptError::ProbeFailed { .. } => Self::BadGateway(message),
             AdoptError::Persist(_) => Self::Internal(message),
         }

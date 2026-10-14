@@ -178,7 +178,10 @@ downgrade check. Candidates come from:
   regions without an app version ignore it.
 
 Precedence: the newest value wins. A manual override stays until the registry
-reports a newer version; the poller never replaces it with an older one.
+reports a newer version; the poller never replaces it with an older one. A
+forced override is a pin (for example a rollback away from a broken build):
+the poller and update requests leave it alone until another `PUT` replaces it
+or `DELETE` reverts it.
 `DELETE /v2/regions/{region}/app-version` (optionally `?field=app_version` or
 `?field=unity_version`) reverts to the YAML values; the poller may then adopt
 the registry version again on its next run. At startup an app-version override

@@ -6,6 +6,10 @@
 //! replaces the current value. `force` skips the last two checks. The rule is
 //! the same for the poller, the HTTP API and update requests, so the current
 //! value only moves forward unless an operator forces it or reverts it.
+//!
+//! A forced value is an operator's pin (for example a rollback away from a
+//! broken build): the poller and update requests leave it alone until a
+//! manual `PUT` replaces it or `DELETE` reverts it.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -56,6 +60,8 @@ pub enum AdoptError {
     NotNuverse(String),
     #[error("{0}")]
     Invalid(String),
+    #[error("app version is pinned to {current} by a forced override; {candidate} not adopted")]
+    Pinned { current: String, candidate: String },
     #[error("refusing to downgrade app version from {current} to {candidate}")]
     Downgrade { current: String, candidate: String },
     #[error("app version {candidate} failed the CDN probe: {message}")]
@@ -71,6 +77,8 @@ pub enum SyncResult {
     UpToDate,
     Adopted,
     RegistryOlder,
+    /// A forced override pins the region; the registry value is ignored.
+    Pinned,
     RegistryFailed,
     ProbeFailed,
     PersistFailed,
@@ -200,6 +208,7 @@ impl AppVersionManager {
             )));
         }
         let overrides = self.versions.overrides(&key).await;
+        check_pin(&overrides, source, candidate)?;
         if !force && !is_newer(region_config, &overrides, candidate)? {
             return Ok(AdoptOutcome::Unchanged);
         }
@@ -224,6 +233,7 @@ impl AppVersionManager {
             .versions
             .modify(&key, |overrides| {
                 let previous = effective_app_version(region_config, overrides).unwrap_or_default();
+                check_pin(overrides, source, candidate)?;
                 if !force && !is_newer(region_config, overrides, candidate)? {
                     return Ok(AdoptOutcome::Unchanged);
                 }
@@ -535,6 +545,23 @@ impl AppVersionManager {
     }
 }
 
+/// Only an operator (`PUT`) may replace a forced override.
+fn check_pin(
+    overrides: &RegionVersionOverrides,
+    source: VersionSource,
+    candidate: &str,
+) -> Result<(), AdoptError> {
+    match &overrides.app_version {
+        Some(pin) if pin.forced && source != VersionSource::Manual && pin.value != candidate => {
+            Err(AdoptError::Pinned {
+                current: pin.value.clone(),
+                candidate: candidate.to_string(),
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Whether `candidate` is newer than the current value (`false` when equal);
 /// an error when it is older. A current value that does not parse never
 /// blocks a valid candidate.
@@ -580,6 +607,12 @@ fn record_outcome(
         Err(AdoptError::Downgrade { .. }) => {
             entry.consecutive_probe_failures = 0;
             entry.last_result = Some(SyncResult::RegistryOlder);
+            entry.last_error = None;
+            false
+        }
+        Err(AdoptError::Pinned { .. }) => {
+            entry.consecutive_probe_failures = 0;
+            entry.last_result = Some(SyncResult::Pinned);
             entry.last_error = None;
             false
         }
@@ -867,6 +900,44 @@ mod tests {
         );
         assert!(fx.manager.health().await.is_none());
         assert!(fx.manager.spawn_poller().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_forced_pin_holds_until_an_operator_replaces_it() {
+        let fx = fixture(true, false).await;
+        fx.cdn_has("6.5.0");
+        fx.cdn_has("6.6.0");
+        fx.registry_says("cn", "6.5.0");
+        fx.manager
+            .offer_app_version("cn", "6.3.0", VersionSource::Manual, true, None)
+            .await
+            .unwrap();
+
+        fx.manager.poll_once().await;
+        assert_eq!(fx.effective("cn").await, "6.3.0");
+        assert_eq!(fx.status("cn").await.last_result, Some(SyncResult::Pinned));
+        let err = fx
+            .manager
+            .offer_app_version("cn", "6.5.0", VersionSource::UpdateRequest, false, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdoptError::Pinned { .. }), "{err}");
+        assert_eq!(
+            fx.manager
+                .offer_app_version("cn", "6.3.0", VersionSource::Registry, false, None)
+                .await
+                .unwrap(),
+            AdoptOutcome::Unchanged
+        );
+
+        fx.manager
+            .offer_app_version("cn", "6.6.0", VersionSource::Manual, false, None)
+            .await
+            .unwrap();
+        fx.registry_says("cn", "6.7.0");
+        fx.cdn_has("6.7.0");
+        fx.manager.poll_once().await;
+        assert_eq!(fx.effective("cn").await, "6.7.0", "the pin is gone");
     }
 
     #[tokio::test]
