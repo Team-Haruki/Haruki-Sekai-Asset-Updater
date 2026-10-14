@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let state = AppState::new(config.clone());
+    let _app_version_sync = state.app_versions().spawn_poller();
     let router = build_router(state);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     let local_addr = listener

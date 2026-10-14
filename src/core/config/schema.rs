@@ -27,6 +27,7 @@ pub struct AppConfig {
     pub concurrency: ConcurrencyConfig,
     pub storage: StorageConfig,
     pub git_sync: GitSyncConfig,
+    pub app_version_sync: AppVersionSyncConfig,
     pub regions: BTreeMap<String, RegionConfig>,
 }
 
@@ -42,6 +43,7 @@ impl Default for AppConfig {
             concurrency: ConcurrencyConfig::default(),
             storage: StorageConfig::default(),
             git_sync: GitSyncConfig::default(),
+            app_version_sync: AppVersionSyncConfig::default(),
             regions: BTreeMap::new(),
         }
     }
@@ -596,6 +598,43 @@ fn storage_option_value_to_string(value: Value) -> Result<String, String> {
         Value::String(value) => Ok(value),
         Value::Sequence(_) | Value::Mapping(_) | Value::Tagged(_) => {
             Err("storage provider options must be scalar values".to_string())
+        }
+    }
+}
+
+/// Runtime app-version tracking for Nuverse regions.
+///
+/// The runtime state (`state_file`) is always loaded and accepts manual
+/// overrides through the HTTP API; `enabled` only turns on the registry
+/// poller that adopts newer app versions on its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppVersionSyncConfig {
+    /// Poll the master registry for newer Nuverse app versions.
+    pub enabled: bool,
+    /// Base URL of the master registry; the poller reads
+    /// `{registry_url}/v1/master/{region}/current`.
+    pub registry_url: String,
+    /// Seconds between two polls.
+    pub interval_secs: u64,
+    /// Submit an update job for a region after the poller adopted a newer
+    /// app version (deferred while a job for that region is still active).
+    pub auto_submit: bool,
+    /// Timeout of one registry request or CDN version probe, in seconds.
+    pub request_timeout_secs: u64,
+    /// Where the runtime app/unity versions are persisted.
+    pub state_file: String,
+}
+
+impl Default for AppVersionSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            registry_url: String::new(),
+            interval_secs: 60,
+            auto_submit: true,
+            request_timeout_secs: 15,
+            state_file: "./Data/runtime-versions.json".to_string(),
         }
     }
 }

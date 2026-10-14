@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::progress::push_progress_event;
 use super::runner::{run_planning, PlanningContext};
 use super::store::{prune_terminal_jobs, JobListEntry, JobListSummary, RegionLockMap};
+use crate::core::app_versions::{configured_app_version, RuntimeVersions};
 use crate::core::config::AppConfig;
 use crate::core::errors::RegionError;
 use crate::core::models::{
@@ -29,10 +30,17 @@ pub struct JobManager {
     /// other's download record (lost updates) or share a temp path mid-export.
     pub(super) region_locks: RegionLockMap,
     pub(super) haruki_3d_active: Arc<RwLock<HashSet<String>>>,
+    /// Runtime app/Unity versions, applied to a job's config when it is created.
+    pub(super) versions: RuntimeVersions,
 }
 
 impl JobManager {
+    /// A manager whose runtime versions live in memory only.
     pub fn new(config: Arc<AppConfig>) -> Self {
+        Self::with_versions(config, RuntimeVersions::in_memory())
+    }
+
+    pub fn with_versions(config: Arc<AppConfig>, versions: RuntimeVersions) -> Self {
         let job_semaphore = match config.execution.max_concurrent_jobs {
             0 => None,
             limit => Some(Arc::new(Semaphore::new(limit))),
@@ -44,14 +52,21 @@ impl JobManager {
             job_semaphore,
             region_locks: Arc::new(RwLock::new(HashMap::new())),
             haruki_3d_active: Arc::new(RwLock::new(HashSet::new())),
+            versions,
         }
     }
 
     pub async fn submit(&self, request: AssetUpdateRequest) -> Result<JobSnapshot, RegionError> {
         select_region(&self.config, &request.region)?;
+        // The job keeps the versions current at creation for its whole run.
+        let config = self.versions.apply(&self.config, &request.region).await;
 
         let mut snapshot = JobSnapshot::new(&request);
         snapshot.message = "job accepted and queued for planning".to_string();
+        snapshot.app_version = select_region(&config, &request.region)
+            .ok()
+            .and_then(configured_app_version)
+            .map(str::to_string);
 
         {
             let mut jobs = self.jobs.write().await;
@@ -70,12 +85,25 @@ impl JobManager {
             region = %snapshot.region,
             asset_version = ?snapshot.asset_version,
             asset_hash = ?snapshot.asset_hash,
+            app_version = ?snapshot.app_version,
             dry_run = snapshot.dry_run,
             "job accepted and queued"
         );
 
-        self.spawn_planning(snapshot.id, request);
+        self.spawn_planning(snapshot.id, request, config);
         Ok(snapshot)
+    }
+
+    /// Whether `region` has a job that has not reached a terminal state.
+    pub async fn has_active_job(&self, region: &str) -> bool {
+        let jobs = self.jobs.read().await;
+        jobs.values().any(|job| {
+            job.region.eq_ignore_ascii_case(region)
+                && !matches!(
+                    job.status,
+                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                )
+        })
     }
 
     pub async fn get(&self, id: Uuid) -> Option<JobSnapshot> {
@@ -159,10 +187,23 @@ impl JobManager {
         }
     }
 
-    fn spawn_planning(&self, id: Uuid, request: AssetUpdateRequest) {
+    /// Puts a snapshot into the job map without running anything.
+    #[cfg(test)]
+    pub(crate) async fn insert_snapshot(&self, job: JobSnapshot) {
+        self.jobs.write().await.insert(job.id, job);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn force_status(&self, id: Uuid, status: JobStatus) {
+        if let Some(job) = self.jobs.write().await.get_mut(&id) {
+            job.status = status;
+        }
+    }
+
+    fn spawn_planning(&self, id: Uuid, request: AssetUpdateRequest, config: Arc<AppConfig>) {
         let context = PlanningContext {
             jobs: self.jobs.clone(),
-            config: self.config.clone(),
+            config,
             cancel_flags: self.cancel_flags.clone(),
             job_semaphore: self.job_semaphore.clone(),
             region_locks: self.region_locks.clone(),

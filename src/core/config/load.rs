@@ -17,8 +17,9 @@ use super::env::{
 use super::schema::{AppConfig, ConcurrencyConfig, CURRENT_CONFIG_VERSION};
 use super::tuning::available_cpu_count;
 use super::validate::{
-    validate_asset_studio_read_kinds, validate_auth_config, validate_region_names,
-    validate_regions, validate_runtime_settings, warn_media_fallback_backend_options,
+    validate_app_version_sync, validate_asset_studio_read_kinds, validate_auth_config,
+    validate_region_names, validate_regions, validate_runtime_settings,
+    warn_media_fallback_backend_options,
 };
 
 const CONFIG_URI_ENV: &str = "HARUKI_CONFIG_URI";
@@ -122,6 +123,7 @@ impl AppConfig {
         validate_region_names(self)?;
         validate_runtime_settings(self)?;
         validate_auth_config(&self.server.auth)?;
+        validate_app_version_sync(&self.app_version_sync)?;
         validate_regions(self)?;
         validate_asset_studio_read_kinds(&self.backends.asset_studio.read_kinds)?;
         warn_media_fallback_backend_options(&self.backends.media);

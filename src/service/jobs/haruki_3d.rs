@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::progress::{progress_consumer, push_progress_event};
 use super::state::{finish_cancelled, finish_failed};
 use super::store::remove_cancel_flag;
+use crate::core::app_versions::configured_app_version;
 use crate::core::asset_execution::AssetExecutionContext;
 use crate::core::config::AppConfig;
 use crate::core::errors::AssetExecutionError;
@@ -29,6 +30,10 @@ pub(super) async fn spawn_haruki_3d_child_job(
     child.parent_job_id = Some(parent_id);
     child.kind = "haruki_3d_export".to_string();
     child.message = "Haruki 3D export queued".to_string();
+    child.app_version = select_region(&config, &request.region)
+        .ok()
+        .and_then(configured_app_version)
+        .map(str::to_string);
     let child_id = child.id;
     {
         let mut job_map = jobs.write().await;

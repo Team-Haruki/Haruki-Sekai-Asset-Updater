@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use crate::core::errors::ConfigError;
 
 use super::schema::{
-    AppConfig, AudioExportConfig, AuthConfig, CryptoConfig, Haruki3dExportConfig, ImageBackend,
-    ImageBackendConfig, ImageExportConfig, MediaBackend, MediaBackendConfig, RegionConfig,
-    VideoExportConfig,
+    AppConfig, AppVersionSyncConfig, AudioExportConfig, AuthConfig, CryptoConfig,
+    Haruki3dExportConfig, ImageBackend, ImageBackendConfig, ImageExportConfig, MediaBackend,
+    MediaBackendConfig, RegionConfig, VideoExportConfig,
 };
 
 pub(super) fn validate_region_names(config: &AppConfig) -> Result<(), ConfigError> {
@@ -51,6 +51,42 @@ pub(super) fn validate_positive_setting(field: &str, value: usize) -> Result<(),
             field: field.to_string(),
             value: "0".to_string(),
             expected: "a positive integer".to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn validate_app_version_sync(config: &AppVersionSyncConfig) -> Result<(), ConfigError> {
+    if config.state_file.trim().is_empty() {
+        return Err(ConfigError::InvalidValue {
+            field: "app_version_sync.state_file".to_string(),
+            value: String::new(),
+            expected: "a non-empty file path".to_string(),
+        });
+    }
+    if config.request_timeout_secs == 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "app_version_sync.request_timeout_secs".to_string(),
+            value: "0".to_string(),
+            expected: "a positive number of seconds".to_string(),
+        });
+    }
+    if !config.enabled {
+        return Ok(());
+    }
+    let registry_url = config.registry_url.trim();
+    if !(registry_url.starts_with("http://") || registry_url.starts_with("https://")) {
+        return Err(ConfigError::InvalidValue {
+            field: "app_version_sync.registry_url".to_string(),
+            value: config.registry_url.clone(),
+            expected: "an http:// or https:// URL when app_version_sync is enabled".to_string(),
+        });
+    }
+    if config.interval_secs == 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "app_version_sync.interval_secs".to_string(),
+            value: "0".to_string(),
+            expected: "a positive number of seconds".to_string(),
         });
     }
     Ok(())
@@ -353,6 +389,38 @@ mod tests {
     use super::*;
 
     use crate::core::errors::ConfigError;
+
+    #[test]
+    fn app_version_sync_settings_are_validated() {
+        let mut config = AppConfig::default();
+        assert!(config.validate().is_ok(), "disabled by default");
+
+        config.app_version_sync.enabled = true;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("registry_url"), "{err}");
+
+        config.app_version_sync.registry_url = "https://registry.example".to_string();
+        assert!(config.validate().is_ok());
+
+        config.app_version_sync.interval_secs = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("interval_secs"), "{err}");
+
+        let mut config = AppConfig::default();
+        config.app_version_sync.request_timeout_secs = 0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("request_timeout_secs"), "{err}");
+
+        config.app_version_sync.state_file = " ".to_string();
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("state_file"), "{err}");
+
+        let parsed: AppVersionSyncConfig =
+            yaml_serde::from_str("enabled: true\nregistry_url: http://registry\n").unwrap();
+        assert_eq!(parsed.interval_secs, 60);
+        assert!(parsed.auto_submit);
+        assert_eq!(parsed.state_file, "./Data/runtime-versions.json");
+    }
 
     #[test]
     fn rejects_invalid_media_backend() {

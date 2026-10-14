@@ -164,6 +164,9 @@ pub struct JobSnapshot {
     pub region: String,
     pub asset_version: Option<String>,
     pub asset_hash: Option<String>,
+    /// The Nuverse app version the job runs with (fixed when it is created).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
     pub dry_run: bool,
     pub status: JobStatus,
     pub message: String,
@@ -189,6 +192,7 @@ impl JobSnapshot {
             region: request.region.clone(),
             asset_version: request.asset_version.clone(),
             asset_hash: request.asset_hash.clone(),
+            app_version: None,
             dry_run: request.dry_run,
             status: JobStatus::Queued,
             message: "job accepted".to_string(),
