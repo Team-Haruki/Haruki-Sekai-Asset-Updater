@@ -21,9 +21,16 @@
   - `GET /v2/jobs`
   - `GET /v2/jobs/{id}`
   - `POST /v2/jobs/{id}/cancel`
+  - `GET /v2/regions`
+  - `PUT /v2/regions/{region}/app-version` / `DELETE /v2/regions/{region}/app-version`
 - 请求流程：`POST /v2/assets/update` 由 handler 创建任务，`JobManager` 派发 tokio task，
   经 `build_execution_plan` 得到 `ExecutionPlan`，再由 `AssetExecutionContext` 执行
   下载/解密/导出/上传，任务状态通过 `GET /v2/jobs/{id}` 查询。
+- 运行时版本：Nuverse 的 `app_version` 与各区的 `unity_version` 可在运行时改变
+  （`src/core/app_versions.rs` 持久化到 `app_version_sync.state_file`，
+  `src/service/app_versions.rs` 负责采纳规则与 registry 轮询）。任务在创建时由
+  `JobManager` 取一份应用了覆盖值的配置，运行中的任务不受后续变更影响。新版本只有在
+  比当前值新且通过 CDN version URL 探测后才会被采纳（`force` 除外），不要绕过这条规则。
 
 ## 2. 目录约定
 

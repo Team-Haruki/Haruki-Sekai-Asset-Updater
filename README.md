@@ -14,6 +14,8 @@
 - Exposes `GET /v2/jobs`
 - Exposes `GET /v2/jobs/{id}`
 - Exposes `POST /v2/jobs/{id}/cancel`
+- Exposes `GET /v2/regions` and `PUT`/`DELETE /v2/regions/{region}/app-version`
+  (runtime app/Unity versions, see [Runtime app versions](#runtime-app-versions))
 - Uses [`cridecoder`](https://crates.io/crates/cridecoder) as the codec backend
 - Supports bundle download, deobfuscation, export post-processing, S3-compatible upload, and Git CLI chart sync
 - Uses the Rust image backend for PNG/JPG/WebP output from AssetStudio RGBA payloads
@@ -146,6 +148,56 @@ With a cache directory configured, `mode: "prefetch_raw_bundles"` prefetches
 every StartApp/OnDemand bundle selected by the region filters into that cache;
 `export.raw_bundles` continues to control the optional second raw-bundle copy in
 the asset output tree.
+
+## Runtime app versions
+
+Nuverse regions put `provider.app_version` into their CDN URLs, and every region
+sends `runtime.unity_version` as `X-Unity-Version` and uses it for Unity export.
+Both can change at runtime without a restart. The YAML values are the starting
+point; runtime overrides live in `app_version_sync.state_file` (default
+`./Data/runtime-versions.json`, written atomically) and survive restarts. A job
+takes the values current when it is created and keeps them for its whole run.
+
+An app-version candidate is adopted only when it parses (`x.y.z` or
+`x.y.z.w`), is newer than the current value, and the region's version URL
+answers it with a numeric asset version. Older candidates are refused and a
+failed probe keeps the current value. `force: true` skips the probe and the
+downgrade check. Candidates come from:
+
+- the registry poller (`app_version_sync.enabled`), which reads `appVersion` from
+  `{registry_url}/v1/master/{region}/current` for every enabled Nuverse region
+  each `interval_secs`. Regions are polled independently, so one region's
+  registry or CDN failure never holds back another. After adopting a version it
+  submits an update job when `auto_submit` is on, waiting until the region has
+  no active job;
+- `PUT /v2/regions/{region}/app-version` with
+  `{"app_version": "...", "unity_version": "...", "force": false}` (either
+  field; `unity_version` works for every region, `app_version` only for Nuverse);
+- the optional `app_version` of `POST /v2/assets/update`. It never fails the
+  request: the response's `app_version` field says whether it was adopted, and
+  regions without an app version ignore it.
+
+Precedence: the newest value wins. A manual override stays until the registry
+reports a newer version; the poller never replaces it with an older one.
+`DELETE /v2/regions/{region}/app-version` (optionally `?field=app_version` or
+`?field=unity_version`) reverts to the YAML values; the poller may then adopt
+the registry version again on its next run. At startup an app-version override
+the YAML has caught up with is dropped unless it was forced.
+
+`GET /v2/regions` lists the effective, configured and overridden values and,
+while the poller is on, its per-region status. `/healthz` adds an
+`app_version_sync` block with `max_consecutive_probe_failures` and
+`max_consecutive_registry_failures` (plus per-region counters) for alerting.
+
+```yaml
+app_version_sync:
+  enabled: true
+  registry_url: "http://registry.example:8080"
+  interval_secs: 60
+  auto_submit: true
+  request_timeout_secs: 15
+  state_file: "./Data/runtime-versions.json"
+```
 
 ## Cloud asset inventory publication
 

@@ -106,6 +106,16 @@ git_sync:
     signing_key: "" # GPG key id, SSH public/private key path, or SSH public key
     signing_program: "" # optional: gpg.program for GPG or gpg.ssh.program for SSH
 
+# Runtime app/Unity versions (see README "Runtime app versions"). The state file
+# is always used for runtime overrides; `enabled` turns on the registry poller.
+app_version_sync:
+  enabled: false
+  registry_url: "" # e.g. http://registry.example:8080; reads /v1/master/{region}/current
+  interval_secs: 60
+  auto_submit: true # submit an update job after adopting a newer app version
+  request_timeout_secs: 15
+  state_file: "./Data/runtime-versions.json"
+
 regions:
   jp:
     enabled: false
