@@ -293,3 +293,167 @@ fn pad_to_four(output: &mut Vec<u8>) {
         output.push(0);
     }
 }
+
+/// One generic binding of a synthetic `AnimationClip`.
+pub(crate) struct SyntheticClipBinding {
+    pub(crate) path: u32,
+    pub(crate) type_id: i32,
+}
+
+/// One frame of a synthetic streamed clip: its time and `(curve, [a, b, c, d])`
+/// keys, where the curve evaluates to `((a * t + b) * t + c) * t + d`.
+pub(crate) type SyntheticStreamedFrame = (f32, Vec<(u32, [f32; 4])>);
+
+/// A UnityFS bundle holding `TextAsset` (name, bytes) and `AnimationClip`
+/// (name, bindings, streamed frames, stop time) objects, in that order.
+pub(crate) fn text_assets_and_clips_unity_fs_bundle(
+    text_assets: &[(&str, &[u8])],
+    clips: &[(
+        &str,
+        &[SyntheticClipBinding],
+        &[SyntheticStreamedFrame],
+        f32,
+    )],
+) -> Vec<u8> {
+    let mut objects = Vec::new();
+    for (name, payload) in text_assets {
+        let mut object = Vec::new();
+        push_aligned_bytes(&mut object, name.as_bytes());
+        push_aligned_bytes(&mut object, payload);
+        objects.push((49, i64::try_from(objects.len() + 1).unwrap(), object));
+    }
+    for (name, bindings, frames, stop_time) in clips {
+        let object = animation_clip_object(name, bindings, frames, *stop_time);
+        objects.push((74, i64::try_from(objects.len() + 1).unwrap(), object));
+    }
+    unity_fs_with_entry("clips.assets", &objects_file(&objects))
+}
+
+/// A Unity 2022.3 `AnimationClip` with only a muscle clip of streamed curves,
+/// laid out as `unity_rs_core::animation_clip` reads it.
+fn animation_clip_object(
+    name: &str,
+    bindings: &[SyntheticClipBinding],
+    frames: &[SyntheticStreamedFrame],
+    stop_time: f32,
+) -> Vec<u8> {
+    let mut output = Vec::new();
+    push_aligned_bytes(&mut output, name.as_bytes());
+    output.extend_from_slice(&[0, 0, 1]); // legacy, compressed, high-quality curve
+    pad_to_four(&mut output);
+    for _ in 0..7 {
+        push_le_i32(&mut output, 0); // rotation .. PPtr curves
+    }
+    push_le_f32s(&mut output, &[60.0]); // sample rate
+    push_le_i32(&mut output, 0); // wrap mode
+    push_le_f32s(&mut output, &[0.0; 6]); // bounds
+    push_le_i32(&mut output, 0); // muscle clip size
+
+    // ClipMuscleConstant: delta pose, root motion transforms and speed.
+    push_le_f32s(&mut output, &[0.0; 10 + 7]);
+    push_le_i32(&mut output, 0); // goals
+    for _ in 0..2 {
+        push_le_f32s(&mut output, &[0.0; 10]);
+        push_le_i32(&mut output, 0);
+        push_le_f32s(&mut output, &[0.0; 4]);
+    }
+    push_le_i32(&mut output, 0); // DoF
+    push_le_i32(&mut output, 0); // TDoF
+    push_le_f32s(&mut output, &[0.0; 4 * 10 + 3]);
+
+    let mut streamed = Vec::new();
+    for (time, keys) in frames {
+        streamed.push(time.to_bits());
+        streamed.push(u32::try_from(keys.len()).unwrap());
+        for (curve, coefficients) in keys {
+            streamed.push(*curve);
+            streamed.extend(coefficients.iter().map(|value| value.to_bits()));
+        }
+    }
+    push_le_i32(&mut output, i32::try_from(streamed.len()).unwrap());
+    for value in streamed {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    let curve_count = u16::try_from(bindings.len()).unwrap();
+    output.extend_from_slice(&curve_count.to_le_bytes());
+    output.extend_from_slice(&0_u16.to_le_bytes()); // discrete curves
+    push_le_i32(&mut output, 0); // dense frames
+    push_le_i32(&mut output, 0); // dense curves
+    push_le_f32s(&mut output, &[60.0, 0.0]);
+    push_le_i32(&mut output, 0); // dense samples
+    push_le_i32(&mut output, 0); // constant values
+    push_le_f32s(&mut output, &[0.0, stop_time, 0.0, 0.0, 0.0, 0.0]);
+    push_le_i32(&mut output, 0); // index array
+    push_le_i32(&mut output, 0); // value array delta
+    push_le_i32(&mut output, 0); // value array reference pose
+    output.extend_from_slice(&[0; 11]); // mirror, loop and root-bake flags
+    pad_to_four(&mut output);
+
+    push_le_i32(&mut output, i32::try_from(bindings.len()).unwrap());
+    for binding in bindings {
+        output.extend_from_slice(&binding.path.to_le_bytes());
+        output.extend_from_slice(&0_u32.to_le_bytes()); // attribute
+        push_le_i32(&mut output, 0); // script file id
+        output.extend_from_slice(&0_i64.to_le_bytes()); // script path id
+        push_le_i32(&mut output, binding.type_id);
+        output.extend_from_slice(&[0, 0, 0, 0]); // custom type and curve flags
+    }
+    push_le_i32(&mut output, 0); // PPtr curve mapping
+    output.extend_from_slice(&[0, 0]); // generic root transform, motion float curves
+    pad_to_four(&mut output);
+    push_le_i32(&mut output, 0); // events
+    output
+}
+
+/// A MOC3 holding only what the identifier reader looks at.
+pub(crate) fn synthetic_moc3(parameters: &[&str], parts: &[&str], big_endian: bool) -> Vec<u8> {
+    let put = |output: &mut Vec<u8>, offset: usize, value: usize| {
+        let value = u32::try_from(value).unwrap();
+        let bytes = if big_endian {
+            value.to_be_bytes()
+        } else {
+            value.to_le_bytes()
+        };
+        output[offset..offset + 4].copy_from_slice(&bytes);
+    };
+    let count_table = 268;
+    let part_ids = count_table + 24;
+    let parameter_ids = part_ids + parts.len() * 64;
+    let mut output = vec![0_u8; parameter_ids + parameters.len() * 64];
+    output[..4].copy_from_slice(b"MOC3");
+    output[4] = 3;
+    output[5] = u8::from(big_endian);
+    put(&mut output, 64, count_table);
+    put(&mut output, 76, part_ids);
+    put(&mut output, 264, parameter_ids);
+    put(&mut output, count_table, parts.len());
+    put(&mut output, count_table + 20, parameters.len());
+    for (table, ids) in [(part_ids, parts), (parameter_ids, parameters)] {
+        for (index, id) in ids.iter().enumerate() {
+            let start = table + index * 64;
+            output[start..start + id.len()].copy_from_slice(id.as_bytes());
+        }
+    }
+    output
+}
+
+pub(crate) fn unity_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0_u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
+}
+
+fn push_le_i32(output: &mut Vec<u8>, value: i32) {
+    output.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_le_f32s(output: &mut Vec<u8>, values: &[f32]) {
+    for value in values {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+}

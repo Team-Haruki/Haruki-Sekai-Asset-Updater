@@ -135,6 +135,40 @@ include every bundle in those categories. `asset_studio_types: [all]` makes the
 direct engine attempt every serialized object: known types use their specialized
 unity-rs reader, while other types fall back from TypeTree JSON to raw bytes.
 
+### Live2D motions
+
+Project Sekai stores each character's Live2D motions as Unity `AnimationClip`
+objects (`live2d/motion/<character>_motion_base`, plus the clips some model
+bundles carry). With `AnimationClip` in `asset_studio_types` and the `motion3`
+read kind, every clip that drives Cubism parameters or parts is written as
+`<clip>.motion3.json` next to the motion's meta JSON; clips without a Cubism
+curve (UI and 3D animations) are skipped. `motion3` is the default read kind for
+`AnimationClip`, but an `all` entry in `read_kinds` takes precedence over it, so
+name the type explicitly:
+
+```yaml
+backends:
+  asset_studio:
+    read_kinds:
+      AnimationClip: motion3
+regions:
+  jp:
+    filters:
+      priority:
+        - "^live2d/model/.*" # models before the motions that use their ids
+        - ".*"
+    export:
+      asset_studio_types: [monoBehaviour, textAsset, AnimationClip]
+```
+
+A clip binds its curves by the CRC32 of `Parameters/<id>` or `Parts/<id>`, so the
+ids come from the models' MOC3 files: those already exported under the region's
+`live2d/model` directory, plus any MOC3 the same job exports before the clip.
+Bindings no known model has are dropped and counted in a warning. Segments are
+written as Unity evaluates them, so a segment with flat tangents becomes the
+equivalent Bezier rather than a line, and `Meta.FadeInTime`/`FadeOutTime` come
+from the motion's `Live2DBuildMotionMetaData` object.
+
 ### Reusable AssetBundle cache
 
 Set `execution.asset_bundle_cache_dir` (for example

@@ -39,6 +39,11 @@ pub(super) fn native_object_output_path(
     if !extension.is_empty() {
         path.set_extension(extension.trim_start_matches('.'));
     }
+    // A motion sits next to its clip's container, beside the meta object the
+    // game reads its fade times from.
+    if payload_kind == Some(super::live2d_motion::LIVE2D_MOTION_PAYLOAD_KIND) {
+        return path;
+    }
     semantic_assetstudio_object_output_path(path, asset)
 }
 
@@ -363,6 +368,7 @@ pub(super) fn native_object_output_extension(
             .unwrap_or("ttf"),
         "shader_text" => "shader",
         "mesh_obj" => "obj",
+        "live2d_motion3" => "motion3.json",
         _ => suggested_extension
             .and_then(static_known_payload_extension)
             .unwrap_or_else(|| default_extension_for_asset(asset)),

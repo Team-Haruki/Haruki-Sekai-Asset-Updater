@@ -267,9 +267,11 @@ impl NativeImageEncodeTelemetry {
     }
 }
 
+/// Export state shared by every bundle of one job.
 #[derive(Debug, Clone, Default)]
 pub struct NativeSemanticExportPathRegistry {
     pub(super) claims: Arc<Mutex<HashMap<PathBuf, NativeSemanticExportClaim>>>,
+    pub(super) live2d_targets: super::live2d_motion::Live2dMotionTargetIndex,
 }
 
 #[derive(Debug, Clone)]
