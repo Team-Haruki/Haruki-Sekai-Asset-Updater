@@ -8,6 +8,7 @@ use crate::{ExportPipelineError, PipelineOptions};
 mod fixture_default;
 mod images;
 mod limits;
+mod live2d_motion;
 mod media_postprocess;
 mod paths;
 mod payload;

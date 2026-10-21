@@ -373,7 +373,8 @@ pub(super) fn warn_media_fallback_backend_options(media: &MediaBackendConfig) {
 pub(super) fn validate_asset_studio_read_kind(field: &str, value: &str) -> Result<(), ConfigError> {
     match value.trim().to_lowercase().as_str() {
         "auto" | "raw" | "typetree_json" | "image" | "image_archive" | "audio" | "video"
-        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx" => {
+        | "font" | "shader" | "text" | "text_bytes" | "mesh" | "obj" | "animator" | "fbx"
+        | "motion3" => {
             Ok(())
         }
         other => Err(ConfigError::InvalidValue {
@@ -516,10 +517,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_motion3_read_kind_for_animation_clips() {
+        let mut config = AppConfig::default();
+        config
+            .backends
+            .asset_studio
+            .read_kinds
+            .insert("AnimationClip".to_string(), "motion3".to_string());
+        config.validate().unwrap();
+    }
+
+    #[test]
     fn rejects_unimplemented_pjsk_read_kinds() {
-        // Model packages and motion clips flow through the haruki_3d raw-bundle
-        // pipeline. Accepting them here would silently drop every
-        // Animator/AnimationClip export.
+        // Model packages flow through the haruki_3d raw-bundle pipeline and
+        // Live2D clips use `motion3`. Accepting these names here would silently
+        // drop every Animator/AnimationClip export.
         for (asset_type, kind) in [
             ("Animator", "pjsk_model_package"),
             ("AnimationClip", "pjsk_animation_clip_decoded"),

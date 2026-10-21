@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use super::limits::acquire_cpu_budget_permit;
 use tracing::warn;
+use unity_rs_core::animation_clip::ANIMATION_CLIP_CLASS_ID;
 use unity_rs_core::file_type::{detect_file_type, FileType, HEADER_SCAN_LENGTH};
 use unity_rs_core::loader::AssetLoadOptions;
 use unity_rs_core::mesh::MeshReadLimits;
@@ -30,6 +31,9 @@ use crate::{
     ExportPipelineError, PipelineOptions as AppConfig, PipelineRegionOptions as RegionConfig,
 };
 
+use super::live2d_motion::{
+    BundleLive2dMotions, LIVE2D_MOTION_EXTENSION, LIVE2D_MOTION_PAYLOAD_KIND,
+};
 use super::merge_phase_ms;
 use super::paths::plan_native_texture_naming;
 use super::payload::playable::{is_playable_mono_typetree, write_assetstudio_playable_payloads};
@@ -163,13 +167,24 @@ fn call_unity_rs_object_export(
     let mut path_state = NativeSemanticExportPathState::with_registry(path_registry.clone())
         .with_texture_naming(texture_naming);
     let mut playable_outputs = Vec::new();
+    let mut live2d_motions = readable_assets
+        .iter()
+        .any(|asset| asset.type_id == ANIMATION_CLIP_CLASS_ID)
+        .then(|| BundleLive2dMotions::new(&path_registry.live2d_targets, options.output_dir));
     for asset_chunk in readable_assets.chunks(read_batch_size) {
         summary.object_read_plan.batch_count += 1;
         let batch_started = Instant::now();
         for asset in asset_chunk {
             let object = object_refs[asset.index];
             let read_kind = native_read_kind_for_asset(asset, options.read_kinds);
-            match read_unity_rs_object(&studio, object, asset, &read_kind, options.image_format) {
+            match read_unity_rs_object(
+                &studio,
+                object,
+                asset,
+                &read_kind,
+                options.image_format,
+                live2d_motions.as_mut(),
+            ) {
                 Ok(read_output) => {
                     summary.object_read_plan.successful_reads += 1;
                     summary.object_read_plan.payload_bundle_bytes +=
@@ -179,8 +194,17 @@ fn call_unity_rs_object_export(
                     type_stats.successful_reads += 1;
                     type_stats.payload_bytes += read_output.payload.len() as u64;
                     merge_phase_ms(&mut summary.phase_ms, &read_output.response.phase_ms);
+                    observe_live2d_model(path_registry, asset, &read_output);
+                    if let Some(motions) = live2d_motions.as_mut() {
+                        motions.observe(asset, &read_output);
+                    }
                     if is_playable_mono_typetree(asset, &read_output) {
                         playable_outputs.push(((*asset).clone(), read_output));
+                    } else if let (Some(motions), Some(LIVE2D_MOTION_PAYLOAD_KIND)) = (
+                        live2d_motions.as_mut(),
+                        read_output.response.payload_kind.as_deref(),
+                    ) {
+                        motions.defer((*asset).clone(), read_output);
                     } else {
                         write_native_object_payload(options, &mut path_state, asset, &read_output)?;
                     }
@@ -215,11 +239,33 @@ fn call_unity_rs_object_export(
             .or_default() += elapsed_millis(batch_started);
     }
     write_assetstudio_playable_payloads(options, &mut path_state, playable_outputs)?;
+    if let Some(motions) = live2d_motions {
+        motions.write(options, &mut path_state)?;
+    }
     super::fixture_default::write_fixture_default(options, &mut path_state, &assets)?;
     summary.written_files = path_state.written_files;
     summary.acb_sources = path_state.acb_sources;
     path_state.image_encode.merge_into(&mut summary.phase_ms);
     Ok(summary)
+}
+
+/// Feeds a MOC3 exported by this bundle to the job's Live2D id index, so motion
+/// bundles later in the same job resolve its parameters.
+fn observe_live2d_model(
+    path_registry: &NativeSemanticExportPathRegistry,
+    asset: &UnityAssetInfo,
+    read_output: &UnityObjectReadOutput,
+) {
+    let is_moc3 = asset.type_id == 49
+        && asset
+            .name
+            .as_deref()
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".moc3"));
+    if is_moc3 {
+        path_registry
+            .live2d_targets
+            .add_moc3(read_output.payload.bytes());
+    }
 }
 
 fn validate_unity_input(input_path: &Path) -> Result<(), ExportPipelineError> {
@@ -280,6 +326,7 @@ fn read_unity_rs_object(
     asset: &UnityAssetInfo,
     kind: &str,
     image_format: &str,
+    live2d_motions: Option<&mut BundleLive2dMotions>,
 ) -> Result<UnityObjectReadOutput, ExportPipelineError> {
     const MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
     let started = Instant::now();
@@ -430,6 +477,24 @@ fn read_unity_rs_object(
                     Err(error) => return Err(unity_rs_error(error)),
                 }
             }
+            (ANIMATION_CLIP_CLASS_ID, "auto" | "motion3") => {
+                let motion = match live2d_motions {
+                    Some(motions) => motions.read_clip(studio, object),
+                    None => Ok(None),
+                };
+                match motion {
+                    Ok(Some(json)) => (
+                        json.into(),
+                        LIVE2D_MOTION_PAYLOAD_KIND,
+                        LIVE2D_MOTION_EXTENSION.to_string(),
+                    ),
+                    // Not a Cubism clip: nothing to write, and nothing went wrong.
+                    Ok(None) | Err(unity_rs_core::Error::Unsupported(_)) => {
+                        (Vec::new().into(), "unsupported", String::new())
+                    }
+                    Err(error) => return Err(unity_rs_error(error)),
+                }
+            }
             (AUDIO_CLIP_CLASS_ID, "auto" | "audio" | "raw") => {
                 let simple = object
                     .read_audio_clip(SimpleAssetReadLimits::default())
@@ -547,6 +612,7 @@ fn unity_class_name(class_id: i32) -> String {
         SHADER_CLASS_ID => "Shader",
         49 => "TextAsset",
         AUDIO_CLIP_CLASS_ID => "AudioClip",
+        ANIMATION_CLIP_CLASS_ID => "AnimationClip",
         95 => "Animator",
         MONO_BEHAVIOUR_CLASS_ID => "MonoBehaviour",
         FONT_CLASS_ID => "Font",
@@ -684,7 +750,12 @@ fn object_type_read_stats_mut<'a>(
 
 pub(super) fn sort_native_object_reads_for_failure_isolation(assets: &mut Vec<&UnityAssetInfo>) {
     assets.sort_by_key(|asset| {
-        let priority = if is_native_image_asset(asset) { 1 } else { 0 };
+        // Clips go after the MOC3s of their own bundle, which resolve their bindings.
+        let priority = if is_native_image_asset(asset) || asset.type_id == ANIMATION_CLIP_CLASS_ID {
+            1
+        } else {
+            0
+        };
         (priority, asset.index)
     });
 }
@@ -787,6 +858,7 @@ pub(super) fn default_native_read_kind(asset_type: &str) -> &'static str {
         "font" => "font",
         "shader" => "shader",
         "mesh" => "obj",
+        "animationclip" => "motion3",
         _ => "typetree_json",
     }
 }
@@ -817,7 +889,6 @@ pub(super) fn assetstudio_object_mode_known_unreadable_type(asset_type: &str) ->
     matches!(
         asset_type,
         "Animation"
-            | "AnimationClip"
             | "AnimatorController"
             | "AssetBundle"
             | "AudioListener"
