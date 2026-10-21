@@ -380,7 +380,7 @@ pub(super) fn validate_asset_studio_read_kind(field: &str, value: &str) -> Resul
         other => Err(ConfigError::InvalidValue {
             field: field.to_string(),
             value: other.to_string(),
-            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, or fbx".to_string(),
+            expected: "auto, raw, typetree_json, image, image_archive, audio, video, font, shader, text, text_bytes, mesh, obj, animator, fbx, or motion3".to_string(),
         }),
     }
 }

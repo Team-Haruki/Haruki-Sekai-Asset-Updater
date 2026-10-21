@@ -188,8 +188,9 @@ fn read_identifier_table<R: Read + Seek>(
     let mut table = vec![0_u8; count as usize * MOC3_IDENTIFIER_BYTES];
     reader.seek(SeekFrom::Start(offset))?;
     reader.read_exact(&mut table)?;
-    Ok(table
-        .chunks_exact(MOC3_IDENTIFIER_BYTES)
+    let (ids, _) = table.as_chunks::<MOC3_IDENTIFIER_BYTES>();
+    Ok(ids
+        .iter()
         .map(|id| {
             let length = id.iter().position(|byte| *byte == 0).unwrap_or(id.len());
             String::from_utf8_lossy(&id[..length]).into_owned()
