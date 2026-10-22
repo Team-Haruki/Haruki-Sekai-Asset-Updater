@@ -206,8 +206,9 @@ downgrade check.
 Nuverse keys its CDN by the bundle version, which stays `x.y.0` when a store
 republishes the client as `x.y.z` without new assets. When the version URL
 answers 404 for an `x.y.z` candidate with a non-zero patch, the probe is
-repeated for `x.y.0`: if that is the current value the region is up to date
-(no failure is counted), if it is newer and answers it is adopted as `x.y.0`.
+repeated for `x.y.0`. If `x.y.0` answers and is the current value, the region
+is up to date (no failure is counted); if it answers and is newer, it is
+adopted as `x.y.0`.
 Any other probe failure, or a 404 for `x.y.0` too, keeps the current value as
 before. Candidates come from:
 

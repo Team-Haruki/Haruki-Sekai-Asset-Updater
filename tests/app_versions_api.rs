@@ -14,13 +14,13 @@ use haruki_sekai_asset_updater::service::http::{build_router, AppState};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 use tower::ServiceExt;
 
-/// A CDN whose version URL answers `100` for 6.5.0 and 6.6.0 only.
+/// A CDN whose version URL answers `100` for 6.4.0, 6.5.0 and 6.6.0 only.
 async fn version_cdn() -> String {
     let app = Router::new().route(
         "/version/{app_version}",
         get(
             |axum::extract::Path(app_version): axum::extract::Path<String>| async move {
-                if app_version == "6.5.0" || app_version == "6.6.0" {
+                if ["6.4.0", "6.5.0", "6.6.0"].contains(&app_version.as_str()) {
                     (StatusCode::OK, "100")
                 } else {
                     (StatusCode::NOT_FOUND, "")

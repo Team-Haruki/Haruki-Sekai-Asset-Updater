@@ -13,9 +13,10 @@
 //!
 //! Nuverse keys its CDN by the bundle version, which stays `x.y.0` when the
 //! client is republished as `x.y.z` without new assets. So when the version
-//! URL answers 404 for `x.y.z`, the probe is repeated for `x.y.0`: equal to
-//! the current value it is up to date, newer it is adopted (as `x.y.0`, the
-//! CDN key, never the store version). The candidate itself still only ever
+//! URL answers 404 for `x.y.z`, the probe is repeated for `x.y.0`: when it
+//! answers and equals the current value the region is up to date, when it
+//! answers and is newer it is adopted (as `x.y.0`, the CDN key, never the
+//! store version). The candidate itself still only ever
 //! comes from the registry, an operator or an update request.
 
 use std::cmp::Ordering;
@@ -293,21 +294,22 @@ impl AppVersionManager {
             Some(zeroed) if err.not_found => zeroed,
             _ => return Err(failed(err.message)),
         };
-        match is_newer(region_config, overrides, &zeroed) {
-            Ok(true) => {}
-            Ok(false) => {
+        // Older than the current value: nothing to fall back to.
+        let Ok(newer) = is_newer(region_config, overrides, &zeroed) else {
+            return Err(failed(err.message));
+        };
+        // Probed even when it is the current value, so a CDN that lost the
+        // current version too still counts as a failure.
+        match probe_app_version(&self.config, region_config, &zeroed, unity_version).await {
+            Ok(asset_version) if newer => Ok(Some((zeroed, asset_version))),
+            Ok(_) => {
                 debug!(
                     region,
                     candidate, cdn_app_version = %zeroed,
                     "app version not on the CDN; its patch-zeroed version is current"
                 );
-                return Ok(None);
+                Ok(None)
             }
-            // Older than the current value: nothing to fall back to.
-            Err(_) => return Err(failed(err.message)),
-        }
-        match probe_app_version(&self.config, region_config, &zeroed, unity_version).await {
-            Ok(asset_version) => Ok(Some((zeroed, asset_version))),
             Err(zeroed_err) => Err(failed(format!(
                 "{}; patch-zeroed {zeroed} also failed: {}",
                 err.message, zeroed_err.message
@@ -827,6 +829,7 @@ mod tests {
         // The store republished 6.4.0 as 6.4.1; the CDN only knows 6.4.0.
         fx.registry_says("cn", "6.4.1");
         fx.registry_says("tw", "6.4.0");
+        fx.cdn_has("6.4.0");
         fx.manager
             .status
             .write()
@@ -849,6 +852,20 @@ mod tests {
         assert!(view.app_version.unwrap().override_.is_none());
         let health = fx.manager.health().await.unwrap();
         assert_eq!(health.max_consecutive_probe_failures, 0);
+
+        // A CDN without the current version either is still a failure.
+        fx.cdn.set("/version/6.4.0", StatusCode::NOT_FOUND, "");
+        fx.manager.poll_once().await;
+        let cn = fx.status("cn").await;
+        assert_eq!(cn.last_result, Some(SyncResult::ProbeFailed));
+        assert_eq!(cn.consecutive_probe_failures, 1);
+        assert!(
+            cn.last_error
+                .unwrap()
+                .contains("patch-zeroed 6.4.0 also failed"),
+            "both attempts are reported"
+        );
+        assert_eq!(fx.effective("cn").await, "6.4.0");
     }
 
     #[tokio::test]
