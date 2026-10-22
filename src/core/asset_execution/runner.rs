@@ -1197,6 +1197,7 @@ mod tests {
             filters: crate::core::config::RegionFiltersConfig {
                 start_app: vec!["^start/".to_string()],
                 on_demand: Vec::new(),
+                other: Vec::new(),
                 skip: Vec::new(),
                 priority: vec!["^start/".to_string()],
             },

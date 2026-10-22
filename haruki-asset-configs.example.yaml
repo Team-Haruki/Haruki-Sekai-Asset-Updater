@@ -139,6 +139,10 @@ regions:
         - ".*"
       on_demand:
         - ".*"
+      # Catalogue categories other than StartApp/OnDemand (AdditionalVoice,
+      # MysekaiVoice, Tutorial). Empty skips them.
+      other:
+        - ".*"
       skip: []
       priority:
         - "^character/member.*"

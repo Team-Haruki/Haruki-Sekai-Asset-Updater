@@ -131,7 +131,12 @@ tasks. The engine is compiled into the `haruki-sekai-asset-updater` binary and
 remains the only asset-unpacking path.
 
 Set both `regions.<name>.filters.start_app` and `on_demand` to `[".*"]` to
-include every bundle in those categories. `asset_studio_types: [all]` makes the
+include every bundle in those categories. Bundles in any other catalogue
+category (Japanese and English servers: `AdditionalVoice` for area-conversation
+and system voices, `MysekaiVoice`, `Tutorial`) are downloaded only when they
+match `filters.other`, which is empty by default. Their exports keep the game's
+resource folder, e.g. `additionalvoice/sound/actionset/voice/<scenario>/` and
+`tutorial/sound/scenario/part_voice/<character>/`. `asset_studio_types: [all]` makes the
 direct engine attempt every serialized object: known types use their specialized
 unity-rs reader, while other types fall back from TypeTree JSON to raw bytes.
 
