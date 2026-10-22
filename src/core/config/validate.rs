@@ -183,6 +183,10 @@ pub(super) fn validate_region_filter_regexes(
         &filters.on_demand,
     )?;
     validate_regex_patterns(
+        &format!("regions.{region_name}.filters.other"),
+        &filters.other,
+    )?;
+    validate_regex_patterns(
         &format!("regions.{region_name}.filters.skip"),
         &filters.skip,
     )?;
@@ -616,6 +620,9 @@ mod tests {
         assert!(validate_region_filter_regexes("jp", &region).is_err());
         region.filters.start_app = vec!["^start/".to_string()];
         region.filters.on_demand = vec!["^ondemand/".to_string()];
+        region.filters.other = vec!["[".to_string()];
+        assert!(validate_region_filter_regexes("jp", &region).is_err());
+        region.filters.other = vec!["^sound/actionset/".to_string()];
         region.filters.skip = vec!["skip$".to_string()];
         region.filters.priority = vec!["priority".to_string()];
         region.export.raw_bundles = Some(super::super::schema::RawBundleExportConfig {

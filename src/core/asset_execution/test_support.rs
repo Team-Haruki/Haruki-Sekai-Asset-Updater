@@ -36,6 +36,7 @@ pub(super) fn test_region(provider: RegionProviderConfig) -> RegionConfig {
         filters: crate::core::config::RegionFiltersConfig {
             start_app: vec!["^start/".to_string()],
             on_demand: vec!["^ond/".to_string(), "^live_pv/model/".to_string()],
+            other: vec!["^sound/actionset/".to_string()],
             skip: vec!["^skip/".to_string()],
             priority: vec!["^start/a".to_string(), "^ond/".to_string()],
         },

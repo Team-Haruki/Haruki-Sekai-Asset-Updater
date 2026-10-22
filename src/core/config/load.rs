@@ -375,6 +375,7 @@ asset_studio:
         );
         assert_eq!(jp.filters.start_app, vec![".*"]);
         assert_eq!(jp.filters.on_demand, vec![".*"]);
+        assert_eq!(jp.filters.other, vec![".*"]);
 
         assert!(
             jp.export.raw_bundles.is_none(),

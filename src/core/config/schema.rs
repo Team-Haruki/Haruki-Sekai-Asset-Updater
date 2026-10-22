@@ -752,6 +752,9 @@ pub struct RegionPathsConfig {
 pub struct RegionFiltersConfig {
     pub start_app: Vec<String>,
     pub on_demand: Vec<String>,
+    /// Bundles whose catalogue category is neither StartApp nor OnDemand
+    /// (`AdditionalVoice`, `MysekaiVoice`, `Tutorial`, ...). Empty skips them.
+    pub other: Vec<String>,
     pub skip: Vec<String>,
     pub priority: Vec<String>,
 }

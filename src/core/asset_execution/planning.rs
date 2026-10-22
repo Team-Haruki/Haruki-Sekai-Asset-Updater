@@ -33,7 +33,7 @@ pub fn should_download_bundle(
         AssetCategory::OnDemand | AssetCategory::LivePv => {
             compile_patterns(&region.filters.on_demand)
         }
-        AssetCategory::Other(_) => return false,
+        AssetCategory::Other(_) => compile_patterns(&region.filters.other),
     };
     if compiled.is_empty() {
         return false;
@@ -66,6 +66,7 @@ impl AssetExecutionContext {
         let priority_patterns = compile_patterns(&self.region.filters.priority);
         let start_app_patterns = compile_patterns(&self.region.filters.start_app);
         let on_demand_patterns = compile_patterns(&self.region.filters.on_demand);
+        let other_patterns = compile_patterns(&self.region.filters.other);
         let mut tasks = Vec::new();
 
         for (bundle_name, detail) in &info.bundles {
@@ -75,7 +76,7 @@ impl AssetExecutionContext {
             let category_patterns = match &detail.category {
                 AssetCategory::StartApp => &start_app_patterns,
                 AssetCategory::OnDemand | AssetCategory::LivePv => &on_demand_patterns,
-                AssetCategory::Other(_) => continue,
+                AssetCategory::Other(_) => &other_patterns,
             };
             if category_patterns.is_empty() || !matches_any(category_patterns, bundle_name) {
                 continue;
@@ -533,6 +534,110 @@ mod tests {
             "character/member/001",
             &AssetCategory::LivePv
         ));
+    }
+
+    #[test]
+    fn other_catalogue_categories_use_the_other_filter() {
+        let mut region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: "".to_string(),
+            asset_bundle_url_template: "".to_string(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::from([("production".to_string(), "abc".to_string())]),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let additional_voice = AssetCategory::Other("AdditionalVoice".to_string());
+
+        assert!(should_download_bundle(
+            &region,
+            "sound/actionset/voice/areatalk02_007",
+            &additional_voice
+        ));
+        assert!(!should_download_bundle(
+            &region,
+            "sound/system/voice/01ichika",
+            &additional_voice
+        ));
+        // The StartApp/OnDemand lists never admit another category's bundle.
+        assert!(!should_download_bundle(
+            &region,
+            "ond/a",
+            &AssetCategory::Other("Tutorial".to_string())
+        ));
+
+        region.filters.other.clear();
+        assert!(
+            !should_download_bundle(
+                &region,
+                "sound/actionset/voice/areatalk02_007",
+                &additional_voice
+            ),
+            "an empty other filter keeps skipping these categories"
+        );
+    }
+
+    #[test]
+    fn build_download_tasks_queues_other_categories_matching_the_other_filter() {
+        let region = test_region(RegionProviderConfig::ColorfulPalette {
+            asset_info_url_template: String::new(),
+            asset_bundle_url_template: String::new(),
+            profile: "production".to_string(),
+            profile_hashes: BTreeMap::from([("production".to_string(), "abc".to_string())]),
+            required_cookies: false,
+            cookie_bootstrap_url: None,
+        });
+        let mut config = AppConfig::default();
+        config.regions.insert("jp".to_string(), region.clone());
+        let request = AssetUpdateRequest {
+            region: "jp".to_string(),
+            asset_version: Some("1".to_string()),
+            asset_hash: Some("hash".to_string()),
+            dry_run: false,
+            mode: AssetUpdateMode::Update,
+        };
+        let ctx = AssetExecutionContext::new(
+            &config,
+            &prepare_asset_run(&config, &request).unwrap(),
+            &request,
+        )
+        .unwrap();
+        let detail = |category: &str| AssetBundleDetail {
+            bundle_name: String::new(),
+            cache_file_name: String::new(),
+            cache_directory_name: String::new(),
+            hash: "h".to_string(),
+            category: AssetCategory::Other(category.to_string()),
+            crc: 0,
+            file_size: 1,
+            dependencies: Vec::new(),
+            paths: Vec::new(),
+            is_builtin: false,
+            is_relocate: None,
+            md5_hash: None,
+            download_path: None,
+        };
+        let info = AssetBundleInfo {
+            version: Some("1".to_string()),
+            os: Some("ios".to_string()),
+            bundles: HashMap::from([
+                (
+                    "sound/actionset/voice/areatalk02_007".to_string(),
+                    detail("AdditionalVoice"),
+                ),
+                (
+                    "mysekai/talk/voice/mysekai_talk_001".to_string(),
+                    detail("MysekaiVoice"),
+                ),
+            ]),
+        };
+
+        let tasks = ctx.build_standard_download_tasks(&info, &DownloadRecord::new());
+        let paths: Vec<&str> = tasks.iter().map(|task| task.bundle_path.as_str()).collect();
+        assert_eq!(paths, vec!["sound/actionset/voice/areatalk02_007"]);
+        assert_eq!(
+            tasks[0].category,
+            AssetCategory::Other("AdditionalVoice".to_string())
+        );
     }
 
     #[test]
