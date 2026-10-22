@@ -201,7 +201,15 @@ An app-version candidate is adopted only when it parses (`x.y.z` or
 `x.y.z.w`), is newer than the current value, and the region's version URL
 answers it with a numeric asset version. Older candidates are refused and a
 failed probe keeps the current value. `force: true` skips the probe and the
-downgrade check. Candidates come from:
+downgrade check.
+
+Nuverse keys its CDN by the bundle version, which stays `x.y.0` when a store
+republishes the client as `x.y.z` without new assets. When the version URL
+answers 404 for an `x.y.z` candidate with a non-zero patch, the probe is
+repeated for `x.y.0`: if that is the current value the region is up to date
+(no failure is counted), if it is newer and answers it is adopted as `x.y.0`.
+Any other probe failure, or a 404 for `x.y.0` too, keeps the current value as
+before. Candidates come from:
 
 - the registry poller (`app_version_sync.enabled`), which reads `appVersion` from
   `{registry_url}/v1/master/{region}/current` for every enabled Nuverse region

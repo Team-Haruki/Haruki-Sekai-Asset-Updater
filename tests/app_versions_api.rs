@@ -198,7 +198,7 @@ async fn put_adopts_probes_and_refuses_downgrades_and_delete_reverts() {
         ),
         (
             "/v2/regions/cn/app-version",
-            r#"{"app_version":"6.4.1"}"#,
+            r#"{"app_version":"6.7.0"}"#,
             StatusCode::BAD_GATEWAY,
         ),
     ];
@@ -206,6 +206,12 @@ async fn put_adopts_probes_and_refuses_downgrades_and_delete_reverts() {
         let (status, payload) = call(&app, Method::PUT, path, Some(body)).await;
         assert_eq!(status, expected, "{path} {body}: {payload:?}");
     }
+
+    // 6.4.1 is not on the CDN, but its patch-zeroed 6.4.0 is the current value.
+    let (status, payload) = call(&app, Method::PUT, uri, Some(r#"{"app_version":"6.4.1"}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{payload:?}");
+    assert_eq!(payload["message"].as_str(), Some("unchanged"));
+    assert!(payload["region"]["app_version"].get("override").is_none());
 
     let (status, payload) = call(
         &app,
@@ -301,12 +307,17 @@ async fn update_requests_offer_their_app_version() {
     let (app, _, _dir) = app(false).await;
     let cases = [
         (
-            r#"{"region":"cn","dry_run":true,"app_version":"6.4.1"}"#,
+            r#"{"region":"cn","dry_run":true,"app_version":"6.7.0"}"#,
             "not adopted",
             "6.4.0",
         ),
         (
-            r#"{"region":"cn","dry_run":true,"app_version":"6.5.0"}"#,
+            r#"{"region":"cn","dry_run":true,"app_version":"6.4.1"}"#,
+            "6.4.1 is already current",
+            "6.4.0",
+        ),
+        (
+            r#"{"region":"cn","dry_run":true,"app_version":"6.5.2"}"#,
             "adopted 6.5.0 (was 6.4.0)",
             "6.5.0",
         ),

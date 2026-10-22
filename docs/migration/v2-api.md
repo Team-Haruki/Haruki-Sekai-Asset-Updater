@@ -125,7 +125,9 @@ Request body (at least one of the two values):
 
 - `app_version` (Nuverse regions only): adopted when newer than the current
   value and the version URL answers it with a numeric body. Equal values are a
-  no-op. `force: true` skips both checks and pins the value: the registry
+  no-op. When the version URL answers 404 for `x.y.z` (patch not zero), the
+  patch-zeroed `x.y.0` is tried instead: equal to the current value it is a
+  no-op (`"unchanged"`), newer and answered it is adopted as `x.y.0`. `force: true` skips both checks and pins the value: the registry
   poller and update requests do not replace a forced value; a later `PUT` or
   `DELETE` does.
 - `unity_version` (every region): replaces the Unity version.

@@ -10,6 +10,13 @@
 //! A forced value is an operator's pin (for example a rollback away from a
 //! broken build): the poller and update requests leave it alone until a
 //! manual `PUT` replaces it or `DELETE` reverts it.
+//!
+//! Nuverse keys its CDN by the bundle version, which stays `x.y.0` when the
+//! client is republished as `x.y.z` without new assets. So when the version
+//! URL answers 404 for `x.y.z`, the probe is repeated for `x.y.0`: equal to
+//! the current value it is up to date, newer it is adopted (as `x.y.0`, the
+//! CDN key, never the store version). The candidate itself still only ever
+//! comes from the registry, an operator or an update request.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -26,8 +33,8 @@ use uuid::Uuid;
 
 use crate::core::app_versions::{
     compare_app_versions, configured_app_version, effective_app_version, effective_unity_version,
-    is_valid_unity_version, parse_app_version, probe_app_version, RegionVersionOverrides,
-    RuntimeVersionError, RuntimeVersions, VersionOverride, VersionSource,
+    is_valid_unity_version, parse_app_version, patch_zeroed_app_version, probe_app_version,
+    RegionVersionOverrides, RuntimeVersionError, RuntimeVersions, VersionOverride, VersionSource,
 };
 use crate::core::config::{AppConfig, RegionConfig, RegionProviderConfig};
 use crate::core::models::{AssetUpdateMode, AssetUpdateRequest};
@@ -42,9 +49,12 @@ pub enum VersionField {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdoptOutcome {
-    /// The candidate replaced `previous`. `asset_version` is what the version
-    /// URL answered (`None` when the probe was skipped with `force`).
+    /// `app_version` replaced `previous`. It is the candidate, or the
+    /// candidate with its patch zeroed when only that exists on the CDN.
+    /// `asset_version` is what the version URL answered (`None` when the
+    /// probe was skipped with `force`).
     Adopted {
+        app_version: String,
         previous: String,
         asset_version: Option<String>,
     },
@@ -212,20 +222,19 @@ impl AppVersionManager {
         if !force && !is_newer(region_config, &overrides, candidate)? {
             return Ok(AdoptOutcome::Unchanged);
         }
-        let asset_version = if force {
-            None
+        let (app_version, asset_version) = if force {
+            (candidate.to_string(), None)
         } else {
             let unity_version = probe_unity_version
                 .map(str::to_string)
                 .unwrap_or_else(|| effective_unity_version(region_config, &overrides));
-            let asset_version =
-                probe_app_version(&self.config, region_config, candidate, &unity_version)
-                    .await
-                    .map_err(|message| AdoptError::ProbeFailed {
-                        candidate: candidate.to_string(),
-                        message,
-                    })?;
-            Some(asset_version)
+            match self
+                .probe_candidate(&key, region_config, &overrides, candidate, &unity_version)
+                .await?
+            {
+                Some((app_version, asset_version)) => (app_version, Some(asset_version)),
+                None => return Ok(AdoptOutcome::Unchanged),
+            }
         };
         // The probe ran without the lock: check again against whatever is
         // current now, so a concurrent adoption of a newer value wins.
@@ -233,12 +242,13 @@ impl AppVersionManager {
             .versions
             .modify(&key, |overrides| {
                 let previous = effective_app_version(region_config, overrides).unwrap_or_default();
-                check_pin(overrides, source, candidate)?;
-                if !force && !is_newer(region_config, overrides, candidate)? {
+                check_pin(overrides, source, &app_version)?;
+                if !force && !is_newer(region_config, overrides, &app_version)? {
                     return Ok(AdoptOutcome::Unchanged);
                 }
-                overrides.app_version = Some(VersionOverride::new(candidate, source, force));
+                overrides.app_version = Some(VersionOverride::new(&app_version, source, force));
                 Ok(AdoptOutcome::Adopted {
+                    app_version: app_version.clone(),
                     previous,
                     asset_version: asset_version.clone(),
                 })
@@ -248,7 +258,8 @@ impl AppVersionManager {
             info!(
                 region = %key,
                 previous = %previous,
-                app_version = %candidate,
+                app_version = %app_version,
+                candidate = %candidate,
                 asset_version = ?asset_version,
                 source = ?source,
                 force,
@@ -256,6 +267,52 @@ impl AppVersionManager {
             );
         }
         outcome
+    }
+
+    /// Probes `candidate`, and on a 404 its patch-zeroed version (see the
+    /// module docs). Returns the version to adopt with its asset version, or
+    /// `None` when the patch-zeroed version is the current one.
+    async fn probe_candidate(
+        &self,
+        region: &str,
+        region_config: &RegionConfig,
+        overrides: &RegionVersionOverrides,
+        candidate: &str,
+        unity_version: &str,
+    ) -> Result<Option<(String, String)>, AdoptError> {
+        let err =
+            match probe_app_version(&self.config, region_config, candidate, unity_version).await {
+                Ok(asset_version) => return Ok(Some((candidate.to_string(), asset_version))),
+                Err(err) => err,
+            };
+        let failed = |message: String| AdoptError::ProbeFailed {
+            candidate: candidate.to_string(),
+            message,
+        };
+        let zeroed = match patch_zeroed_app_version(candidate) {
+            Some(zeroed) if err.not_found => zeroed,
+            _ => return Err(failed(err.message)),
+        };
+        match is_newer(region_config, overrides, &zeroed) {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    region,
+                    candidate, cdn_app_version = %zeroed,
+                    "app version not on the CDN; its patch-zeroed version is current"
+                );
+                return Ok(None);
+            }
+            // Older than the current value: nothing to fall back to.
+            Err(_) => return Err(failed(err.message)),
+        }
+        match probe_app_version(&self.config, region_config, &zeroed, unity_version).await {
+            Ok(asset_version) => Ok(Some((zeroed, asset_version))),
+            Err(zeroed_err) => Err(failed(format!(
+                "{}; patch-zeroed {zeroed} also failed: {}",
+                err.message, zeroed_err.message
+            ))),
+        }
     }
 
     /// Sets the region's Unity version (any provider kind). Returns whether
@@ -721,7 +778,7 @@ mod tests {
     async fn a_failing_region_never_blocks_the_others() {
         let fx = fixture(true, false).await;
         fx.registry_says("cn", "6.5.0");
-        fx.registry_says("tw", "6.4.1");
+        fx.registry_says("tw", "6.6.1");
         fx.cdn_has("6.5.0");
 
         fx.manager.poll_once().await;
@@ -756,12 +813,168 @@ mod tests {
         assert_eq!(health.regions.len(), 2);
 
         // The CDN catches up: the next poll adopts and resets the counter.
-        fx.cdn_has("6.4.1");
+        fx.cdn_has("6.6.1");
         fx.manager.poll_once().await;
         let tw = fx.status("tw").await;
         assert_eq!(tw.last_result, Some(SyncResult::Adopted));
         assert_eq!(tw.consecutive_probe_failures, 0);
-        assert_eq!(fx.effective("tw").await, "6.4.1");
+        assert_eq!(fx.effective("tw").await, "6.6.1");
+    }
+
+    #[tokio::test]
+    async fn a_patch_release_whose_zeroed_version_is_current_is_up_to_date() {
+        let fx = fixture(true, true).await;
+        // The store republished 6.4.0 as 6.4.1; the CDN only knows 6.4.0.
+        fx.registry_says("cn", "6.4.1");
+        fx.registry_says("tw", "6.4.0");
+        fx.manager
+            .status
+            .write()
+            .await
+            .entry("cn".to_string())
+            .or_default()
+            .consecutive_probe_failures = 7;
+
+        fx.manager.poll_once().await;
+
+        let cn = fx.status("cn").await;
+        assert_eq!(cn.last_result, Some(SyncResult::UpToDate));
+        assert_eq!(cn.consecutive_probe_failures, 0, "the counter resets");
+        assert_eq!(cn.last_error, None);
+        assert_eq!(cn.registry_app_version.as_deref(), Some("6.4.1"));
+        assert!(!cn.pending_submit);
+        assert!(cn.last_submitted_job_id.is_none(), "no job for 6.4.0 again");
+        assert_eq!(fx.effective("cn").await, "6.4.0");
+        let view = fx.manager.region_view("cn").await.unwrap();
+        assert!(view.app_version.unwrap().override_.is_none());
+        let health = fx.manager.health().await.unwrap();
+        assert_eq!(health.max_consecutive_probe_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn a_patch_release_adopts_its_newer_zeroed_cdn_version() {
+        let fx = fixture(true, false).await;
+        fx.registry_says("cn", "6.5.1");
+        fx.registry_says("tw", "6.4.0");
+        fx.cdn_has("6.5.0");
+
+        fx.manager.poll_once().await;
+
+        let cn = fx.status("cn").await;
+        assert_eq!(cn.last_result, Some(SyncResult::Adopted));
+        assert_eq!(cn.consecutive_probe_failures, 0);
+        assert_eq!(cn.last_probe_ok, Some(true));
+        assert_eq!(cn.last_probe_asset_version.as_deref(), Some("100"));
+        assert_eq!(cn.registry_app_version.as_deref(), Some("6.5.1"));
+        assert_eq!(fx.effective("cn").await, "6.5.0", "the CDN key is adopted");
+        let view = fx.manager.region_view("cn").await.unwrap();
+        let entry = view.app_version.unwrap().override_.unwrap();
+        assert_eq!(entry.value, "6.5.0");
+        assert_eq!(entry.source, VersionSource::Registry);
+        assert!(!entry.forced);
+
+        // The next poll sees 6.5.1 again: 404, 6.5.0 is current now.
+        fx.manager.poll_once().await;
+        assert_eq!(
+            fx.status("cn").await.last_result,
+            Some(SyncResult::UpToDate)
+        );
+
+        let outcome = fx
+            .manager
+            .offer_app_version("tw", "6.5.3", VersionSource::Manual, false, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            AdoptOutcome::Adopted {
+                app_version: "6.5.0".to_string(),
+                previous: "6.4.0".to_string(),
+                asset_version: Some("100".to_string()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_patch_release_fails_when_its_zeroed_version_is_missing_too() {
+        let fx = fixture(true, false).await;
+        fx.registry_says("cn", "6.5.1");
+        fx.registry_says("tw", "6.4.0");
+
+        fx.manager.poll_once().await;
+        fx.manager.poll_once().await;
+
+        let cn = fx.status("cn").await;
+        assert_eq!(cn.last_result, Some(SyncResult::ProbeFailed));
+        assert_eq!(cn.consecutive_probe_failures, 2);
+        assert_eq!(cn.last_probe_ok, Some(false));
+        let message = cn.last_error.unwrap();
+        assert!(message.contains("6.5.1 failed the CDN probe"), "{message}");
+        assert!(
+            message.contains("patch-zeroed 6.5.0 also failed"),
+            "{message}"
+        );
+        assert_eq!(fx.effective("cn").await, "6.4.0");
+    }
+
+    #[tokio::test]
+    async fn only_a_404_falls_back_and_never_below_the_current_version() {
+        let fx = fixture(false, false).await;
+        // Not a 404: no fallback, although 6.4.0 is current.
+        fx.cdn.set("/version/6.4.1", StatusCode::OK, "<html>");
+        let err = fx
+            .manager
+            .offer_app_version("cn", "6.4.1", VersionSource::Registry, false, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdoptError::ProbeFailed { .. }), "{err}");
+        assert!(!err.to_string().contains("patch-zeroed"), "{err}");
+
+        // A candidate already at x.y.0 has nothing to fall back to.
+        let err = fx
+            .manager
+            .offer_app_version("cn", "6.6.0", VersionSource::Registry, false, None)
+            .await
+            .unwrap_err();
+        assert!(!err.to_string().contains("patch-zeroed"), "{err}");
+
+        // Current 6.4.2: 6.4.3 is missing and 6.4.0 would be a downgrade.
+        fx.cdn_has("6.4.2");
+        fx.cdn_has("6.4.0");
+        fx.manager
+            .offer_app_version("tw", "6.4.2", VersionSource::Manual, false, None)
+            .await
+            .unwrap();
+        let err = fx
+            .manager
+            .offer_app_version("tw", "6.4.3", VersionSource::Registry, false, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdoptError::ProbeFailed { .. }), "{err}");
+        assert_eq!(fx.effective("tw").await, "6.4.2");
+    }
+
+    #[tokio::test]
+    async fn colorful_palette_regions_are_untouched_by_the_fallback() {
+        let fx = fixture(true, false).await;
+        fx.registry_says("cn", "6.4.0");
+        fx.registry_says("tw", "6.4.0");
+        fx.registry_says("jp", "7.1.1");
+        fx.cdn_has("7.1.0");
+
+        let err = fx
+            .manager
+            .offer_app_version("jp", "7.1.1", VersionSource::Registry, false, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AdoptError::NotNuverse(_)), "{err}");
+        fx.manager.poll_once().await;
+        assert!(!fx.manager.status.read().await.contains_key("jp"));
+        let health = fx.manager.health().await.unwrap();
+        assert!(!health.regions.contains_key("jp"));
+        let jp = fx.manager.region_view("jp").await.unwrap();
+        assert!(jp.app_version.is_none());
+        assert!(jp.sync.is_none());
     }
 
     #[tokio::test]
@@ -819,6 +1032,7 @@ mod tests {
         assert_eq!(
             outcome,
             AdoptOutcome::Adopted {
+                app_version: "6.6.0".to_string(),
                 previous: "6.4.0".to_string(),
                 asset_version: Some("100".to_string()),
             }
@@ -880,6 +1094,7 @@ mod tests {
         assert_eq!(
             forced,
             AdoptOutcome::Adopted {
+                app_version: "6.3.0".to_string(),
                 previous: "6.5.0".to_string(),
                 asset_version: None,
             }

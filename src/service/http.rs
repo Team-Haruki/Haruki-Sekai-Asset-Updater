@@ -146,9 +146,11 @@ async fn offer_request_app_version(state: &AppState, region: &str, candidate: &s
         .offer_app_version(region, candidate, VersionSource::UpdateRequest, false, None)
         .await
     {
-        Ok(AdoptOutcome::Adopted { previous, .. }) => {
-            format!("adopted {candidate} (was {previous})")
-        }
+        Ok(AdoptOutcome::Adopted {
+            app_version,
+            previous,
+            ..
+        }) => format!("adopted {app_version} (was {previous})"),
         Ok(AdoptOutcome::Unchanged) => format!("{candidate} is already current"),
         Err(AdoptError::NotNuverse(_)) => "ignored; not a nuverse region".to_string(),
         Err(err) => {
@@ -225,7 +227,12 @@ async fn set_region_versions(
                 unity_version,
             )
             .await?;
-        if let AdoptOutcome::Adopted { previous, .. } = outcome {
+        if let AdoptOutcome::Adopted {
+            app_version,
+            previous,
+            ..
+        } = outcome
+        {
             changes.push(format!("app_version {previous} -> {app_version}"));
         }
     }
