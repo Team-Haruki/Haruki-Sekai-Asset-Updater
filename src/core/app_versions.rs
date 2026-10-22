@@ -16,7 +16,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use regex::Regex;
 use sekai_asset_client::{
-    ClientConfig, HttpVersion, ProviderEndpoint, RequestedRelease, RetryOptions, SekaiAssetClient,
+    ClientConfig, ClientError, HttpVersion, ProviderEndpoint, RequestedRelease, RetryOptions,
+    SekaiAssetClient,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -150,6 +151,16 @@ pub fn parse_app_version(value: &str) -> Option<[u64; 4]> {
 /// `None` when either side does not parse.
 pub fn compare_app_versions(left: &str, right: &str) -> Option<Ordering> {
     Some(parse_app_version(left)?.cmp(&parse_app_version(right)?))
+}
+
+/// The candidate with its patch (and fourth component) zeroed: `6.4.1` →
+/// `6.4.0`. `None` when it does not parse or already ends in `.0`.
+///
+/// Nuverse keys its CDN by the bundle version, which stays `x.y.0` when a
+/// store republishes the client as `x.y.z` without new assets.
+pub fn patch_zeroed_app_version(value: &str) -> Option<String> {
+    let [major, minor, patch, build] = parse_app_version(value)?;
+    (patch != 0 || build != 0).then(|| format!("{major}.{minor}.0"))
 }
 
 /// Whether `value` looks like a Unity version (`2022.3.21f1`, `2020.3.48f1c1`).
@@ -336,6 +347,24 @@ async fn write_state_file(
         .map_err(|err| persist_error(err.to_string()))
 }
 
+/// Why a probe of the version URL failed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct ProbeError {
+    pub message: String,
+    /// The version URL answered 404: the CDN has no such app version.
+    pub not_found: bool,
+}
+
+impl ProbeError {
+    fn other(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            not_found: false,
+        }
+    }
+}
+
 /// Asks the region's Nuverse version URL whether `app_version` exists: the
 /// endpoint must answer 2xx with a numeric asset version. Returns that asset
 /// version. One attempt, no retries; the caller retries on its own schedule.
@@ -344,7 +373,7 @@ pub async fn probe_app_version(
     region: &RegionConfig,
     app_version: &str,
     unity_version: &str,
-) -> Result<String, String> {
+) -> Result<String, ProbeError> {
     let RegionProviderConfig::Nuverse {
         asset_version_url,
         asset_info_url_template,
@@ -354,7 +383,9 @@ pub async fn probe_app_version(
         ..
     } = &region.provider
     else {
-        return Err("only nuverse regions have an app version".to_string());
+        return Err(ProbeError::other(
+            "only nuverse regions have an app version",
+        ));
     };
     let endpoint = ProviderEndpoint::Nuverse {
         asset_version_url_template: asset_version_url.clone(),
@@ -376,25 +407,29 @@ pub async fn probe_app_version(
         ..RetryOptions::default()
     };
     client_config.limits.max_manifest_bytes = 4096;
-    let mut client = SekaiAssetClient::new(client_config).map_err(|err| err.to_string())?;
+    let mut client =
+        SekaiAssetClient::new(client_config).map_err(|err| ProbeError::other(err.to_string()))?;
     if *required_cookies {
         client
             .bootstrap_cookie(cookie_bootstrap_url.as_deref())
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| ProbeError::other(err.to_string()))?;
     }
     let release = client
         .resolve_release(&RequestedRelease::default())
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| ProbeError {
+            not_found: matches!(err, ClientError::HttpStatus { status: 404, .. }),
+            message: err.to_string(),
+        })?;
     let numeric = !release.asset_version.is_empty()
         && release.asset_version.bytes().all(|b| b.is_ascii_digit());
     if numeric {
         Ok(release.asset_version)
     } else {
-        Err(format!(
+        Err(ProbeError::other(format!(
             "version endpoint for app version {app_version} returned a non-numeric body"
-        ))
+        )))
     }
 }
 
@@ -531,6 +566,22 @@ mod tests {
             Some(Ordering::Less)
         );
         assert_eq!(compare_app_versions("6.4.0", "latest"), None);
+    }
+
+    #[test]
+    fn patch_zeroing_keeps_major_and_minor() {
+        assert_eq!(patch_zeroed_app_version("6.4.1").as_deref(), Some("6.4.0"));
+        assert_eq!(
+            patch_zeroed_app_version(" 6.10.12 ").as_deref(),
+            Some("6.10.0")
+        );
+        assert_eq!(
+            patch_zeroed_app_version("6.4.0.3").as_deref(),
+            Some("6.4.0")
+        );
+        assert_eq!(patch_zeroed_app_version("6.4.0"), None);
+        assert_eq!(patch_zeroed_app_version("6.4.0.0"), None);
+        assert_eq!(patch_zeroed_app_version("latest"), None);
     }
 
     #[test]
@@ -778,22 +829,25 @@ mod tests {
         let not_found = probe_app_version(&config, &region, "6.4.1", "2022.3.21f1")
             .await
             .unwrap_err();
-        assert!(not_found.contains("404"), "{not_found}");
+        assert!(not_found.message.contains("404"), "{not_found}");
+        assert!(not_found.not_found);
         let odd = probe_app_version(&config, &region, "6.5.0", "2022.3.21f1")
             .await
             .unwrap_err();
-        assert!(odd.contains("non-numeric"), "{odd}");
+        assert!(odd.message.contains("non-numeric"), "{odd}");
+        assert!(!odd.not_found);
         assert!(probe_app_version(&config, &region, "6.6.0", "2022.3.21f1")
             .await
             .is_err());
         let bad_header = probe_app_version(&config, &region, "6.4.0", "bad\nheader")
             .await
             .unwrap_err();
-        assert!(!bad_header.is_empty());
+        assert!(!bad_header.message.is_empty());
+        assert!(!bad_header.not_found);
         let colorful = probe_app_version(&config, &RegionConfig::default(), "6.4.0", "x")
             .await
             .unwrap_err();
-        assert!(colorful.contains("nuverse"), "{colorful}");
+        assert!(colorful.to_string().contains("nuverse"), "{colorful}");
     }
 
     #[tokio::test]
@@ -813,6 +867,10 @@ mod tests {
         let err = probe_app_version(&config, &region, "6.4.0", "2022.3.21f1")
             .await
             .unwrap_err();
-        assert!(err.contains("no-such-cookie-endpoint"), "{err}");
+        assert!(err.message.contains("no-such-cookie-endpoint"), "{err}");
+        assert!(
+            !err.not_found,
+            "a missing cookie endpoint is not a missing version"
+        );
     }
 }
