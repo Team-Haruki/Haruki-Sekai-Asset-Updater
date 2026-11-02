@@ -172,14 +172,41 @@ fn is_nuverse(region: &RegionConfig) -> bool {
     configured_app_version(region).is_some()
 }
 
+/// Idle time before the first TCP keepalive probe on a registry connection.
+const REGISTRY_KEEPALIVE_TIME: Duration = Duration::from_secs(60);
+/// Time between unanswered keepalive probes.
+const REGISTRY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Unanswered probes after which the kernel drops the connection: a dead
+/// registry is noticed after about 60 + 6 × 10 = 120 s of silence.
+const REGISTRY_KEEPALIVE_RETRIES: u32 = 6;
+
+/// The HTTP client of the registry poller.
+///
+/// The poller reuses its pooled connections on every tick. reqwest's
+/// defaults send the first keepalive probe after 15 s of idle and set
+/// `TCP_USER_TIMEOUT` to 30 s on Linux; together they make the kernel abort
+/// an idle connection as soon as a single probe or its answer is lost. The
+/// abort is one RST, which is never retransmitted, so on a lossy
+/// long-distance path some RSTs are lost too and the registry keeps a
+/// half-open socket (and a file descriptor) for each of them. So
+/// `TCP_USER_TIMEOUT` stays unset, and only several unanswered probes in a
+/// row end a connection. `timeout` still bounds every request.
+fn registry_client(timeout: Duration) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .tcp_keepalive(REGISTRY_KEEPALIVE_TIME)
+        .tcp_keepalive_interval(REGISTRY_KEEPALIVE_INTERVAL)
+        .tcp_keepalive_retries(REGISTRY_KEEPALIVE_RETRIES);
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    let builder = builder.tcp_user_timeout(None);
+    builder.build().unwrap_or_default()
+}
+
 impl AppVersionManager {
     pub fn new(config: Arc<AppConfig>, versions: RuntimeVersions, jobs: JobManager) -> Self {
         let timeout = Duration::from_secs(config.app_version_sync.request_timeout_secs.max(1));
-        let registry = reqwest::Client::builder()
-            .connect_timeout(timeout)
-            .timeout(timeout)
-            .build()
-            .unwrap_or_default();
+        let registry = registry_client(timeout);
         Self {
             config,
             versions,
@@ -1402,5 +1429,62 @@ mod tests {
         }
         handle.abort();
         panic!("the poller never polled");
+    }
+
+    /// The sockets of this process whose peer is `base_url`'s address,
+    /// i.e. the poller's pooled connections to the mock registry.
+    #[cfg(target_os = "linux")]
+    fn sockets_connected_to(base_url: &str) -> Vec<std::os::fd::RawFd> {
+        let registry: std::net::SocketAddr =
+            base_url.trim_start_matches("http://").parse().unwrap();
+        std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+            .filter(|&raw| {
+                // SAFETY: the descriptor is only borrowed for a getsockopt
+                // call, which fails harmlessly if it was closed meanwhile.
+                let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) };
+                socket2::SockRef::from(&fd)
+                    .peer_addr()
+                    .ok()
+                    .and_then(|peer| peer.as_socket())
+                    == Some(registry)
+            })
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn registry_connections_survive_a_lost_keepalive_probe() {
+        let fx = fixture(true, false).await;
+        fx.registry_says("cn", "6.4.0");
+        fx.registry_says("tw", "6.4.0");
+        fx.manager.poll_once().await;
+
+        let sockets = sockets_connected_to(&fx.registry.base_url);
+        assert!(!sockets.is_empty(), "the pooled connections stay open");
+        for raw in sockets {
+            // SAFETY: as above; the client keeps the connection pooled.
+            let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) };
+            let socket = socket2::SockRef::from(&fd);
+            assert!(socket.keepalive().unwrap());
+            assert_eq!(
+                socket.tcp_keepalive_time().unwrap(),
+                REGISTRY_KEEPALIVE_TIME
+            );
+            assert_eq!(
+                socket.tcp_keepalive_interval().unwrap(),
+                REGISTRY_KEEPALIVE_INTERVAL
+            );
+            assert_eq!(
+                socket.tcp_keepalive_retries().unwrap(),
+                REGISTRY_KEEPALIVE_RETRIES
+            );
+            assert_eq!(
+                socket.tcp_user_timeout().unwrap(),
+                None,
+                "TCP_USER_TIMEOUT would abort the connection after one lost probe"
+            );
+        }
     }
 }

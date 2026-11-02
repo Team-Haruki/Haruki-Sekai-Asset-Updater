@@ -44,6 +44,7 @@ uuid = { version = "1.23", features = ["serde", "v4"] }
 yaml_serde = "0.10"
 
 [dev-dependencies]
+socket2 = { version = "0.6", features = ["all"] }
 tower = { version = "0.5.3", features = ["util"] }
 
 [features]
