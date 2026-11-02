@@ -1012,6 +1012,7 @@ dependencies = [
  "sekai-asset-pipeline",
  "serde",
  "sha2",
+ "socket2",
  "sonic-rs",
  "tempfile",
  "thiserror",
