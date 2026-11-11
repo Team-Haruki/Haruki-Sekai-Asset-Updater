@@ -511,7 +511,7 @@ pub(super) fn extract_acb_tracks_from_memory_source(
 }
 
 pub(super) fn extract_acb_tracks_from_reader<R>(
-    acb_reader: R,
+    mut acb_reader: R,
     source_hint: &Path,
     source_file: Option<PathBuf>,
     options: &AcbPostProcessOptions<'_>,
@@ -529,6 +529,22 @@ where
         ..AcbTrackExtractionOutput::default()
     };
 
+    if options.region.export.hca.decode {
+        let phase_started = Instant::now();
+        let _permit = super::super::limits::acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
+        output
+            .generated_files
+            .extend(crate::export_acb_block_sequences(
+                &mut acb_reader,
+                source_hint,
+                &output.output_dir,
+            )?);
+        add_elapsed_phase_ms(
+            &mut output.phase_ms,
+            "post_process.acb.block_sequences",
+            phase_started,
+        );
+    }
     let hca_tracks = extract_and_filter_acb_tracks(acb_reader, source_hint, &mut output.phase_ms)?;
 
     if !options.region.export.hca.decode {

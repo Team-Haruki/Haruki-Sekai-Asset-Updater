@@ -4,6 +4,7 @@
 //! download records, publishing, and Git synchronization deliberately stay in
 //! the consuming application.
 
+mod acb_sequence;
 mod bundle;
 mod cleanup;
 mod codec;
@@ -21,6 +22,7 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
+pub use acb_sequence::export_acb_block_sequences;
 pub use bundle::{Artifact, ArtifactManifest, BundleRequest, BundleResult, ResolvedBundle};
 pub use cleanup::{remove_file_if_exists, remove_file_with_retries};
 pub use codec::{

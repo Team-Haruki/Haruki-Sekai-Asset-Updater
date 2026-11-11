@@ -23,6 +23,34 @@
   library directly. FFmpeg/rsmpeg FFI handles media;
   FFmpeg CLI remains available as a fallback where FFI is unavailable.
 
+## CRI block-sequence audio
+
+When ACB and HCA decoding are enabled, block-sequence cues (`ReferenceType=8`)
+also produce `<cue>.sequence/sequence.json` and content-addressed WAVs beside
+ordinary audio outputs. The descriptor preserves block order, finite/infinite
+loops, end/division/immediate transition timing, note offsets, synth gain and the
+verified `IM_001` / `IM_002` one-voice groups. Flat MP3/FLAC/WAV exports remain
+available; consumers must read the descriptor to reproduce interactive music.
+
+The Rust pipeline reads the original ACB before cleanup. It supports embedded
+HCA waveforms and the verified sequential block/track commands. Unsupported
+controls or external AWB references in a block cue fail the bundle instead of
+publishing a misleading descriptor. New WAV filenames include their content
+hash, and `sequence.json` is written atomically after all its waveforms. These
+files participate in the normal generated-artifact/upload list for both file and
+in-memory exports.
+
+A CDN consumer should publish waveforms before descriptors and update its discovery
+index last. This repository does not embed a particular player's CDN paths or
+credentials. Previously recorded, unchanged bundles need a controlled re-export
+after upgrading; do not clear the entire download ledger to backfill a few cues.
+
+For an original ACB kept outside the repository:
+
+```sh
+cargo run -p sekai-asset-pipeline --example export_acb_blocks -- input.acb output/
+```
+
 ## Layout
 
 - `crates/sekai-asset-pipeline/`: reusable, transport-neutral single-bundle pipeline
