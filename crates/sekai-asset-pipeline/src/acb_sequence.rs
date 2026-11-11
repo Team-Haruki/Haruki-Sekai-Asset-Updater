@@ -10,7 +10,7 @@ use cridecoder::HcaDecoder;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::{CodecError, ExportPipelineError};
+use crate::{CodecError, ExportPipelineError, MediaBackend, RetryOptions};
 
 type Result<T> = std::result::Result<T, ExportPipelineError>;
 
@@ -417,10 +417,43 @@ fn decode_wave(data: &[u8], id: &str) -> Result<(Wave, Vec<u8>)> {
     ))
 }
 
+pub(crate) struct Mp3Encoding<'a> {
+    pub(crate) ffmpeg_path: &'a str,
+    pub(crate) backend: MediaBackend,
+    pub(crate) retry: &'a RetryOptions,
+}
+
+fn encode_mp3(
+    wave: &mut Wave,
+    wav: &[u8],
+    id: &str,
+    dir: &Path,
+    encoding: &Mp3Encoding<'_>,
+) -> Result<Vec<u8>> {
+    std::fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
+    let temp = tempfile::Builder::new()
+        .suffix(".mp3")
+        .tempfile_in(dir)
+        .map_err(|e| io_error(dir, e))?;
+    crate::convert_wav_bytes_to_mp3_with_backend(
+        wav,
+        temp.path(),
+        encoding.ffmpeg_path,
+        encoding.backend,
+        encoding.retry,
+    )?;
+    let bytes = std::fs::read(temp.path()).map_err(|e| io_error(temp.path(), e))?;
+    wave.sha256 = hex::encode(Sha256::digest(&bytes));
+    wave.file = format!("wave-{id}-{}.mp3", &wave.sha256[..16]);
+    // Keep the original PCM duration/sample count, independent of codec frame padding.
+    Ok(bytes)
+}
+
 fn write_sequence(
     sequence: &mut Sequence,
     archive: &mut AfsArchive<Cursor<&[u8]>>,
     output: &Path,
+    encoding: Option<&Mp3Encoding<'_>>,
 ) -> Result<Vec<PathBuf>> {
     let dir = output.join(format!("{}.sequence", sequence.cue));
     let wave_ids: BTreeSet<_> = sequence
@@ -444,7 +477,10 @@ fn write_sequence(
         let data = archive
             .file_data(entry)
             .map_err(|e| invalid(e.to_string()))?;
-        let (wave, bytes) = decode_wave(&data, &id)?;
+        let (mut wave, mut bytes) = decode_wave(&data, &id)?;
+        if let Some(encoding) = encoding {
+            bytes = encode_mp3(&mut wave, &bytes, &id, &dir, encoding)?;
+        }
         let path = dir.join(&wave.file);
         atomic_write(&path, &bytes)?;
         files.push(path);
@@ -474,6 +510,32 @@ pub fn export_acb_block_sequences<R: Read + Seek>(
     source: &Path,
     output: &Path,
 ) -> Result<Vec<PathBuf>> {
+    export_acb_block_sequences_with_audio(reader, source, output, None)
+}
+
+/// Export block descriptors with MP3 waveforms through the existing media backend.
+pub fn export_acb_block_sequences_mp3<R: Read + Seek>(
+    reader: &mut R,
+    source: &Path,
+    output: &Path,
+    ffmpeg_path: &str,
+    backend: MediaBackend,
+    retry: &RetryOptions,
+) -> Result<Vec<PathBuf>> {
+    let encoding = Mp3Encoding {
+        ffmpeg_path,
+        backend,
+        retry,
+    };
+    export_acb_block_sequences_with_audio(reader, source, output, Some(&encoding))
+}
+
+pub(crate) fn export_acb_block_sequences_with_audio<R: Read + Seek>(
+    reader: &mut R,
+    source: &Path,
+    output: &Path,
+    encoding: Option<&Mp3Encoding<'_>>,
+) -> Result<Vec<PathBuf>> {
     reader.rewind().map_err(|e| io_error(source, e))?;
     let root = UtfTable::new(&mut *reader).map_err(|e| invalid(e.to_string()))?;
     let refs = cue_references(&root)?;
@@ -502,7 +564,7 @@ pub fn export_acb_block_sequences<R: Read + Seek>(
     let mut files = Vec::new();
     for sequence in &mut sequences {
         sequence.acb_sha256.clone_from(&digest);
-        files.extend(write_sequence(sequence, &mut archive, output)?);
+        files.extend(write_sequence(sequence, &mut archive, output, encoding)?);
     }
     reader.rewind().map_err(|e| io_error(source, e))?;
     Ok(files)

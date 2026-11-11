@@ -359,7 +359,7 @@ fn zero_duration_bad_subdivisions_duplicate_names_and_decode_failures_are_errors
     let root = parse_root(&fixture());
     let mut archive = AfsArchive::new(Cursor::new(bytes(&root, 0, "AwbFile").unwrap())).unwrap();
     let dir = tempfile::tempdir().unwrap();
-    assert!(write_sequence(&mut seq, &mut archive, dir.path()).is_err());
+    assert!(write_sequence(&mut seq, &mut archive, dir.path(), None).is_err());
 }
 
 #[test]
@@ -461,5 +461,75 @@ fn unsupported_cues_keep_recoverable_input_and_legacy_audio() {
             assert!(folder.join("sequence.json").is_file());
             assert!(saved.is_file());
         });
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn mp3_encoding_changes_payload_and_hash_but_preserves_pcm_timing() {
+    large_stack(|| {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = dir.path().join("ffmpeg");
+        std::fs::write(&ffmpeg, "#!/bin/sh\ncat >/dev/null\nfor arg do output=\"$arg\"; done\nprintf 'encoded MP3' >\"$output\"\n").unwrap();
+        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let raw = acb(&fixture(), &hca());
+        let files = export_acb_block_sequences_mp3(
+            &mut Cursor::new(&raw),
+            Path::new("cue.acb"),
+            dir.path(),
+            ffmpeg.to_str().unwrap(),
+            MediaBackend::Cli,
+            &RetryOptions::default(),
+        )
+        .unwrap();
+        let json: sonic_rs::Value =
+            sonic_rs::from_slice(&std::fs::read(files.last().unwrap()).unwrap()).unwrap();
+        assert_eq!(files[0].extension().unwrap(), "mp3");
+        assert_eq!(std::fs::read(&files[0]).unwrap(), b"encoded MP3");
+        assert_eq!(json["waves"]["7"]["samples"].as_u64(), Some(4410));
+        assert_eq!(json["waves"]["7"]["duration"].as_f64(), Some(0.1));
+        assert_eq!(
+            json["waves"]["7"]["sha256"].as_str(),
+            Some(hex::encode(Sha256::digest(b"encoded MP3")).as_str())
+        );
+        let before = std::fs::read(files.last().unwrap()).unwrap();
+        assert!(export_acb_block_sequences_mp3(
+            &mut Cursor::new(raw),
+            Path::new("cue.acb"),
+            dir.path(),
+            "/nonexistent/ffmpeg",
+            MediaBackend::Cli,
+            &RetryOptions {
+                attempts: 1,
+                initial_backoff_ms: 1,
+                max_backoff_ms: 1
+            }
+        )
+        .is_err());
+        assert_eq!(std::fs::read(files.last().unwrap()).unwrap(), before);
+    });
+}
+
+#[cfg(feature = "media-ffi")]
+#[test]
+fn ffi_block_mp3_is_smaller_than_pcm_and_keeps_sample_count() {
+    large_stack(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let files = export_acb_block_sequences_mp3(
+            &mut Cursor::new(acb(&fixture(), &hca())),
+            Path::new("cue.acb"),
+            dir.path(),
+            "ffmpeg",
+            MediaBackend::Ffi,
+            &RetryOptions::default(),
+        )
+        .unwrap();
+        let json: sonic_rs::Value =
+            sonic_rs::from_slice(&std::fs::read(files.last().unwrap()).unwrap()).unwrap();
+        assert_eq!(json["waves"]["7"]["samples"].as_u64(), Some(4410));
+        let bytes = std::fs::read(&files[0]).unwrap();
+        assert!(bytes.len() < 4410 * 2);
+        assert!(bytes.starts_with(b"ID3") || bytes[0] == 0xff);
     });
 }

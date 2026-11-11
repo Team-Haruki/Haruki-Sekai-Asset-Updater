@@ -532,10 +532,22 @@ where
     if options.region.export.hca.decode {
         let phase_started = Instant::now();
         let _permit = super::super::limits::acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
-        let files = match crate::export_acb_block_sequences(
+        let encoding = options
+            .region
+            .export
+            .audio
+            .formats
+            .contains(&crate::AudioFormat::Mp3)
+            .then_some(crate::acb_sequence::Mp3Encoding {
+                ffmpeg_path: options.ffmpeg_path,
+                backend: options.media_backend,
+                retry: options.retry,
+            });
+        let files = match crate::acb_sequence::export_acb_block_sequences_with_audio(
             &mut acb_reader,
             source_hint,
             &output.output_dir,
+            encoding.as_ref(),
         ) {
             Ok(files) => files,
             Err(ExportPipelineError::UnsupportedAcbSequence { message }) => {

@@ -22,7 +22,7 @@ mod retry;
 #[cfg(test)]
 mod test_support;
 
-pub use acb_sequence::export_acb_block_sequences;
+pub use acb_sequence::{export_acb_block_sequences, export_acb_block_sequences_mp3};
 pub use bundle::{Artifact, ArtifactManifest, BundleRequest, BundleResult, ResolvedBundle};
 pub use cleanup::{remove_file_if_exists, remove_file_with_retries};
 pub use codec::{
