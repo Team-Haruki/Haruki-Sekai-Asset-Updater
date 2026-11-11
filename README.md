@@ -59,6 +59,10 @@ uses WAV by default, or MP3 with `--mp3`; update jobs honor the configured forma
 cargo run -p sekai-asset-pipeline --example export_acb_blocks -- input.acb output/ --mp3
 ```
 
+Local block-sequence artifacts retain private file permissions (owner read/write
+on Unix). The exporting account can upload them; deployments serving files under
+a different account must grant access through their own publication policy.
+
 ## Layout
 
 - `crates/sekai-asset-pipeline/`: reusable, transport-neutral single-bundle pipeline

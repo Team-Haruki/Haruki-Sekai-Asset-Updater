@@ -533,3 +533,18 @@ fn ffi_block_mp3_is_smaller_than_pcm_and_keeps_sample_count() {
         assert!(bytes.starts_with(b"ID3") || bytes[0] == 0xff);
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn atomic_artifacts_remain_private_on_creation_and_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sequence.json");
+    for payload in [b"first".as_slice(), b"replacement".as_slice()] {
+        atomic_write(&path, payload).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+}

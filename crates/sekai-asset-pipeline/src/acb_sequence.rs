@@ -380,13 +380,8 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| io_error(parent, e))?;
     temp.write_all(data).map_err(|e| io_error(path, e))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        temp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o644))
-            .map_err(|e| io_error(path, e))?;
-    }
+    // Preserve the tempfile's private permissions when publishing locally.
+    // Distribution permissions belong to the downstream publisher.
     temp.persist(path).map_err(|e| io_error(path, e.error))?;
     Ok(())
 }
