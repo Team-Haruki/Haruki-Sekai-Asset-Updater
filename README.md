@@ -34,14 +34,17 @@ available; consumers must read the descriptor to reproduce interactive music.
 
 The Rust pipeline reads the original ACB before cleanup. It supports embedded
 HCA waveforms and the verified sequential block/track commands. Unsupported
-controls or external AWB references in a block cue fail the bundle instead of
-publishing a misleading descriptor. New WAV filenames include their content
+controls or external AWB references in a block cue retain the original ACB as
+`source-<hash>.acb.raw` with an `unsupported.json` diagnostic, and continue the
+legacy audio export. No playable descriptor is advertised for those cues. A
+malformed cue or failed write still fails the bundle. New WAV filenames include their content
 hash, and `sequence.json` is written atomically after all its waveforms. These
 files participate in the normal generated-artifact/upload list for both file and
 in-memory exports.
 
 A CDN consumer should publish waveforms before descriptors and update its discovery
-index last. This repository does not embed a particular player's CDN paths or
+index last, and must honor `unsupported.json` over any older descriptor for the
+same cue. This repository does not embed a particular player's CDN paths or
 credentials. Previously recorded, unchanged bundles need a controlled re-export
 after upgrading; do not clear the entire download ledger to backfill a few cues.
 

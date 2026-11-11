@@ -532,13 +532,25 @@ where
     if options.region.export.hca.decode {
         let phase_started = Instant::now();
         let _permit = super::super::limits::acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
-        output
-            .generated_files
-            .extend(crate::export_acb_block_sequences(
-                &mut acb_reader,
-                source_hint,
-                &output.output_dir,
-            )?);
+        let files = match crate::export_acb_block_sequences(
+            &mut acb_reader,
+            source_hint,
+            &output.output_dir,
+        ) {
+            Ok(files) => files,
+            Err(ExportPipelineError::UnsupportedAcbSequence { message }) => {
+                tracing::warn!(path = %source_hint.display(), reason = %message,
+                    "block-cue descriptor unavailable; preserving original ACB and legacy audio");
+                crate::acb_sequence::preserve_unsupported_acb(
+                    &mut acb_reader,
+                    source_hint,
+                    &output.output_dir,
+                    &message,
+                )?
+            }
+            Err(error) => return Err(error),
+        };
+        output.generated_files.extend(files);
         add_elapsed_phase_ms(
             &mut output.phase_ms,
             "post_process.acb.block_sequences",

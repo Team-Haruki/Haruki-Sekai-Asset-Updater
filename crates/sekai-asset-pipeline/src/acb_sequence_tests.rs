@@ -413,3 +413,53 @@ fn disk_and_memory_pipeline_paths_include_sidecars_in_generated_files() {
         });
     });
 }
+
+#[test]
+fn unsupported_cues_keep_recoverable_input_and_legacy_audio() {
+    large_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("source.acb");
+            let mut f = fixture();
+            f.get_mut("BlockTable").unwrap()[0].insert("TransitionMode".into(), n(1));
+            let raw = acb(&f, &hca());
+            std::fs::write(&source, &raw).unwrap();
+            let options = crate::test_support::processing_pipeline_options();
+            let result = crate::post_process_exported_files(
+                &options,
+                dir.path(),
+                true,
+                std::slice::from_ref(&source),
+                vec![],
+            )
+            .await
+            .unwrap();
+            assert!(!source.exists());
+            assert!(dir.path().join("synthetic.wav").is_file());
+            let folder = dir.path().join("synthetic.sequence");
+            let marker = folder.join("unsupported.json");
+            assert!(result.generated_files.contains(&marker));
+            assert!(!folder.join("sequence.json").exists());
+            let diagnostic: sonic_rs::Value =
+                sonic_rs::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+            assert_eq!(diagnostic["status"].as_str(), Some("unsupported"));
+            let saved = folder.join(diagnostic["rawFile"].as_str().unwrap());
+            assert_eq!(std::fs::read(&saved).unwrap(), raw);
+            assert!(result.generated_files.contains(&saved));
+            // A later successful conversion removes the support marker, but keeps the raw archive.
+            export_acb_block_sequences(
+                &mut Cursor::new(acb(&fixture(), &hca())),
+                &source,
+                dir.path(),
+            )
+            .unwrap();
+            assert!(!marker.exists());
+            assert!(folder.join("sequence.json").is_file());
+            assert!(saved.is_file());
+        });
+    });
+}

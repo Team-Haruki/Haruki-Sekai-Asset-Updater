@@ -60,6 +60,12 @@ fn invalid(message: impl Into<String>) -> ExportPipelineError {
     CodecError::Acb(format!("block sequence: {}", message.into())).into()
 }
 
+fn unsupported(message: impl Into<String>) -> ExportPipelineError {
+    ExportPipelineError::UnsupportedAcbSequence {
+        message: message.into(),
+    }
+}
+
 fn cell<'a>(table: &'a UtfTable, row: usize, field: &str) -> Result<&'a Value> {
     table
         .rows
@@ -144,7 +150,10 @@ fn track_events(data: &[u8]) -> Result<(Vec<(u64, usize)>, u64)> {
                     .ok_or_else(|| invalid("track time overflow"))?
             }
             (0 | 4050, []) => {}
-            _ => return Err(invalid(format!("unsupported track command {kind:#x}"))),
+            (0 | 2000 | 2001 | 2005 | 4050, _) => {
+                return Err(invalid(format!("malformed track command {kind:#x}")))
+            }
+            _ => return Err(unsupported(format!("track command {kind:#x}"))),
         }
         Ok(())
     })?;
@@ -157,7 +166,8 @@ fn synth_gain(data: &[u8]) -> Result<f64> {
         match (kind, payload) {
             (0x57, [a, b]) => gain *= f64::from(u16::from_be_bytes([*a, *b])) / 100.0,
             (0x75, [1]) => {} // playback flag, not a gain or sequence command
-            _ => return Err(invalid(format!("unsupported synth command {kind:#x}"))),
+            (0x57 | 0x75, _) => return Err(invalid(format!("malformed synth command {kind:#x}"))),
+            _ => return Err(unsupported(format!("synth command {kind:#x}"))),
         }
         if !gain.is_finite() {
             return Err(invalid("non-finite synth gain"));
@@ -201,7 +211,7 @@ impl Tables {
 
     fn sequence(&self, cue: String, reference: usize) -> Result<Sequence> {
         if number(&self.sequences, reference, "Type")? != 0 {
-            return Err(invalid("unsupported sequence type"));
+            return Err(unsupported("unsupported sequence type"));
         }
         let refs = indices(bytes(&self.sequences, reference, "BlockIndex")?)?;
         if refs.is_empty() {
@@ -224,7 +234,7 @@ impl Tables {
     fn block(&self, index: usize, row: usize) -> Result<Block> {
         for field in ["JumpDestination", "NumDestinationBlocks", "TransitionMode"] {
             if number(&self.blocks, row, field)? != 0 {
-                return Err(invalid(format!("unsupported block {field}")));
+                return Err(unsupported(format!("unsupported block {field}")));
             }
         }
         let duration_us = u64::from(number(&self.blocks, row, "Length")?) * 1000
@@ -232,11 +242,10 @@ impl Tables {
         let playback = number(&self.blocks, row, "PlaybackType")?;
         let transition = number(&self.blocks, row, "TransitionTiming")?;
         let divisions = number(&self.blocks, row, "TransitionTimingValue")?;
-        if duration_us == 0
-            || playback > 1
-            || transition > 2
-            || (transition == 1 && (divisions < 2 || divisions == 65535))
-        {
+        if playback > 1 || transition > 2 {
+            return Err(unsupported("block playback or transition type"));
+        }
+        if duration_us == 0 || (transition == 1 && (divisions < 2 || divisions == 65535)) {
             return Err(invalid("unsupported block duration, loop or transition"));
         }
         let mut events = Vec::new();
@@ -256,7 +265,7 @@ impl Tables {
 
     fn track(&self, track: usize, duration_us: u64) -> Result<Vec<Event>> {
         if number(&self.tracks, track, "CommandIndex")? != 65535 {
-            return Err(invalid("unsupported per-track controls"));
+            return Err(unsupported("unsupported per-track controls"));
         }
         let event_index = number(&self.tracks, track, "EventIndex")?;
         if event_index == 65535 {
@@ -275,13 +284,13 @@ impl Tables {
     fn event(&self, track: usize, at: u64, synth: usize) -> Result<Event> {
         let refs = indices(bytes(&self.synths, synth, "ReferenceItems")?)?;
         let [1, wave] = refs.as_slice() else {
-            return Err(invalid("unsupported synth references"));
+            return Err(unsupported("unsupported synth references"));
         };
         if number(&self.waves, *wave, "Streaming")? != 0 {
-            return Err(invalid("external AWB in block cue is not supported"));
+            return Err(unsupported("external AWB in block cue is not supported"));
         }
         if number(&self.waves, *wave, "EncodeType")? != 2 {
-            return Err(invalid("non-HCA block waveform is not supported"));
+            return Err(unsupported("non-HCA block waveform is not supported"));
         }
         let command = number(&self.synths, synth, "CommandIndex")?;
         let gain = if command == 65535 {
@@ -305,7 +314,7 @@ impl Tables {
             .transpose()?
             .unwrap_or("");
         if !matches!(group, "" | "IM_001" | "IM_002") {
-            return Err(invalid(format!("unverified voice limit group {group}")));
+            return Err(unsupported(format!("unverified voice limit group {group}")));
         }
         Ok(Event {
             at: at as f64 / 1_000_000.0,
@@ -446,13 +455,20 @@ fn write_sequence(
         .map_err(|source| ExportPipelineError::JsonSerialize { source })?;
     atomic_write(&path, &json)?; // last: references only complete, content-addressed waveforms
     files.push(path);
+    let marker = dir.join("unsupported.json");
+    match std::fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_error(&marker, e)),
+    }
     Ok(files)
 }
 
 /// Export embedded-HCA block cues to `<cue>.sequence/sequence.json` and WAVs.
 /// Ordinary cues produce no sidecars. The reader is rewound on success so the
 /// existing flat-audio exporter can continue using the same ACB without reopening it.
-/// Unsupported block semantics are errors; callers must not mark the bundle complete.
+/// Unsupported semantics are distinguished from malformed input: the pipeline retains
+/// the original ACB and a diagnostic in that case, while keeping the legacy export.
 pub fn export_acb_block_sequences<R: Read + Seek>(
     reader: &mut R,
     source: &Path,
@@ -487,6 +503,43 @@ pub fn export_acb_block_sequences<R: Read + Seek>(
     for sequence in &mut sequences {
         sequence.acb_sha256.clone_from(&digest);
         files.extend(write_sequence(sequence, &mut archive, output)?);
+    }
+    reader.rewind().map_err(|e| io_error(source, e))?;
+    Ok(files)
+}
+
+/// Keep unsupported block metadata recoverable without breaking the legacy export.
+/// The marker also prevents a consumer from publishing an obsolete descriptor left
+/// by an earlier version of the same cue.
+pub(crate) fn preserve_unsupported_acb<R: Read + Seek>(
+    reader: &mut R,
+    source: &Path,
+    output: &Path,
+    reason: &str,
+) -> Result<Vec<PathBuf>> {
+    reader.rewind().map_err(|e| io_error(source, e))?;
+    let mut raw = Vec::new();
+    reader
+        .read_to_end(&mut raw)
+        .map_err(|e| io_error(source, e))?;
+    let root = UtfTable::new(Cursor::new(&raw)).map_err(|e| invalid(e.to_string()))?;
+    let digest = hex::encode(Sha256::digest(&raw));
+    let filename = format!("source-{}.acb.raw", &digest[..16]);
+    let mut files = Vec::new();
+    for (cue, _) in cue_references(&root)? {
+        let dir = output.join(format!("{cue}.sequence"));
+        let path = dir.join(&filename);
+        atomic_write(&path, &raw)?;
+        files.push(path);
+        let marker = dir.join("unsupported.json");
+        let data = sonic_rs::json!({"version": 1, "status": "unsupported", "cue": cue,
+            "acbSha256": digest, "rawFile": filename, "reason": reason});
+        atomic_write(
+            &marker,
+            &sonic_rs::to_vec_pretty(&data)
+                .map_err(|source| ExportPipelineError::JsonSerialize { source })?,
+        )?;
+        files.push(marker);
     }
     reader.rewind().map_err(|e| io_error(source, e))?;
     Ok(files)
