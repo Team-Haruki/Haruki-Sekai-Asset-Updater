@@ -548,3 +548,51 @@ fn atomic_artifacts_remain_private_on_creation_and_replacement() {
         assert_eq!(mode & 0o777, 0o600);
     }
 }
+
+#[test]
+fn ordinary_updates_retire_old_blocks_and_supported_updates_recover() {
+    large_stack(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Path::new("same.acb");
+        let supported = acb(&fixture(), &hca());
+        export_acb_block_sequences(&mut Cursor::new(&supported), source, dir.path()).unwrap();
+        let folder = dir.path().join("synthetic.sequence");
+        let unrelated = dir.path().join("other.sequence");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("sequence.json"), b"keep").unwrap();
+        std::fs::write(folder.join("unsupported.json"), b"old").unwrap();
+        let mut ordinary = fixture();
+        ordinary.get_mut("CueTable").unwrap()[0].insert("ReferenceType".into(), n(3));
+        ordinary.remove("BlockSequenceTable");
+        let raw = acb(&ordinary, &hca());
+        for _ in 0..2 {
+            let mut reader = Cursor::new(&raw);
+            let files = export_acb_block_sequences(&mut reader, source, dir.path()).unwrap();
+            assert_eq!(reader.position(), 0);
+            assert_eq!(files, vec![folder.join("retired.json")]);
+            assert!(!folder.join("sequence.json").exists());
+            assert!(!folder.join("unsupported.json").exists());
+            let marker: sonic_rs::Value =
+                sonic_rs::from_slice(&std::fs::read(&files[0]).unwrap()).unwrap();
+            assert_eq!(marker["status"].as_str(), Some("retired"));
+        }
+        assert_eq!(
+            std::fs::read(unrelated.join("sequence.json")).unwrap(),
+            b"keep"
+        );
+        export_acb_block_sequences(&mut Cursor::new(&supported), source, dir.path()).unwrap();
+        assert!(folder.join("sequence.json").exists());
+        assert!(!folder.join("retired.json").exists());
+        // Unsupported updates also supersede a prior retirement marker.
+        std::fs::write(folder.join("retired.json"), b"old").unwrap();
+        preserve_unsupported_acb(
+            &mut Cursor::new(&supported),
+            source,
+            dir.path(),
+            "unsupported",
+        )
+        .unwrap();
+        assert!(folder.join("unsupported.json").exists());
+        assert!(!folder.join("retired.json").exists());
+    });
+}

@@ -47,8 +47,18 @@ files participate in the normal generated-artifact/upload list for both file and
 in-memory exports.
 
 A CDN consumer should publish waveforms before descriptors and update its discovery
-index last, and must honor `unsupported.json` over any older descriptor for the
-same cue. This repository does not embed a particular player's CDN paths or
+index last, and must honor `unsupported.json` or `retired.json` over any older
+descriptor for the same cue. A previously exported block cue that becomes an ordinary
+cue gets a `retired.json` tombstone; discovery indexes must remove that cue so players
+can fall back to ordinary audio. Retirement is scoped to named cues in the current
+ACB and existing sidecar directories, never unrelated sibling exports.
+
+The native storage uploader waits for dependencies on all targets before uploading
+playable descriptors. Diagnostics invalidate remote descriptors; successful playable
+exports clear obsolete remote diagnostics only after descriptor upload. Providers
+therefore need delete permission for the descriptor and diagnostic keys in
+`*.sequence/`. Failed uploads or cleanup retain local files for retry, including when
+`remove_local_after_upload` is enabled. This repository does not embed a particular player's CDN paths or
 credentials. Previously recorded, unchanged bundles need a controlled re-export
 after upgrading; do not clear the entire download ledger to backfill a few cues.
 

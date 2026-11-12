@@ -328,6 +328,49 @@ impl Tables {
     }
 }
 
+fn safe_cue_name(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(name, "." | "..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+
+// Keep an explicit tombstone so publishers can retire a previously exported cue.
+// Do not scan sibling directories: several ACBs can share an output directory.
+fn retire_ordinary_cues(root: &UtfTable, output: &Path) -> Result<Vec<PathBuf>> {
+    let cues = nested(root, "CueTable")?;
+    let names = nested(root, "CueNameTable")?;
+    let mut files = Vec::new();
+    for row in 0..names.rows.len() {
+        let index = number(&names, row, "CueIndex")? as usize;
+        if number(&cues, index, "ReferenceType")? == 8 {
+            continue;
+        }
+        let name = text(&names, row, "CueName")?;
+        if !safe_cue_name(name) {
+            continue;
+        }
+        let dir = output.join(format!("{name}.sequence"));
+        if !dir.is_dir() {
+            continue;
+        }
+        let marker = dir.join("retired.json");
+        let data = sonic_rs::json!({"version": 1, "status": "retired", "cue": name});
+        atomic_write(
+            &marker,
+            &sonic_rs::to_vec_pretty(&data)
+                .map_err(|source| ExportPipelineError::JsonSerialize { source })?,
+        )?;
+        for filename in ["sequence.json", "unsupported.json"] {
+            let path = dir.join(filename);
+            crate::remove_file_if_exists(&path).map_err(|e| io_error(&path, e))?;
+        }
+        files.push(marker);
+    }
+    Ok(files)
+}
+
 fn cue_references(root: &UtfTable) -> Result<Vec<(String, usize)>> {
     let cues = nested(root, "CueTable")?;
     if !cues
@@ -345,12 +388,7 @@ fn cue_references(root: &UtfTable) -> Result<Vec<(String, usize)>> {
             continue;
         }
         let name = text(&names, row, "CueName")?;
-        if name.is_empty()
-            || matches!(name, "." | "..")
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-        {
+        if !safe_cue_name(name) {
             return Err(invalid("unsafe block cue name"));
         }
         if references
@@ -488,11 +526,9 @@ fn write_sequence(
         .map_err(|source| ExportPipelineError::JsonSerialize { source })?;
     atomic_write(&path, &json)?; // last: references only complete, content-addressed waveforms
     files.push(path);
-    let marker = dir.join("unsupported.json");
-    match std::fs::remove_file(&marker) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_error(&marker, e)),
+    for filename in ["unsupported.json", "retired.json"] {
+        let marker = dir.join(filename);
+        crate::remove_file_if_exists(&marker).map_err(|e| io_error(&marker, e))?;
     }
     Ok(files)
 }
@@ -537,8 +573,9 @@ pub(crate) fn export_acb_block_sequences_with_audio<R: Read + Seek>(
     let root = UtfTable::new(&mut *reader).map_err(|e| invalid(e.to_string()))?;
     let refs = cue_references(&root)?;
     if refs.is_empty() {
+        let files = retire_ordinary_cues(&root, output)?;
         reader.rewind().map_err(|e| io_error(source, e))?;
-        return Ok(Vec::new());
+        return Ok(files);
     }
     let tables = Tables::new(&root)?;
     let mut sequences = refs
@@ -563,6 +600,7 @@ pub(crate) fn export_acb_block_sequences_with_audio<R: Read + Seek>(
         sequence.acb_sha256.clone_from(&digest);
         files.extend(write_sequence(sequence, &mut archive, output, encoding)?);
     }
+    files.extend(retire_ordinary_cues(&root, output)?);
     reader.rewind().map_err(|e| io_error(source, e))?;
     Ok(files)
 }
@@ -599,7 +637,10 @@ pub(crate) fn preserve_unsupported_acb<R: Read + Seek>(
                 .map_err(|source| ExportPipelineError::JsonSerialize { source })?,
         )?;
         files.push(marker);
+        let retired = dir.join("retired.json");
+        crate::remove_file_if_exists(&retired).map_err(|e| io_error(&retired, e))?;
     }
+    files.extend(retire_ordinary_cues(&root, output)?);
     reader.rewind().map_err(|e| io_error(source, e))?;
     Ok(files)
 }
