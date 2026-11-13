@@ -753,7 +753,7 @@ fn layer_aisac_volume_is_taken_at_its_default_control() {
     assert!((seq.blocks[0].events[0].gain - 0.25).abs() < 1e-9);
     assert_eq!(seq.aisac.len(), 1);
     assert_eq!(seq.aisac[0].control, "BGM_VERTICAL");
-    assert!((seq.aisac[0].value - 0.1).abs() < 1e-6);
+    assert_eq!(seq.aisac[0].value, 0.1);
     let json = sonic_rs::to_string(&seq).unwrap();
     assert!(
         json.contains(r#""aisac":[{"control":"BGM_VERTICAL""#),
@@ -884,4 +884,57 @@ fn every_one_voice_group_from_the_game_acf_is_accepted() {
         f.get_mut("SynthTable").unwrap()[0].insert("VoiceLimitGroupName".into(), string(group));
         assert_eq!(sequence_of(&f).unwrap().blocks[0].events[0].group, group);
     }
+}
+
+#[test]
+fn ambiguous_aisac_defaults_are_unsupported() {
+    // A step: two points at the default with different levels.
+    let mut f = aisac_fixture(0.1);
+    let graph = &mut f.get_mut("GraphTable").unwrap()[0];
+    graph.insert("Controls".into(), blob(&f32s(&[0.0, 0.1, 0.1])));
+    graph.insert("Destinations".into(), blob(&[0x27, 0x10, 0x13, 0x88, 0, 0]));
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::UnsupportedAcbSequence { .. })
+    ));
+    // Repeated points with the same level are not ambiguous.
+    let mut f = aisac_fixture(0.1);
+    let graph = &mut f.get_mut("GraphTable").unwrap()[0];
+    graph.insert("Controls".into(), blob(&f32s(&[0.0, 0.1, 0.1])));
+    graph.insert(
+        "Destinations".into(),
+        blob(&[0x27, 0x10, 0x13, 0x88, 0x13, 0x88]),
+    );
+    assert!(layered_sequence(&f).is_ok());
+    // The same control at two different defaults on two layers.
+    let mut f = aisac_fixture(0.1);
+    let mut second = f["AisacTable"][0].clone();
+    second.insert("DefaultControl".into(), f32v(0.0));
+    f.get_mut("AisacTable").unwrap().push(second);
+    let tracks = f.get_mut("TrackTable").unwrap();
+    let mut layer = tracks[1].clone();
+    layer.insert("LocalAisacs".into(), blob(&[0, 1]));
+    tracks.push(layer);
+    f.get_mut("BlockSequenceTable").unwrap()[0].insert("TrackIndex".into(), blob(&[0, 1, 0, 2]));
+    for block in f.get_mut("BlockTable").unwrap() {
+        block.insert("TrackIndex".into(), blob(&[0, 0, 0, 0]));
+    }
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::UnsupportedAcbSequence { .. })
+    ));
+}
+
+#[test]
+fn jump_destinations_are_block_table_rows_mapped_to_sequence_positions() {
+    // The sequence lists BlockTable rows in reverse order: row 1 plays first.
+    let mut f = fixture();
+    f.get_mut("BlockSequenceTable").unwrap()[0].insert("BlockIndex".into(), blob(&[0, 1, 0, 0]));
+    let blocks = f.get_mut("BlockTable").unwrap();
+    blocks[1].insert("PlaybackType".into(), n(2));
+    blocks[1].insert("NumDestinationBlocks".into(), n(1));
+    blocks[1].insert("DestinationBlocks".into(), blob(&[0, 0])); // row 0 = position 1
+    blocks[0].insert("DestinationBlocks".into(), blob(&[]));
+    let seq = sequence_of(&f).unwrap();
+    assert_eq!(seq.blocks[0].next, Some(1));
 }
