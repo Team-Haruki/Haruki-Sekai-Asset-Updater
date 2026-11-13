@@ -614,3 +614,85 @@ fn ordinary_updates_retire_old_blocks_and_supported_updates_recover() {
         assert!(!folder.join("retired.json").exists());
     });
 }
+
+/// Fixture whose single block column belongs to one sequence-level layer track.
+fn layered(layer: Row, command: &[u8]) -> Fixture {
+    let mut f = fixture();
+    let tracks = f.get_mut("TrackTable").unwrap();
+    tracks[0].insert("LocalAisacs".into(), blob(&[]));
+    tracks.push(layer);
+    f.get_mut("BlockSequenceTable").unwrap()[0].insert("TrackIndex".into(), blob(&[0, 1]));
+    f.insert(
+        "TrackCommandTable".into(),
+        vec![row(&[("Command", blob(command))])],
+    );
+    f
+}
+
+fn layer_row(command: u32, event: u32, aisacs: &[u8]) -> Row {
+    row(&[
+        ("CommandIndex", n(command)),
+        ("EventIndex", n(event)),
+        ("LocalAisacs", blob(aisacs)),
+    ])
+}
+
+fn layered_sequence(f: &Fixture) -> Result<Sequence> {
+    Tables::new(&parse_root(f))?.sequence("cue".into(), 0)
+}
+
+#[test]
+fn layer_volume_scales_every_note_in_its_column() {
+    // Synth gain 0.5 (fixture) times layer volume 40%.
+    let seq = layered_sequence(&layered(layer_row(0, 65535, &[]), &[0, 0x57, 2, 0, 40])).unwrap();
+    for block in &seq.blocks {
+        assert!((block.events[0].gain - 0.2).abs() < 1e-9);
+    }
+    // A muted layer keeps its notes (they still hold their voice-limit slot) at gain 0.
+    let seq = layered_sequence(&layered(layer_row(0, 65535, &[]), &[0, 0x57, 2, 0, 0])).unwrap();
+    assert_eq!(seq.blocks[0].events.len(), 1);
+    assert_eq!(seq.blocks[0].events[0].gain, 0.0);
+    // No layer command, and the filter-like 0x1f control, leave the gain unchanged.
+    for f in [
+        layered(layer_row(65535, 65535, &[]), &[]),
+        layered(
+            layer_row(0, 65535, &[]),
+            &[0, 0x1f, 7, 1, 0x21, 0x34, 0, 100, 0, 100],
+        ),
+    ] {
+        assert!((layered_sequence(&f).unwrap().blocks[0].events[0].gain - 0.5).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn layer_controls_that_change_the_mix_are_unsupported() {
+    for (layer, command) in [
+        (layer_row(65535, 65535, &[0, 0]), &[][..]),
+        (layer_row(65535, 0, &[]), &[]),
+        (layer_row(0, 65535, &[]), &[0, 0x12, 1, 0]),
+    ] {
+        assert!(matches!(
+            layered_sequence(&layered(layer, command)),
+            Err(ExportPipelineError::UnsupportedAcbSequence { .. })
+        ));
+    }
+    // A block with more columns than the sequence declares layers.
+    let mut f = layered(layer_row(65535, 65535, &[]), &[]);
+    f.get_mut("BlockTable").unwrap()[0].insert("TrackIndex".into(), blob(&[0, 0, 0, 0]));
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::UnsupportedAcbSequence { .. })
+    ));
+    // Malformed volume, or a layer command without its table, is invalid data.
+    let f = layered(layer_row(0, 65535, &[]), &[0, 0x57, 1, 0]);
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::Codec(_))
+    ));
+    let mut f = layered(layer_row(0, 65535, &[]), &[]);
+    f.remove("TrackCommandTable");
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::Codec(_))
+    ));
+}

@@ -29,7 +29,9 @@ When ACB and HCA decoding are enabled, block-sequence cues (`ReferenceType=8`)
 also produce `<cue>.sequence/sequence.json` and content-addressed audio beside
 ordinary audio outputs. The descriptor preserves block order, finite/infinite
 loops, end/division/immediate transition timing, note offsets, synth gain and the
-verified `IM_001` / `IM_002` one-voice groups. Flat MP3/FLAC/WAV exports remain
+verified `IM_001` / `IM_002` one-voice groups. Sequence-level layer volumes are folded into
+each note's gain; a 0% layer keeps its notes at gain 0, as they still take their
+voice-limit slot. AISAC-controlled layers are reported as unsupported. Flat MP3/FLAC/WAV exports remain
 available; consumers must read the descriptor to reproduce interactive music.
 Sidecars use MP3 when MP3 is among the configured audio formats, through the
 existing media backend and bitrate; otherwise they use lossless WAV. Descriptor

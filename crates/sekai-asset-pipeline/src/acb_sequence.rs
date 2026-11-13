@@ -171,6 +171,25 @@ fn track_events(data: &[u8]) -> Result<(Vec<(u64, usize)>, u64)> {
     Ok((events, elapsed))
 }
 
+// Layer tracks are the sequence-level columns a block's tracks belong to. Their volume
+// applies to every note in that column (a 0% layer is silent in game but still holds its
+// voice-limit slot), so it is folded into each event's gain.
+fn layer_gain(data: &[u8]) -> Result<f64> {
+    let mut gain = 1.0;
+    commands(data, |kind, payload| {
+        match (kind, payload) {
+            (0x57, [a, b]) => gain *= f64::from(u16::from_be_bytes([*a, *b])) / 100.0,
+            // A 7-byte filter-like control seen on a few layers. It shapes timbre, not
+            // which notes sound, and was already ignored before layer gains were read.
+            (0x1f, [_, _, _, _, _, _, _]) => {}
+            (0x57 | 0x1f, _) => return Err(invalid(format!("malformed layer command {kind:#x}"))),
+            _ => return Err(unsupported(format!("layer command {kind:#x}"))),
+        }
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(gain)
+}
+
 fn synth_gain(data: &[u8]) -> Result<f64> {
     let mut gain = 1.0;
     commands(data, |kind, payload| {
@@ -195,27 +214,29 @@ struct Tables {
     events: UtfTable,
     synths: UtfTable,
     synth_commands: Option<UtfTable>,
+    track_commands: Option<UtfTable>,
     waves: UtfTable,
+}
+
+fn optional_nested(root: &UtfTable, name: &str) -> Result<Option<UtfTable>> {
+    match root.rows[0].get(name).and_then(Value::as_bytes) {
+        Some(blob) if !blob.is_empty() => Ok(Some(
+            UtfTable::new(Cursor::new(blob)).map_err(|e| invalid(format!("{name}: {e}")))?,
+        )),
+        _ => Ok(None),
+    }
 }
 
 impl Tables {
     fn new(root: &UtfTable) -> Result<Self> {
-        let synth_commands = match root.rows[0]
-            .get("SynthCommandTable")
-            .and_then(Value::as_bytes)
-        {
-            Some(blob) if !blob.is_empty() => {
-                Some(UtfTable::new(Cursor::new(blob)).map_err(|e| invalid(e.to_string()))?)
-            }
-            _ => None,
-        };
         Ok(Self {
             sequences: nested(root, "BlockSequenceTable")?,
             blocks: nested(root, "BlockTable")?,
             tracks: nested(root, "TrackTable")?,
             events: nested(root, "TrackEventTable")?,
             synths: nested(root, "SynthTable")?,
-            synth_commands,
+            synth_commands: optional_nested(root, "SynthCommandTable")?,
+            track_commands: optional_nested(root, "TrackCommandTable")?,
             waves: nested(root, "WaveformTable")?,
         })
     }
@@ -228,10 +249,11 @@ impl Tables {
         if refs.is_empty() {
             return Err(invalid("empty block sequence"));
         }
+        let layers = self.layer_gains(reference)?;
         let blocks = refs
             .into_iter()
             .enumerate()
-            .map(|(index, row)| self.block(index, row))
+            .map(|(index, row)| self.block(index, row, &layers))
             .collect::<Result<_>>()?;
         Ok(Sequence {
             version: 1,
@@ -242,7 +264,42 @@ impl Tables {
         })
     }
 
-    fn block(&self, index: usize, row: usize) -> Result<Block> {
+    /// Gains of the sequence-level layer tracks, in column order. Empty when the
+    /// sequence declares no layer tracks.
+    fn layer_gains(&self, reference: usize) -> Result<Vec<f64>> {
+        let has_layers = self
+            .sequences
+            .rows
+            .get(reference)
+            .is_some_and(|r| r.contains_key("TrackIndex"));
+        if !has_layers {
+            return Ok(Vec::new());
+        }
+        indices(bytes(&self.sequences, reference, "TrackIndex")?)?
+            .into_iter()
+            .map(|track| {
+                if !bytes(&self.tracks, track, "LocalAisacs").map_or(true, <[u8]>::is_empty)
+                    || optional_number(&self.tracks, track, "GlobalAisacNumRefs", 0)? != 0
+                {
+                    return Err(unsupported("AISAC-controlled layer"));
+                }
+                if number(&self.tracks, track, "EventIndex")? != 65535 {
+                    return Err(unsupported("layer track with its own events"));
+                }
+                let command = number(&self.tracks, track, "CommandIndex")?;
+                if command == 65535 {
+                    return Ok(1.0);
+                }
+                let table = self
+                    .track_commands
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing TrackCommandTable"))?;
+                layer_gain(bytes(table, command as usize, "Command")?)
+            })
+            .collect()
+    }
+
+    fn block(&self, index: usize, row: usize, layers: &[f64]) -> Result<Block> {
         for field in ["JumpDestination", "NumDestinationBlocks", "TransitionMode"] {
             if number(&self.blocks, row, field)? != 0 {
                 return Err(unsupported(format!("unsupported block {field}")));
@@ -259,9 +316,14 @@ impl Tables {
         if duration_us == 0 || (transition == 1 && (divisions < 2 || divisions == 65535)) {
             return Err(invalid("unsupported block duration, loop or transition"));
         }
+        let tracks = indices(bytes(&self.blocks, row, "TrackIndex")?)?;
+        if !layers.is_empty() && tracks.len() != layers.len() {
+            return Err(unsupported("block tracks do not match the sequence layers"));
+        }
         let mut events = Vec::new();
-        for track in indices(bytes(&self.blocks, row, "TrackIndex")?)? {
-            events.extend(self.track(track, duration_us)?);
+        for (column, track) in tracks.into_iter().enumerate() {
+            let gain = layers.get(column).copied().unwrap_or(1.0);
+            events.extend(self.track(track, duration_us, gain)?);
         }
         Ok(Block {
             index,
@@ -274,7 +336,7 @@ impl Tables {
         })
     }
 
-    fn track(&self, track: usize, duration_us: u64) -> Result<Vec<Event>> {
+    fn track(&self, track: usize, duration_us: u64, layer_gain: f64) -> Result<Vec<Event>> {
         if number(&self.tracks, track, "CommandIndex")? != 65535 {
             return Err(unsupported("unsupported per-track controls"));
         }
@@ -288,7 +350,11 @@ impl Tables {
         }
         events
             .into_iter()
-            .map(|(at, synth)| self.event(track, at, synth))
+            .map(|(at, synth)| {
+                let mut event = self.event(track, at, synth)?;
+                event.gain *= layer_gain;
+                Ok(event)
+            })
             .collect()
     }
 
