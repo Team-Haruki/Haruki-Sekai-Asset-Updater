@@ -245,8 +245,15 @@ fn unsupported_metadata_does_not_replace_an_existing_descriptor() {
         ("BlockSequenceTable", "BlockIndex", blob(&[0, 99])),
         ("BlockTable", "JumpDestination", n(1)),
         ("BlockTable", "NumDestinationBlocks", n(1)),
-        ("BlockTable", "TransitionMode", n(1)),
+        ("BlockTable", "TransitionMode", n(2)),
         ("BlockTable", "PlaybackType", n(2)),
+        ("BlockTable", "PlaybackType", n(3)),
+        ("BlockTable", "Aisacs", blob(&[0, 0])),
+        ("BlockSequenceTable", "LocalAisacs", blob(&[0, 0])),
+        ("TrackTable", "LocalAisacs", blob(&[0, 0])),
+        ("TrackTable", "GlobalAisacNumRefs", n(1)),
+        ("SynthTable", "LocalAisacs", blob(&[0, 0])),
+        ("SynthTable", "VoiceLimitGroupName", string("IM_009")),
         ("BlockTable", "TransitionTiming", n(3)),
         ("TrackTable", "CommandIndex", n(0)),
         ("TrackEventTable", "Command", blob(&[0, 0, 0])),
@@ -443,7 +450,7 @@ fn unsupported_cues_keep_recoverable_input_and_legacy_audio() {
             let dir = tempfile::tempdir().unwrap();
             let source = dir.path().join("source.acb");
             let mut f = fixture();
-            f.get_mut("BlockTable").unwrap()[0].insert("TransitionMode".into(), n(1));
+            f.get_mut("BlockTable").unwrap()[0].insert("TransitionMode".into(), n(2));
             let raw = acb(&f, &hca());
             std::fs::write(&source, &raw).unwrap();
             let options = crate::test_support::processing_pipeline_options();
@@ -667,8 +674,7 @@ fn layer_volume_scales_every_note_in_its_column() {
 #[test]
 fn layer_controls_that_change_the_mix_are_unsupported() {
     for (layer, command) in [
-        (layer_row(65535, 65535, &[0, 0]), &[][..]),
-        (layer_row(65535, 0, &[]), &[]),
+        (layer_row(65535, 0, &[]), &[][..]),
         (layer_row(0, 65535, &[]), &[0, 0x12, 1, 0]),
     ] {
         assert!(matches!(
@@ -695,4 +701,187 @@ fn layer_controls_that_change_the_mix_are_unsupported() {
         layered_sequence(&f),
         Err(ExportPipelineError::Codec(_))
     ));
+}
+
+fn f32v(value: f32) -> Value {
+    Value::F32(value)
+}
+
+fn f32s(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_be_bytes()).collect()
+}
+
+/// Layered fixture whose layer carries one local AISAC with a two-point volume graph.
+fn aisac_fixture(default: f32) -> Fixture {
+    let mut f = layered(layer_row(65535, 65535, &[0, 0]), &[]);
+    f.insert(
+        "AisacTable".into(),
+        vec![row(&[
+            ("Type", n(0)),
+            ("ControlId", n(1032)),
+            ("RandomRange", f32v(0.0)),
+            ("AutoModulationIndex", n(65535)),
+            ("GraphIndexes", blob(&[0, 0])),
+            ("DefaultControlFlag", n(1)),
+            ("DefaultControl", f32v(default)),
+            ("GraphBitFlag", n(0)),
+            ("GraphTypeIndexes", blob(&[0])),
+        ])],
+    );
+    f.insert(
+        "GraphTable".into(),
+        vec![row(&[
+            ("Type", n(1)),
+            ("Controls", blob(&f32s(&[0.0, 0.1]))),
+            ("Destinations", blob(&[0x27, 0x10, 0x13, 0x88])),
+        ])],
+    );
+    f.insert(
+        "AisacControlNameTable".into(),
+        vec![row(&[
+            ("AisacControlId", n(1032)),
+            ("AisacControlName", string("BGM_VERTICAL")),
+        ])],
+    );
+    f
+}
+
+#[test]
+fn layer_aisac_volume_is_taken_at_its_default_control() {
+    // Synth gain 0.5 times the graph's 5000/10000 at the default 0.1.
+    let seq = layered_sequence(&aisac_fixture(0.1)).unwrap();
+    assert!((seq.blocks[0].events[0].gain - 0.25).abs() < 1e-9);
+    assert_eq!(seq.aisac.len(), 1);
+    assert_eq!(seq.aisac[0].control, "BGM_VERTICAL");
+    assert!((seq.aisac[0].value - 0.1).abs() < 1e-6);
+    let json = sonic_rs::to_string(&seq).unwrap();
+    assert!(
+        json.contains(r#""aisac":[{"control":"BGM_VERTICAL""#),
+        "{json}"
+    );
+    // At the first point the layer is at full volume; an unnamed control keeps its id.
+    let mut f = aisac_fixture(0.0);
+    f.remove("AisacControlNameTable");
+    let seq = layered_sequence(&f).unwrap();
+    assert!((seq.blocks[0].events[0].gain - 0.5).abs() < 1e-9);
+    assert_eq!(seq.aisac[0].control, "1032");
+    // Without AISAC the descriptor has no aisac key at all.
+    let json = sonic_rs::to_string(&layered_sequence(&fixture_sequence()).unwrap()).unwrap();
+    assert!(!json.contains("aisac") && !json.contains("transitionMode") && !json.contains("next"));
+}
+
+fn fixture_sequence() -> Fixture {
+    layered(layer_row(65535, 65535, &[]), &[])
+}
+
+#[test]
+fn aisac_that_a_fixed_gain_cannot_represent_is_unsupported() {
+    let unsupported_cases: [(&str, &str, Value); 7] = [
+        ("AisacTable", "DefaultControl", f32v(0.05)),
+        ("AisacTable", "Type", n(1)),
+        ("AisacTable", "RandomRange", f32v(0.5)),
+        ("AisacTable", "AutoModulationIndex", n(0)),
+        ("AisacTable", "DefaultControlFlag", n(0)),
+        ("AisacTable", "GraphTypeIndexes", blob(&[1])),
+        ("GraphTable", "Type", n(2)),
+    ];
+    for (table, key, value) in unsupported_cases {
+        let mut f = aisac_fixture(0.1);
+        f.get_mut(table).unwrap()[0].insert(key.into(), value);
+        assert!(
+            matches!(
+                layered_sequence(&f),
+                Err(ExportPipelineError::UnsupportedAcbSequence { .. })
+            ),
+            "{table}.{key}"
+        );
+    }
+    // Missing tables or mismatched graph arrays are invalid data.
+    for table in ["AisacTable", "GraphTable"] {
+        let mut f = aisac_fixture(0.1);
+        f.remove(table);
+        assert!(
+            matches!(layered_sequence(&f), Err(ExportPipelineError::Codec(_))),
+            "{table}"
+        );
+    }
+    let mut f = aisac_fixture(0.1);
+    f.get_mut("GraphTable").unwrap()[0].insert("Destinations".into(), blob(&[0x27, 0x10]));
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::Codec(_))
+    ));
+    let mut f = aisac_fixture(0.1);
+    f.get_mut("GraphTable").unwrap()[0].insert("Controls".into(), blob(&[0, 0, 0]));
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::Codec(_))
+    ));
+    let mut f = aisac_fixture(0.1);
+    f.get_mut("TrackTable").unwrap()[1].insert("GlobalAisacNumRefs".into(), n(1));
+    f.get_mut("TrackTable").unwrap()[0].insert("GlobalAisacNumRefs".into(), n(0));
+    assert!(matches!(
+        layered_sequence(&f),
+        Err(ExportPipelineError::UnsupportedAcbSequence { .. })
+    ));
+}
+
+fn sequence_of(f: &Fixture) -> Result<Sequence> {
+    Tables::new(&parse_root(f))?.sequence("cue".into(), 0)
+}
+
+#[test]
+fn beat_synchronised_transitions_and_jump_blocks_are_described() {
+    let mut f = fixture();
+    let blocks = f.get_mut("BlockTable").unwrap();
+    blocks[1].insert("TransitionMode".into(), n(1));
+    blocks[0].insert("PlaybackType".into(), n(2));
+    blocks[0].insert("NumDestinationBlocks".into(), n(1));
+    blocks[0].insert("DestinationBlocks".into(), blob(&[0, 1]));
+    blocks[1].insert("DestinationBlocks".into(), blob(&[]));
+    let seq = sequence_of(&f).unwrap();
+    assert_eq!(seq.blocks[0].next, Some(1));
+    assert!(!seq.blocks[0].looping);
+    assert_eq!(seq.blocks[1].transition_mode, 1);
+    assert_eq!(seq.blocks[1].next, None);
+    let json = sonic_rs::to_string(&seq).unwrap();
+    assert!(
+        json.contains(r#""transitionMode":1"#) && json.contains(r#""next":1"#),
+        "{json}"
+    );
+
+    let mut cases: Vec<(u32, Vec<u8>, bool)> = vec![
+        (2, vec![0, 0, 0, 1], true), // CRI picks among several destinations at run time
+        (1, vec![], false),          // count says one, the list is empty
+        (1, vec![0, 9], false),      // destination outside this sequence
+    ];
+    for (count, list, unsupported) in cases.drain(..) {
+        let mut f = fixture();
+        let blocks = f.get_mut("BlockTable").unwrap();
+        blocks[0].insert("PlaybackType".into(), n(2));
+        blocks[0].insert("NumDestinationBlocks".into(), n(count));
+        blocks[0].insert("DestinationBlocks".into(), blob(&list));
+        blocks[1].insert("DestinationBlocks".into(), blob(&[]));
+        let result = sequence_of(&f);
+        if unsupported {
+            assert!(matches!(
+                result,
+                Err(ExportPipelineError::UnsupportedAcbSequence { .. })
+            ));
+        } else {
+            assert!(
+                matches!(result, Err(ExportPipelineError::Codec(_))),
+                "{count} {list:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_one_voice_group_from_the_game_acf_is_accepted() {
+    for group in ONE_VOICE_GROUPS {
+        let mut f = fixture();
+        f.get_mut("SynthTable").unwrap()[0].insert("VoiceLimitGroupName".into(), string(group));
+        assert_eq!(sequence_of(&f).unwrap().blocks[0].events[0].group, group);
+    }
 }

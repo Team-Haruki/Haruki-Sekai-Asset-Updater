@@ -23,6 +23,16 @@ struct Sequence {
     acb_sha256: String,
     waves: BTreeMap<String, Wave>,
     blocks: Vec<Block>,
+    /// AISAC controls the layer gains were evaluated at (their ACB defaults). A player
+    /// must not reuse these gains after the scenario sets a control to another value.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    aisac: Vec<AisacControl>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct AisacControl {
+    control: String,
+    value: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,7 +56,29 @@ struct Block {
     transition: u32,
     divisions: u32,
     events: Vec<Event>,
+    /// 1: a beat transition out of this block enters a beat-synchronised destination
+    /// at the same beat (CRI `TransitionMode`); 0, the default, starts it from 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    transition_mode: u32,
+    /// Block entered when this one ends, instead of the following block (a jump block).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<usize>,
 }
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// Voice-limit groups the game's ACF (7.1.0 `ProjectSekai.acf`) caps at one voice:
+/// a new note in the group takes over from the previous one.
+const ONE_VOICE_GROUPS: [&str; 8] = [
+    "IM_001", "IM_002", "IM_003", "IM_004", "IM_005", "IM_006", "IM_007", "IM_008",
+];
+
+/// AISAC graph target 1 is volume (every `VOL_*` AISAC in the game ACF uses it);
+/// destination values are normalised to 10000.
+const AISAC_VOLUME_GRAPH: u32 = 1;
+const AISAC_FULL_SCALE: f64 = 10000.0;
 
 #[derive(Debug, Serialize)]
 struct Event {
@@ -87,6 +119,34 @@ fn optional_number(table: &UtfTable, row: usize, field: &str, default: u32) -> R
         number(table, row, field)
     } else {
         Ok(default)
+    }
+}
+
+fn float(table: &UtfTable, row: usize, field: &str) -> Result<f64> {
+    match cell(table, row, field)? {
+        Value::F32(value) if value.is_finite() => Ok(f64::from(*value)),
+        _ => Err(invalid(format!("invalid {}[{row}].{field}", table.name))),
+    }
+}
+
+fn floats(data: &[u8]) -> Result<Vec<f64>> {
+    if !data.len().is_multiple_of(4) {
+        return Err(invalid("odd float array"));
+    }
+    Ok(data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f64::from(f32::from_be_bytes(*b)))
+        .collect())
+}
+
+/// Optional blob column: missing means empty.
+fn optional_bytes<'a>(table: &'a UtfTable, row: usize, field: &str) -> Result<&'a [u8]> {
+    if table.rows.get(row).is_some_and(|r| r.contains_key(field)) {
+        bytes(table, row, field)
+    } else {
+        Ok(&[])
     }
 }
 
@@ -215,7 +275,20 @@ struct Tables {
     synths: UtfTable,
     synth_commands: Option<UtfTable>,
     track_commands: Option<UtfTable>,
+    aisacs: Option<UtfTable>,
+    graphs: Option<UtfTable>,
+    aisac_names: Option<UtfTable>,
     waves: UtfTable,
+}
+
+/// Sequences, block tracks and synths take no AISAC; only layer tracks do.
+fn no_aisac(table: &UtfTable, row: usize, what: &str) -> Result<()> {
+    if !optional_bytes(table, row, "LocalAisacs")?.is_empty()
+        || optional_number(table, row, "GlobalAisacNumRefs", 0)? != 0
+    {
+        return Err(unsupported(format!("{what} AISAC")));
+    }
+    Ok(())
 }
 
 fn optional_nested(root: &UtfTable, name: &str) -> Result<Option<UtfTable>> {
@@ -237,6 +310,9 @@ impl Tables {
             synths: nested(root, "SynthTable")?,
             synth_commands: optional_nested(root, "SynthCommandTable")?,
             track_commands: optional_nested(root, "TrackCommandTable")?,
+            aisacs: optional_nested(root, "AisacTable")?,
+            graphs: optional_nested(root, "GraphTable")?,
+            aisac_names: optional_nested(root, "AisacControlNameTable")?,
             waves: nested(root, "WaveformTable")?,
         })
     }
@@ -249,11 +325,13 @@ impl Tables {
         if refs.is_empty() {
             return Err(invalid("empty block sequence"));
         }
-        let layers = self.layer_gains(reference)?;
+        no_aisac(&self.sequences, reference, "sequence")?;
+        let mut aisac = Vec::new();
+        let layers = self.layer_gains(reference, &mut aisac)?;
         let blocks = refs
-            .into_iter()
+            .iter()
             .enumerate()
-            .map(|(index, row)| self.block(index, row, &layers))
+            .map(|(index, &row)| self.block(index, row, &refs, &layers))
             .collect::<Result<_>>()?;
         Ok(Sequence {
             version: 1,
@@ -261,12 +339,13 @@ impl Tables {
             acb_sha256: String::new(),
             waves: BTreeMap::new(),
             blocks,
+            aisac,
         })
     }
 
     /// Gains of the sequence-level layer tracks, in column order. Empty when the
     /// sequence declares no layer tracks.
-    fn layer_gains(&self, reference: usize) -> Result<Vec<f64>> {
+    fn layer_gains(&self, reference: usize, controls: &mut Vec<AisacControl>) -> Result<Vec<f64>> {
         let has_layers = self
             .sequences
             .rows
@@ -278,41 +357,129 @@ impl Tables {
         indices(bytes(&self.sequences, reference, "TrackIndex")?)?
             .into_iter()
             .map(|track| {
-                if !bytes(&self.tracks, track, "LocalAisacs").map_or(true, <[u8]>::is_empty)
-                    || optional_number(&self.tracks, track, "GlobalAisacNumRefs", 0)? != 0
-                {
-                    return Err(unsupported("AISAC-controlled layer"));
+                if optional_number(&self.tracks, track, "GlobalAisacNumRefs", 0)? != 0 {
+                    return Err(unsupported("global AISAC on a layer"));
                 }
                 if number(&self.tracks, track, "EventIndex")? != 65535 {
                     return Err(unsupported("layer track with its own events"));
                 }
+                let mut gain = 1.0;
+                for aisac in indices(optional_bytes(&self.tracks, track, "LocalAisacs")?)? {
+                    let (value, control) = self.aisac_gain(aisac)?;
+                    gain *= value;
+                    if !controls.contains(&control) {
+                        controls.push(control);
+                    }
+                }
                 let command = number(&self.tracks, track, "CommandIndex")?;
                 if command == 65535 {
-                    return Ok(1.0);
+                    return Ok(gain);
                 }
                 let table = self
                     .track_commands
                     .as_ref()
                     .ok_or_else(|| invalid("missing TrackCommandTable"))?;
-                layer_gain(bytes(table, command as usize, "Command")?)
+                Ok(gain * layer_gain(bytes(table, command as usize, "Command")?)?)
             })
             .collect()
     }
 
-    fn block(&self, index: usize, row: usize, layers: &[f64]) -> Result<Block> {
-        for field in ["JumpDestination", "NumDestinationBlocks", "TransitionMode"] {
-            if number(&self.blocks, row, field)? != 0 {
-                return Err(unsupported(format!("unsupported block {field}")));
-            }
+    /// Volume of a local AISAC at its default control value, which is the only
+    /// value the scenarios set. The default must sit on a graph point, so the
+    /// curve shape between points never matters.
+    fn aisac_gain(&self, aisac: usize) -> Result<(f64, AisacControl)> {
+        let table = self
+            .aisacs
+            .as_ref()
+            .ok_or_else(|| invalid("missing AisacTable"))?;
+        let graphs = self
+            .graphs
+            .as_ref()
+            .ok_or_else(|| invalid("missing GraphTable"))?;
+        if number(table, aisac, "Type")? != 0
+            || number(table, aisac, "AutoModulationIndex")? != 65535
+            || float(table, aisac, "RandomRange")? != 0.0
+            || optional_number(table, aisac, "GraphBitFlag", 0)? != 0
+        {
+            return Err(unsupported("modulated or random AISAC"));
         }
+        if number(table, aisac, "DefaultControlFlag")? != 1 {
+            return Err(unsupported("AISAC without a default control value"));
+        }
+        let value = float(table, aisac, "DefaultControl")?;
+        let graph_rows = indices(bytes(table, aisac, "GraphIndexes")?)?;
+        let types = bytes(table, aisac, "GraphTypeIndexes")?;
+        if types.len() != graph_rows.len() || types.iter().any(|t| *t != 0) {
+            return Err(unsupported("AISAC graph type"));
+        }
+        let mut gain = 1.0;
+        for graph in graph_rows {
+            if number(graphs, graph, "Type")? != AISAC_VOLUME_GRAPH {
+                return Err(unsupported("non-volume AISAC graph"));
+            }
+            let points = floats(bytes(graphs, graph, "Controls")?)?;
+            let levels = indices(bytes(graphs, graph, "Destinations")?)?;
+            if points.len() != levels.len() || points.is_empty() {
+                return Err(invalid("AISAC graph points"));
+            }
+            let point = points
+                .iter()
+                .position(|p| *p == value)
+                .ok_or_else(|| unsupported("AISAC default between graph points"))?;
+            gain *= levels[point] as f64 / AISAC_FULL_SCALE;
+        }
+        let id = number(table, aisac, "ControlId")?;
+        let control = self
+            .aisac_names
+            .as_ref()
+            .and_then(|names| {
+                (0..names.rows.len()).find_map(|row| {
+                    (number(names, row, "AisacControlId").ok() == Some(id))
+                        .then(|| text(names, row, "AisacControlName").ok())
+                        .flatten()
+                })
+            })
+            .map_or_else(|| id.to_string(), str::to_string);
+        Ok((gain, AisacControl { control, value }))
+    }
+
+    fn block(&self, index: usize, row: usize, refs: &[usize], layers: &[f64]) -> Result<Block> {
+        if number(&self.blocks, row, "JumpDestination")? != 0 {
+            return Err(unsupported("unsupported block JumpDestination"));
+        }
+        if !optional_bytes(&self.blocks, row, "Aisacs")?.is_empty() {
+            return Err(unsupported("block AISAC"));
+        }
+        let transition_mode = optional_number(&self.blocks, row, "TransitionMode", 0)?;
+        if transition_mode > 1 {
+            return Err(unsupported("unsupported block TransitionMode"));
+        }
+        let destinations = number(&self.blocks, row, "NumDestinationBlocks")?;
         let duration_us = u64::from(number(&self.blocks, row, "Length")?) * 1000
             + u64::from(optional_number(&self.blocks, row, "LengthUs", 0)?);
         let playback = number(&self.blocks, row, "PlaybackType")?;
         let transition = number(&self.blocks, row, "TransitionTiming")?;
         let divisions = number(&self.blocks, row, "TransitionTimingValue")?;
-        if playback > 1 || transition > 2 {
+        if playback > 2 || transition > 2 {
             return Err(unsupported("block playback or transition type"));
         }
+        // PlaybackType 2 jumps to its destination block when it ends. With several
+        // destinations CRI picks one at run time, which a static descriptor cannot follow.
+        let next = match (playback, destinations) {
+            (0 | 1, 0) => None,
+            (2, 1) => {
+                let target = indices(bytes(&self.blocks, row, "DestinationBlocks")?)?;
+                let [target] = target.as_slice() else {
+                    return Err(invalid("block destination count mismatch"));
+                };
+                Some(
+                    refs.iter()
+                        .position(|r| r == target)
+                        .ok_or_else(|| invalid("jump destination outside the sequence"))?,
+                )
+            }
+            _ => return Err(unsupported("block destinations")),
+        };
         if duration_us == 0 || (transition == 1 && (divisions < 2 || divisions == 65535)) {
             return Err(invalid("unsupported block duration, loop or transition"));
         }
@@ -333,6 +500,8 @@ impl Tables {
             transition,
             divisions,
             events,
+            transition_mode,
+            next,
         })
     }
 
@@ -340,6 +509,7 @@ impl Tables {
         if number(&self.tracks, track, "CommandIndex")? != 65535 {
             return Err(unsupported("unsupported per-track controls"));
         }
+        no_aisac(&self.tracks, track, "track")?;
         let event_index = number(&self.tracks, track, "EventIndex")?;
         if event_index == 65535 {
             return Ok(Vec::new());
@@ -369,6 +539,7 @@ impl Tables {
         if number(&self.waves, *wave, "EncodeType")? != 2 {
             return Err(unsupported("non-HCA block waveform is not supported"));
         }
+        no_aisac(&self.synths, synth, "synth")?;
         let command = number(&self.synths, synth, "CommandIndex")?;
         let gain = if command == 65535 {
             1.0
@@ -390,7 +561,7 @@ impl Tables {
             })
             .transpose()?
             .unwrap_or("");
-        if !matches!(group, "" | "IM_001" | "IM_002") {
+        if !group.is_empty() && !ONE_VOICE_GROUPS.contains(&group) {
             return Err(unsupported(format!("unverified voice limit group {group}")));
         }
         Ok(Event {
