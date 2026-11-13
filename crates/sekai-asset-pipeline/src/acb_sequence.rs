@@ -382,21 +382,25 @@ fn retire_ordinary_cues(root: &UtfTable, output: &Path) -> Result<Vec<PathBuf>> 
 
 fn cue_references(root: &UtfTable) -> Result<Vec<(String, usize)>> {
     let cues = nested(root, "CueTable")?;
-    let block_cues = cues
+    let block_cues: BTreeSet<usize> = cues
         .rows
         .iter()
-        .filter(|r| r.get("ReferenceType").and_then(Value::as_int) == Some(8))
-        .count();
-    if block_cues == 0 {
+        .enumerate()
+        .filter(|(_, r)| r.get("ReferenceType").and_then(Value::as_int) == Some(8))
+        .map(|(index, _)| index)
+        .collect();
+    if block_cues.is_empty() {
         return Ok(Vec::new());
     }
     let names = nested(root, "CueNameTable")?;
     let mut references = BTreeMap::new();
+    let mut named = BTreeSet::new();
     for row in 0..names.rows.len() {
         let cue_index = number(&names, row, "CueIndex")? as usize;
         if number(&cues, cue_index, "ReferenceType")? != 8 {
             continue;
         }
+        named.insert(cue_index);
         let name = text(&names, row, "CueName")?;
         if !safe_cue_name(name) {
             return Err(invalid("unsafe block cue name"));
@@ -413,8 +417,8 @@ fn cue_references(root: &UtfTable) -> Result<Vec<(String, usize)>> {
     }
     // An unnamed block cue has no sidecar directory and would be silently dropped,
     // after which ACB cleanup loses its structure. Fail the bundle instead.
-    if references.len() != block_cues {
-        return Err(invalid("block cue without a unique CueNameTable entry"));
+    if named != block_cues {
+        return Err(invalid("block cue without a CueNameTable entry"));
     }
     Ok(references.into_iter().collect())
 }

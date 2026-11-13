@@ -365,6 +365,11 @@ fn zero_duration_bad_subdivisions_duplicate_names_and_decode_failures_are_errors
         .unwrap()
         .push(row(&[("ReferenceType", n(8)), ("ReferenceIndex", n(0))]));
     assert!(cue_references(&parse_root(&f)).is_err());
+    // A second name for the first cue must not mask the unnamed one.
+    f.get_mut("CueNameTable")
+        .unwrap()
+        .push(row(&[("CueName", string("alias")), ("CueIndex", n(0))]));
+    assert!(cue_references(&parse_root(&f)).is_err());
     assert!(decode_wave(b"not HCA", "1").is_err());
     let mut tables = Tables::new(&parse_root(&fixture())).unwrap();
     tables.waves.rows[0].insert("MemoryAwbId".into(), n(u32::MAX));
