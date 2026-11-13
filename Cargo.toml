@@ -1,6 +1,6 @@
 [package]
 name = "haruki-sekai-asset-updater"
-version = "7.5.5"
+version = "7.6.0"
 edition = "2021"
 description = "Rust service for Haruki Sekai Asset Updater"
 license = "MIT"
