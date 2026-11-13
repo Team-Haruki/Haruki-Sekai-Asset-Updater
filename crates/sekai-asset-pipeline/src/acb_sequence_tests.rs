@@ -214,6 +214,13 @@ fn note_commands_keep_microseconds_and_reject_unknown_controls() {
     .unwrap();
     assert_eq!(notes, vec![(1500, 3)]);
     assert_eq!(length, 1500);
+    // Command zero terminates the track: a later note or delay is padding, not music.
+    let (notes, length) = track_events(&[
+        7, 208, 4, 0, 2, 0, 3, 0, 0, 0, 7, 208, 4, 0, 2, 0, 4, 7, 213, 2, 1, 244,
+    ])
+    .unwrap();
+    assert_eq!(notes, vec![(0, 3)]);
+    assert_eq!(length, 0);
     for bytes in [
         &[1u8][..],
         &[7, 208, 4, 0],
@@ -351,6 +358,12 @@ fn zero_duration_bad_subdivisions_duplicate_names_and_decode_failures_are_errors
     let duplicate = fixture()["CueNameTable"][0].clone();
     let mut f = fixture();
     f.get_mut("CueNameTable").unwrap().push(duplicate);
+    assert!(cue_references(&parse_root(&f)).is_err());
+    // A block cue without a name must fail rather than be skipped before ACB cleanup.
+    let mut f = fixture();
+    f.get_mut("CueTable")
+        .unwrap()
+        .push(row(&[("ReferenceType", n(8)), ("ReferenceIndex", n(0))]));
     assert!(cue_references(&parse_root(&f)).is_err());
     assert!(decode_wave(b"not HCA", "1").is_err());
     let mut tables = Tables::new(&parse_root(&fixture())).unwrap();

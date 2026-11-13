@@ -152,23 +152,27 @@ pub async fn upload_to_all_storages(
 
     // Barrier across every target: never expose a descriptor while any dependency
     // is still uploading. A failed phase preserves retry inputs and old markers.
+    // Diagnostics reference payloads (unsupported.json names the raw ACB), so they get
+    // their own phase too: a failed payload upload must not publish a dangling marker.
     let (descriptors, payloads): (Vec<_>, Vec<_>) = files
         .iter()
         .cloned()
         .partition(|p| block_sidecar(p, "sequence.json"));
-    upload_file_batch(
-        &targets,
-        extracted_save_path,
-        &payloads,
-        &public_read_matcher,
-        options.concurrency,
-        options.retry,
-    )
-    .await?;
-    for marker in payloads
-        .iter()
-        .filter(|p| block_sidecar(p, "retired.json") || block_sidecar(p, "unsupported.json"))
-    {
+    let (markers, payloads): (Vec<_>, Vec<_>) = payloads
+        .into_iter()
+        .partition(|p| block_sidecar(p, "retired.json") || block_sidecar(p, "unsupported.json"));
+    for batch in [&payloads, &markers] {
+        upload_file_batch(
+            &targets,
+            extracted_save_path,
+            batch,
+            &public_read_matcher,
+            options.concurrency,
+            options.retry,
+        )
+        .await?;
+    }
+    for marker in &markers {
         delete_block_files(
             &targets,
             extracted_save_path,

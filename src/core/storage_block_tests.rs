@@ -151,3 +151,31 @@ async fn dependency_barrier_covers_every_storage_target() {
         assert!(!root.join("cue.sequence/sequence.json").exists());
     }
 }
+
+#[tokio::test]
+async fn failed_raw_upload_does_not_publish_its_unsupported_marker() {
+    let source = tempdir().unwrap();
+    let remote = tempdir().unwrap();
+    let folder = source.path().join("cue.sequence");
+    let target = remote.path().join("cue.sequence");
+    fs::create_dir(&folder).unwrap();
+    fs::create_dir(&target).unwrap();
+    let marker = folder.join("unsupported.json");
+    let raw = folder.join("source-0123456789abcdef.acb.raw");
+    fs::write(&marker, b"diagnostic").unwrap();
+    fs::write(target.join("sequence.json"), b"previous").unwrap();
+    // The raw ACB is missing locally, so its upload fails before any marker is sent.
+    let config = storage(remote.path());
+    let files = vec![marker.clone(), raw.clone()];
+    assert!(publish(&config, source.path(), &files, true).await.is_err());
+    assert!(!target.join("unsupported.json").exists());
+    assert_eq!(fs::read(target.join("sequence.json")).unwrap(), b"previous");
+    assert!(marker.exists());
+    fs::write(&raw, b"acb").unwrap();
+    publish(&config, source.path(), &files, true).await.unwrap();
+    assert_eq!(
+        fs::read(target.join("unsupported.json")).unwrap(),
+        b"diagnostic"
+    );
+    assert!(!target.join("sequence.json").exists());
+}

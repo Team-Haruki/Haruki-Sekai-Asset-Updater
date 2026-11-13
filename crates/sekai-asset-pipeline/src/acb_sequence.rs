@@ -3,6 +3,7 @@
 //! publish a descriptor that silently plays a different score.
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Seek, Write};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use cridecoder::acb::{AfsArchive, UtfTable, Value};
@@ -117,7 +118,10 @@ fn indices(data: &[u8]) -> Result<Vec<usize>> {
         .collect())
 }
 
-fn commands(mut data: &[u8], mut visit: impl FnMut(u16, &[u8]) -> Result<()>) -> Result<()> {
+fn commands(
+    mut data: &[u8],
+    mut visit: impl FnMut(u16, &[u8]) -> Result<ControlFlow<()>>,
+) -> Result<()> {
     while !data.is_empty() {
         if data.len() < 3 {
             return Err(invalid("truncated command header"));
@@ -127,7 +131,9 @@ fn commands(mut data: &[u8], mut visit: impl FnMut(u16, &[u8]) -> Result<()>) ->
         let payload = data
             .get(3..3 + len)
             .ok_or_else(|| invalid("truncated command payload"))?;
-        visit(kind, payload)?;
+        if visit(kind, payload)?.is_break() {
+            break;
+        }
         data = &data[3 + len..];
     }
     Ok(())
@@ -138,6 +144,9 @@ fn track_events(data: &[u8]) -> Result<(Vec<(u64, usize)>, u64)> {
     let mut events = Vec::new();
     commands(data, |kind, payload| {
         match (kind, payload) {
+            // Command zero terminates the track, as in cridecoder's flat extraction:
+            // anything after it is padding and must not become a note.
+            (0, []) => return Ok(ControlFlow::Break(())),
             (2000, [0, 2, a, b]) => {
                 events.push((elapsed, usize::from(u16::from_be_bytes([*a, *b]))))
             }
@@ -151,13 +160,13 @@ fn track_events(data: &[u8]) -> Result<(Vec<(u64, usize)>, u64)> {
                     .checked_add(u64::from(u16::from_be_bytes([*a, *b])))
                     .ok_or_else(|| invalid("track time overflow"))?
             }
-            (0 | 4050, []) => {}
+            (4050, []) => {}
             (0 | 2000 | 2001 | 2005 | 4050, _) => {
                 return Err(invalid(format!("malformed track command {kind:#x}")))
             }
             _ => return Err(unsupported(format!("track command {kind:#x}"))),
         }
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     })?;
     Ok((events, elapsed))
 }
@@ -174,7 +183,7 @@ fn synth_gain(data: &[u8]) -> Result<f64> {
         if !gain.is_finite() {
             return Err(invalid("non-finite synth gain"));
         }
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     })?;
     Ok(gain)
 }
@@ -373,11 +382,12 @@ fn retire_ordinary_cues(root: &UtfTable, output: &Path) -> Result<Vec<PathBuf>> 
 
 fn cue_references(root: &UtfTable) -> Result<Vec<(String, usize)>> {
     let cues = nested(root, "CueTable")?;
-    if !cues
+    let block_cues = cues
         .rows
         .iter()
-        .any(|r| r.get("ReferenceType").and_then(Value::as_int) == Some(8))
-    {
+        .filter(|r| r.get("ReferenceType").and_then(Value::as_int) == Some(8))
+        .count();
+    if block_cues == 0 {
         return Ok(Vec::new());
     }
     let names = nested(root, "CueNameTable")?;
@@ -400,6 +410,11 @@ fn cue_references(root: &UtfTable) -> Result<Vec<(String, usize)>> {
         {
             return Err(invalid("duplicate block cue name"));
         }
+    }
+    // An unnamed block cue has no sidecar directory and would be silently dropped,
+    // after which ACB cleanup loses its structure. Fail the bundle instead.
+    if references.len() != block_cues {
+        return Err(invalid("block cue without a unique CueNameTable entry"));
     }
     Ok(references.into_iter().collect())
 }
