@@ -367,8 +367,11 @@ impl Tables {
                 for aisac in indices(optional_bytes(&self.tracks, track, "LocalAisacs")?)? {
                     let (value, control) = self.aisac_gain(aisac)?;
                     gain *= value;
-                    if !controls.contains(&control) {
-                        controls.push(control);
+                    match controls.iter().find(|c| c.control == control.control) {
+                        None => controls.push(control),
+                        Some(seen) if seen.value == control.value => {}
+                        // One control cannot be at two defaults when the scenario sets it.
+                        Some(_) => return Err(unsupported("AISAC control with two defaults")),
                     }
                 }
                 let command = number(&self.tracks, track, "CommandIndex")?;
@@ -422,11 +425,19 @@ impl Tables {
             if points.len() != levels.len() || points.is_empty() {
                 return Err(invalid("AISAC graph points"));
             }
-            let point = points
+            // A step (two points at the default) would depend on which side CRI takes.
+            let mut at_default = points
                 .iter()
-                .position(|p| *p == value)
+                .zip(&levels)
+                .filter(|(p, _)| **p == value)
+                .map(|(_, level)| *level);
+            let level = at_default
+                .next()
                 .ok_or_else(|| unsupported("AISAC default between graph points"))?;
-            gain *= levels[point] as f64 / AISAC_FULL_SCALE;
+            if at_default.any(|other| other != level) {
+                return Err(unsupported("AISAC step at its default control"));
+            }
+            gain *= level as f64 / AISAC_FULL_SCALE;
         }
         let id = number(table, aisac, "ControlId")?;
         let control = self
@@ -440,6 +451,11 @@ impl Tables {
                 })
             })
             .map_or_else(|| id.to_string(), str::to_string);
+        // Record the authored f32 as its shortest decimal (0.1, not 0.10000000149011612),
+        // so a player can compare it with the scenario's value.
+        let value = format!("{}", value as f32)
+            .parse()
+            .map_err(|_| invalid("AISAC default control"))?;
         Ok((gain, AisacControl { control, value }))
     }
 
