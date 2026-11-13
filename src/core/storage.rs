@@ -150,11 +150,154 @@ pub async fn upload_to_all_storages(
     let public_read_matcher =
         PublicReadMatcher::new(options.public_read_include, options.public_read_exclude)?;
 
-    let concurrency = options.concurrency.max(1);
+    // Barrier across every target: never expose a descriptor while any dependency
+    // is still uploading. A failed phase preserves retry inputs and old markers.
+    // Diagnostics reference payloads (unsupported.json names the raw ACB), so they get
+    // their own phase too: a failed payload upload must not publish a dangling marker.
+    let (descriptors, payloads): (Vec<_>, Vec<_>) = files
+        .iter()
+        .cloned()
+        .partition(|p| block_sidecar(p, "sequence.json"));
+    let (markers, payloads): (Vec<_>, Vec<_>) = payloads
+        .into_iter()
+        .partition(|p| block_sidecar(p, "retired.json") || block_sidecar(p, "unsupported.json"));
+    for batch in [&payloads, &markers] {
+        upload_file_batch(
+            &targets,
+            extracted_save_path,
+            batch,
+            &public_read_matcher,
+            options.concurrency,
+            options.retry,
+        )
+        .await?;
+    }
+    for marker in &markers {
+        delete_block_files(
+            &targets,
+            extracted_save_path,
+            marker,
+            &["sequence.json"],
+            options.retry,
+        )
+        .await?;
+        if block_sidecar(marker, "retired.json") {
+            delete_block_files(
+                &targets,
+                extracted_save_path,
+                marker,
+                &["unsupported.json"],
+                options.retry,
+            )
+            .await?;
+        } else {
+            delete_block_files(
+                &targets,
+                extracted_save_path,
+                marker,
+                &["retired.json"],
+                options.retry,
+            )
+            .await?;
+        }
+    }
+    // A full-directory scan may include an old descriptor alongside a diagnostic.
+    let descriptors: Vec<_> = descriptors
+        .into_iter()
+        .filter(|p| {
+            let dir = p.parent().expect("sidecar has parent");
+            !dir.join("unsupported.json").exists() && !dir.join("retired.json").exists()
+        })
+        .collect();
+    upload_file_batch(
+        &targets,
+        extracted_save_path,
+        &descriptors,
+        &public_read_matcher,
+        options.concurrency,
+        options.retry,
+    )
+    .await?;
+    for descriptor in &descriptors {
+        delete_block_files(
+            &targets,
+            extracted_save_path,
+            descriptor,
+            &["unsupported.json", "retired.json"],
+            options.retry,
+        )
+        .await?;
+    }
+    if options.remove_local {
+        for file in files {
+            tokio::fs::remove_file(file)
+                .await
+                .map_err(|source| StorageError::Io {
+                    path: file.clone(),
+                    source,
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn block_sidecar(path: &Path, filename: &str) -> bool {
+    path.file_name().is_some_and(|name| name == filename)
+        && path
+            .parent()
+            .and_then(Path::extension)
+            .is_some_and(|ext| ext == "sequence")
+}
+
+async fn delete_block_files(
+    targets: &[StorageOperatorTarget],
+    root: &Path,
+    sidecar: &Path,
+    filenames: &[&str],
+    retry: &RetryConfig,
+) -> Result<(), StorageError> {
+    for filename in filenames {
+        let path = sidecar.with_file_name(filename);
+        let key = construct_remote_path(root, &path)?;
+        for target in targets {
+            retry_async(
+                retry,
+                "retire block sidecar",
+                |_| async {
+                    target
+                        .operator
+                        .delete(&key)
+                        .await
+                        .map_err(|source| StorageError::Upload {
+                            provider: target.provider.clone(),
+                            path: path.clone(),
+                            source,
+                        })
+                },
+                is_retryable_storage_error,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn upload_file_batch(
+    targets: &[StorageOperatorTarget],
+    extracted_save_path: &Path,
+    files: &[PathBuf],
+    public_read_matcher: &PublicReadMatcher,
+    concurrency: usize,
+    retry: &RetryConfig,
+) -> Result<(), StorageError> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let concurrency = concurrency.max(1);
     let semaphore = global_upload_semaphore(concurrency);
     let mut tasks = JoinSet::new();
     let extracted_save_path = Arc::new(extracted_save_path.to_path_buf());
-    let retry = Arc::new(options.retry.clone());
+    let retry = Arc::new(retry.clone());
     let mut target_index = 0usize;
     let mut file_index = 0usize;
     let mut next_upload = || -> Result<_, StorageError> {
@@ -205,17 +348,6 @@ pub async fn upload_to_all_storages(
         result??;
         if let Some(upload) = next_upload()? {
             spawn_upload(&mut tasks, upload);
-        }
-    }
-
-    if options.remove_local {
-        for file in files {
-            tokio::fs::remove_file(file)
-                .await
-                .map_err(|source| StorageError::Io {
-                    path: file.clone(),
-                    source,
-                })?;
         }
     }
 
@@ -1481,3 +1613,7 @@ mod tests {
         assert_eq!(content, b"hello seaweedfs");
     }
 }
+
+#[cfg(test)]
+#[path = "storage_block_tests.rs"]
+mod block_tests;

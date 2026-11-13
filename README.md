@@ -23,6 +23,56 @@
   library directly. FFmpeg/rsmpeg FFI handles media;
   FFmpeg CLI remains available as a fallback where FFI is unavailable.
 
+## CRI block-sequence audio
+
+When ACB and HCA decoding are enabled, block-sequence cues (`ReferenceType=8`)
+also produce `<cue>.sequence/sequence.json` and content-addressed audio beside
+ordinary audio outputs. The descriptor preserves block order, finite/infinite
+loops, end/division/immediate transition timing, note offsets, synth gain and the
+verified `IM_001` / `IM_002` one-voice groups. Flat MP3/FLAC/WAV exports remain
+available; consumers must read the descriptor to reproduce interactive music.
+Sidecars use MP3 when MP3 is among the configured audio formats, through the
+existing media backend and bitrate; otherwise they use lossless WAV. Descriptor
+durations and sample counts always refer to the original decoded PCM, so codec
+frame padding must not change block timing.
+
+The Rust pipeline reads the original ACB before cleanup. It supports embedded
+HCA waveforms and the verified sequential block/track commands. Unsupported
+controls or external AWB references in a block cue retain the original ACB as
+`source-<hash>.acb.raw` with an `unsupported.json` diagnostic, and continue the
+legacy audio export. No playable descriptor is advertised for those cues. A
+malformed cue or failed write still fails the bundle. New waveform filenames include their content
+hash, and `sequence.json` is written atomically after all its waveforms. These
+files participate in the normal generated-artifact/upload list for both file and
+in-memory exports.
+
+A CDN consumer should publish waveforms before descriptors and update its discovery
+index last, and must honor `unsupported.json` or `retired.json` over any older
+descriptor for the same cue. A previously exported block cue that becomes an ordinary
+cue gets a `retired.json` tombstone; discovery indexes must remove that cue so players
+can fall back to ordinary audio. Retirement is scoped to named cues in the current
+ACB and existing sidecar directories, never unrelated sibling exports.
+
+The native storage uploader waits for dependencies on all targets before uploading
+playable descriptors. Diagnostics invalidate remote descriptors; successful playable
+exports clear obsolete remote diagnostics only after descriptor upload. Providers
+therefore need delete permission for the descriptor and diagnostic keys in
+`*.sequence/`. Failed uploads or cleanup retain local files for retry, including when
+`remove_local_after_upload` is enabled. This repository does not embed a particular player's CDN paths or
+credentials. Previously recorded, unchanged bundles need a controlled re-export
+after upgrading; do not clear the entire download ledger to backfill a few cues.
+
+For lossless inspection of an original ACB kept outside the repository (the example
+uses WAV by default, or MP3 with `--mp3`; update jobs honor the configured format):
+
+```sh
+cargo run -p sekai-asset-pipeline --example export_acb_blocks -- input.acb output/ --mp3
+```
+
+Local block-sequence artifacts retain private file permissions (owner read/write
+on Unix). The exporting account can upload them; deployments serving files under
+a different account must grant access through their own publication policy.
+
 ## Layout
 
 - `crates/sekai-asset-pipeline/`: reusable, transport-neutral single-bundle pipeline

@@ -511,7 +511,7 @@ pub(super) fn extract_acb_tracks_from_memory_source(
 }
 
 pub(super) fn extract_acb_tracks_from_reader<R>(
-    acb_reader: R,
+    mut acb_reader: R,
     source_hint: &Path,
     source_file: Option<PathBuf>,
     options: &AcbPostProcessOptions<'_>,
@@ -529,6 +529,46 @@ where
         ..AcbTrackExtractionOutput::default()
     };
 
+    if options.region.export.hca.decode {
+        let phase_started = Instant::now();
+        let _permit = super::super::limits::acquire_cpu_budget_permit_blocking(options.cpu_budget)?;
+        let encoding = options
+            .region
+            .export
+            .audio
+            .formats
+            .contains(&crate::AudioFormat::Mp3)
+            .then_some(crate::acb_sequence::Mp3Encoding {
+                ffmpeg_path: options.ffmpeg_path,
+                backend: options.media_backend,
+                retry: options.retry,
+            });
+        let files = match crate::acb_sequence::export_acb_block_sequences_with_audio(
+            &mut acb_reader,
+            source_hint,
+            &output.output_dir,
+            encoding.as_ref(),
+        ) {
+            Ok(files) => files,
+            Err(ExportPipelineError::UnsupportedAcbSequence { message }) => {
+                tracing::warn!(path = %source_hint.display(), reason = %message,
+                    "block-cue descriptor unavailable; preserving original ACB and legacy audio");
+                crate::acb_sequence::preserve_unsupported_acb(
+                    &mut acb_reader,
+                    source_hint,
+                    &output.output_dir,
+                    &message,
+                )?
+            }
+            Err(error) => return Err(error),
+        };
+        output.generated_files.extend(files);
+        add_elapsed_phase_ms(
+            &mut output.phase_ms,
+            "post_process.acb.block_sequences",
+            phase_started,
+        );
+    }
     let hca_tracks = extract_and_filter_acb_tracks(acb_reader, source_hint, &mut output.phase_ms)?;
 
     if !options.region.export.hca.decode {

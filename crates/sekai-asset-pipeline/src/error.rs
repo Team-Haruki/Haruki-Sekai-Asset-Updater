@@ -24,6 +24,8 @@ pub enum CodecError {
 
 #[derive(Debug, Error)]
 pub enum ExportPipelineError {
+    #[error("unsupported ACB block sequence: {message}")]
+    UnsupportedAcbSequence { message: String },
     #[error(transparent)]
     Contract(#[from] PipelineError),
     #[error(transparent)]
