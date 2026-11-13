@@ -29,9 +29,20 @@ When ACB and HCA decoding are enabled, block-sequence cues (`ReferenceType=8`)
 also produce `<cue>.sequence/sequence.json` and content-addressed audio beside
 ordinary audio outputs. The descriptor preserves block order, finite/infinite
 loops, end/division/immediate transition timing, note offsets, synth gain and the
-verified `IM_001` / `IM_002` one-voice groups. Sequence-level layer volumes are folded into
-each note's gain; a 0% layer keeps its notes at gain 0, as they still take their
-voice-limit slot. AISAC-controlled layers are reported as unsupported. Flat MP3/FLAC/WAV exports remain
+one-voice groups `IM_001`–`IM_008` (all capped at one voice in the game ACF).
+Sequence-level layer volumes are folded into each note's gain; a 0% layer keeps its
+notes at gain 0, as they still take their voice-limit slot. Optional fields appear only
+when a cue uses them, so other descriptors stay unchanged:
+
+- `blocks[].transitionMode: 1` — a beat transition out of this block (transition 1)
+  that crosses beat boundary *k* enters the destination at its own beat *k* when the
+  destination is also beat-synchronised with more than *k* divisions; notes already
+  sounding there continue from that point. Otherwise the destination starts at 0.
+- `blocks[].next` — a jump block: when it ends, playback continues at this block index
+  instead of the following one. Blocks with several run-time destinations are unsupported.
+- `aisac: [{ "control", "value" }]` — layer AISAC volumes were evaluated at these default
+  control values (the only ones the JP scenarios set); a player must not reuse the
+  gains after a scenario sets a different value. Flat MP3/FLAC/WAV exports remain
 available; consumers must read the descriptor to reproduce interactive music.
 Sidecars use MP3 when MP3 is among the configured audio formats, through the
 existing media backend and bitrate; otherwise they use lossless WAV. Descriptor
